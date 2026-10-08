@@ -79,6 +79,18 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route(
+            "/clipboard.js",
+            get(|| async {
+                page_headers(
+                    (
+                        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                        include_str!("../web/clipboard.js"),
+                    )
+                        .into_response(),
+                )
+            }),
+        )
+        .route(
             "/files.js",
             get(|| async {
                 page_headers(
@@ -229,6 +241,7 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
     let mut rate_window = Instant::now();
     let mut last_sequence = sequence;
     let files = Arc::new(Mutex::new(FileSession::new(state.files.clone())));
+    let mut images = crate::clipboard_image::Images::default();
     loop {
         tokio::select! {
             incoming = socket.recv() => {
@@ -244,6 +257,21 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
                             ClientMessage::Disconnect => break,
 
                             ClientMessage::Hello { .. } => bail!("重复认证消息"),
+                            ClientMessage::PasteImageChunk { id, offset, total, data } => {
+                                let result = async {
+                                    let complete = images.chunk(id, offset, total, &data)?;
+                                    if let Some(png) = complete {
+                                        let png = tokio::task::spawn_blocking(move || crate::clipboard_image::validate_png(png)).await??;
+                                        state.native.paste_image(png).await?;
+                                        Ok::<_, anyhow::Error>(serde_json::json!({"type":"image_pasted","id":id}))
+                                    } else {
+                                        Ok(serde_json::json!({"type":"image_progress","id":id}))
+                                    }
+                                }.await;
+                                let response = result.unwrap_or_else(|error| serde_json::json!({"type":"image_error","id":id,"message":format!("{error:#}")}));
+                                send_json(socket, response).await?;
+                            }
+                            ClientMessage::PasteImageCancel { id } => images.cancel(id),
                             ClientMessage::ReadClipboard { id } => {
                                 let response = match state.native.read_clipboard().await {
                                     Ok(text) => serde_json::json!({"type":"clipboard_text","id":id,"text":text}),
@@ -290,6 +318,7 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
                 }
             }
             _ = tick.tick() => {
+                images.expire();
                 ensure!(heartbeat.elapsed()<Duration::from_secs(15),"连接超时，本机画面已恢复");
                 ensure!(!state.native.shared.shutdown.load(Ordering::Acquire),"Mac 已停止服务");
                 ensure!(!state.native.shared.cancel.load(Ordering::Acquire),"显示器发生变化，连接已关闭");
@@ -368,6 +397,7 @@ mod tests {
             serde_json::json!({"type":"list_directory","id":1,"path":""}),
             serde_json::json!({"type":"upload_start","id":1,"path":"","name":"test","size":0}),
             serde_json::json!({"type":"read_clipboard","id":1}),
+            serde_json::json!({"type":"paste_image_chunk","id":1,"offset":0,"total":1,"data":"AA=="}),
         ] {
             let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
                 .await

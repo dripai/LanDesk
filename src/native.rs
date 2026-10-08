@@ -13,12 +13,12 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEventMask,
-    NSFont, NSPasteboard, NSPasteboardTypeString, NSScreen, NSTextField, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSFont, NSPasteboard, NSPasteboardItem, NSPasteboardTypePNG, NSPasteboardTypeString, NSScreen,
+    NSTextField, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSDate, NSDefaultRunLoopMode, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
-    NSSize, NSString,
+    NSArray, NSData, NSDate, NSDefaultRunLoopMode, NSNotification, NSObject, NSObjectProtocol,
+    NSPoint, NSRect, NSSize, NSString,
 };
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -106,6 +106,10 @@ define_class!(
 );
 
 pub enum Command {
+    PasteImage {
+        png: Vec<u8>,
+        reply: oneshot::Sender<Result<()>>,
+    },
     ReadClipboard {
         reply: oneshot::Sender<Result<String>>,
     },
@@ -130,6 +134,11 @@ pub struct Native {
 }
 
 impl Native {
+    pub async fn paste_image(&self, png: Vec<u8>) -> Result<()> {
+        let (reply, result) = oneshot::channel();
+        self.tx.send(Command::PasteImage { png, reply })?;
+        tokio::time::timeout(std::time::Duration::from_secs(3), result).await??
+    }
     pub async fn read_clipboard(&self) -> Result<String> {
         let (reply, result) = oneshot::channel();
         self.tx.send(Command::ReadClipboard { reply })?;
@@ -338,6 +347,27 @@ pub fn run(
             }
             while let Ok(command) = rx.try_recv() {
                 match command {
+                    Command::PasteImage { png, reply } => {
+                        let result = (|| {
+                            let input = input
+                                .as_mut()
+                                .ok_or_else(|| anyhow::anyhow!("键鼠控制尚未启动"))?;
+                            let item = NSPasteboardItem::new();
+                            ensure!(
+                                item.setData_forType(&NSData::with_bytes(&png), unsafe {
+                                    NSPasteboardTypePNG
+                                }),
+                                "无法准备剪贴板图片"
+                            );
+                            let objects = NSArray::from_slice(&[ProtocolObject::from_ref(&*item)]);
+                            let pasteboard = NSPasteboard::generalPasteboard();
+                            pasteboard.clearContents();
+                            ensure!(pasteboard.writeObjects(&objects), "无法写入 Mac 图片剪贴板");
+                            input.paste()?;
+                            Ok(())
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Command::ReadClipboard { reply } => {
                         let result = (|| {
                             let text = NSPasteboard::generalPasteboard()

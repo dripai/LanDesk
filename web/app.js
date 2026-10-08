@@ -1,6 +1,7 @@
 'use strict';
 import {createKeyboard} from './keyboard.js';
 import {createFiles} from './files.js';
+import {createImagePaste} from './clipboard.js';
 const $ = id => document.getElementById(id);
 $('code').addEventListener('input', () => {
   const input = $('code');
@@ -15,7 +16,11 @@ function notify(message) {
   $('notice').textContent = message; $('notice').hidden = false;
   clearTimeout(notify.timer); notify.timer = setTimeout(() => { $('notice').hidden = true; }, 5000);
 }
-const keyboard = createKeyboard($('keyboard-input'), send, notify);
+const imagePaste = createImagePaste(value => {
+  if (socket?.readyState !== WebSocket.OPEN) throw new Error('连接已断开');
+  send(value);
+}, notify);
+const keyboard = createKeyboard($('keyboard-input'), send, notify, imagePaste.paste);
 const files = createFiles($('files-panel'), value => {
   if (socket?.readyState !== WebSocket.OPEN) throw new Error('连接已断开');
   send(value);
@@ -29,11 +34,23 @@ $('files-button').addEventListener('click', () => files.toggle());
 $('clipboard-paste').addEventListener('click', async () => {
   const connection = socket;
   try {
-    const text = await navigator.clipboard.readText();
+    const items = await navigator.clipboard.read();
     if (!connection || socket !== connection) throw new Error('连接已断开');
-    if (!text) throw new Error('剪贴板没有文字；不支持图片或文件');
-    keyboard.text(text); keyboard.focus();
-  } catch (error) { notify(`无法粘贴文字：${error.message}`); }
+    const images = items.filter(item => item.types.some(type => type.startsWith('image/')));
+    if (images.length) {
+      if (images.length !== 1) throw new Error('每次请粘贴一张图片');
+      const type = images[0].types.includes('image/png') ? 'image/png' : images[0].types.find(type => type.startsWith('image/'));
+      const blob = await images[0].getType(type);
+      if (socket !== connection) throw new Error('连接已断开');
+      keyboard.releaseAll(); keyboard.focus(); await imagePaste.paste(blob);
+    } else {
+      const item = items.find(item => item.types.includes('text/plain'));
+      if (!item) throw new Error('剪贴板没有文字或图片；文件请通过右侧面板上传');
+      const text = await (await item.getType('text/plain')).text();
+      if (socket !== connection) throw new Error('连接已断开');
+      keyboard.text(text); keyboard.focus();
+    }
+  } catch (error) { notify(`无法粘贴：${error.message}`); }
 });
 $('clipboard-copy').addEventListener('click', () => {
   if (clipboardRequest) return;
@@ -98,7 +115,7 @@ function releaseAll() { keyboard.releaseAll(); }
 function end(message) {
   clearInterval(heartbeat); heartbeat=null;
   if(socket) { const old=socket; socket=null; old.onclose=null; old.onerror=null; old.close(); }
-  keyboard.clear(); files.reset();
+  keyboard.clear(); files.reset(); imagePaste.reset();
   if (clipboardRequest) clearTimeout(clipboardRequest.timer);
   clipboardRequest = null; $('clipboard-copy').disabled = false;
   $('notice').hidden = true;
@@ -123,6 +140,7 @@ $('connect-form').addEventListener('submit', event => {
       $('screen').src=next; return;
     }
     const message=JSON.parse(event.data);
+    if(imagePaste.handle(message)) return;
     if(files.handle(message)) return;
     if(message.type === 'clipboard_text' || message.type === 'clipboard_error') {
       if(clipboardRequest?.id !== message.id) return;

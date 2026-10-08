@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createKeyboard} from './keyboard.js';
 
-function fixture() {
+function fixture(pasteImage = () => {}) {
   const field = new EventTarget(); field.value = ''; field.style = {};
   field.focus = () => field.dispatchEvent(new Event('focus'));
   const messages = [], notices = [];
-  const keyboard = createKeyboard(field, value => messages.push(value), value => notices.push(value));
+  const keyboard = createKeyboard(field, value => messages.push(value), value => notices.push(value), pasteImage);
   const event = (name, fields = {}) => {
     const event = new Event(name, {cancelable:true});
     Object.assign(event, {getModifierState:() => false, ...fields});
@@ -25,6 +25,17 @@ test('half-width and full-width punctuation uses text rather than layout-depende
   }
   assert.deepEqual(f.messages, [',','，','。','!','开发中文'].map(text => ({type:'text',text})));
   assert.equal(f.field.value, '');
+});
+
+test('image paste takes precedence over text and releases remote modifiers', () => {
+  const images = [], image = new Blob(['png'], {type:'image/png'});
+  const f = fixture(value => images.push(value));
+  f.event('keydown', {key:'Control',code:'ControlLeft',ctrlKey:true});
+  const event = f.event('paste', {clipboardData:{items:[{kind:'file',type:'image/png',getAsFile:()=>image}],getData:()=>'image URL'}});
+  assert.equal(event.defaultPrevented,true);
+  assert.deepEqual(images,[image]);
+  assert.equal(f.messages.at(-1).type,'release_all');
+  assert.equal(f.messages.some(value=>value.type==='text'),false);
 });
 
 test('IME commits once, ignores intermediate input and discards cancellation', () => {
@@ -53,7 +64,7 @@ test('shortcuts are key pairs, Ctrl+V uses only plain clipboard text', () => {
   assert.equal(f.messages.some(m => m.key === 'v'), false);
   assert.deepEqual(f.messages.filter(m => m.key === 'c'), [{type:'key',key:'c',down:true},{type:'key',key:'c',down:false}]);
   f.event('paste', {clipboardData:{getData() { return ''; }}});
-  assert.match(f.notices.at(-1), /不支持粘贴图片/);
+  assert.match(f.notices.at(-1), /文件请通过右侧面板/);
 });
 
 test('focus loss releases held keys and prevents stray text commits', () => {

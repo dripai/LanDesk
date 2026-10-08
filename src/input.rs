@@ -48,6 +48,15 @@ fn map_key(key: &str) -> Result<Key> {
 }
 
 impl Input {
+    pub fn paste(&mut self) -> Result<()> {
+        self.release_all()?;
+        self.enigo.key(Key::Meta, Direction::Press)?;
+        let paste = self.enigo.key(Key::Unicode('v'), Direction::Click);
+        let release = self.enigo.key(Key::Meta, Direction::Release);
+        paste?;
+        release?;
+        Ok(())
+    }
     pub fn new(width: i32, height: i32) -> Result<Self> {
         ensure!(
             objc2::MainThreadMarker::new().is_some(),

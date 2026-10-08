@@ -1,7 +1,7 @@
 const MAX_TEXT_BYTES = 65536;
 const special = new Set(['Control','Meta','Alt','Shift','Enter','Escape','Tab','Backspace','Delete','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown','F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12']);
 
-export function createKeyboard(input, send, notify) {
+export function createKeyboard(input, send, notify, pasteImage) {
   const held = new Map();
   let composing = false, focused = false;
   function clear() { held.clear(); composing = false; input.value = ''; }
@@ -27,8 +27,14 @@ export function createKeyboard(input, send, notify) {
   input.addEventListener('input', event => { if (!composing && !event.isComposing) commit(); });
   input.addEventListener('paste', event => {
     event.preventDefault();
+    const images = [...(event.clipboardData.items || [])].filter(item => item.kind === 'file' && item.type.startsWith('image/'));
+    if (images.length) {
+      input.value = ''; releaseAll();
+      if (images.length !== 1) { notify('每次请粘贴一张图片'); return; }
+      pasteImage(images[0].getAsFile()); return;
+    }
     const value = event.clipboardData.getData('text/plain');
-    if (value) text(value); else notify('剪贴板没有文字；不支持粘贴图片或文件');
+    if (value) text(value); else notify('剪贴板没有文字或图片；文件请通过右侧面板上传');
     input.value = '';
   });
   input.addEventListener('keydown', event => {

@@ -46,6 +46,15 @@ pub enum ClientMessage {
     ReadClipboard {
         id: u32,
     },
+    PasteImageChunk {
+        id: u32,
+        offset: usize,
+        total: usize,
+        data: String,
+    },
+    PasteImageCancel {
+        id: u32,
+    },
     SetResolution {
         width: Option<u32>,
     },

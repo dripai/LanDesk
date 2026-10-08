@@ -2,6 +2,7 @@
 compile_error!("LanDesk 服务端目前仅支持 macOS，Windows 请使用浏览器连接。");
 
 mod capture;
+mod clipboard_image;
 mod files;
 mod formatter;
 mod input;

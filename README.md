@@ -5,13 +5,13 @@ Mac 运行 Rust 远控服务，Windows 通过 SSH 加密隧道和浏览器操作
 ## 使用
 
 1. Mac 打开 `LanDesk.app`，在系统设置中授予屏幕录制和辅助功能权限，然后重新打开应用。若系统另行请求远程桌面权限，需要允许。启动不会自动申请权限。
-2. Mac 系统设置中开启“远程登录”。Windows 在 LanDeskClient 填写 Mac 地址、用户名、SSH 端口和密码，首次连接核对主机指纹。
+2. Mac 系统设置中开启“远程登录”。Windows 在 LanDeskClient 填写 Mac 地址、用户名、SSH 端口和密码，首次连接自动记录主机密钥，之后密钥变化会拒绝连接。
 3. 浏览器打开 `http://127.0.0.1:17890`，输入 Mac 窗口显示的六位连接码。可在 Mac 保存固定码，或选择每次启动生成随机码；连接期间不可改码。
 4. 点击远程画面操作键鼠。Windows Ctrl 映射为 Mac Command；普通文字、中文和全角标点通过本地输入法提交。
 5. 工具条可拖动、收起，提供文字输入、文字复制和粘贴、文件面板、采集分辨率、全屏和断开。浏览器地址栏通过全屏隐藏。
 6. 右侧文件面板上半部显示当前目录的子目录，下半部显示文件。点击目录或路径导航切换；拖动画面与面板之间的分隔条调整宽度，也可聚焦分隔条后用左右方向键调整。右侧空白足够时自动显示，工具条按钮可手动展开和收起。
 7. 拖普通文件到下半部或点“上传”，文件写入当前目录。同名拒绝覆盖；不支持整目录上传、删除或下载。
-8. Ctrl+V 或粘贴按钮将 Windows 的纯文字输入 Mac 当前焦点。先在远程 Mac 复制文字，再点击“复制 Mac 文字”取回 Windows 剪贴板。不自动同步，不支持图片或文件剪贴板。
+8. Ctrl+V 或粘贴按钮将 Windows 的文字或单张图片粘贴到 Mac 当前焦点。图片分块传输，写入 Mac 系统剪贴板后发送 Command+V，目标应用需支持图片粘贴；浏览器提供的非 PNG 图片会先转换为 PNG。Mac 到 Windows 仍只支持文字：先在远程 Mac 复制，再点击“复制 Mac 文字”。不自动同步，不支持文件剪贴板。
 9. 分辨率可选原始像素、宽 1280/1920/2560 或自定义宽度（640 到屏幕原始宽度）。高度按比例计算，每次重连恢复原始像素；不会改变 Mac 系统分辨率，也不会拉伸画面。
 10. Mac 最小化或隐藏窗口不停止服务，关闭主窗口才退出。Windows 客户端默认关闭或最小化后留在托盘；右键托盘可断开或退出。
 
@@ -29,10 +29,10 @@ macOS 提供 `pmset displaysleepnow`，用于立即关闭显示器而非让整�
 - ScreenCaptureKit 按 Retina 实际像素采集，JPEG 质量 92，目标 15 帧/秒，最多 1600 万像素。帧率和带宽取决于分辨率、设备和网络，慢连接只保留最新画面。
 - 只监听 `127.0.0.1:17890`；SSH 加密远程链路，浏览器额外校验来源与六位连接码，每分钟最多五次失败认证。心跳丢失最长 15 秒结束会话。
 - 文件范围限当前 Mac 用户目录。通过目录句柄与 `O_NOFOLLOW` 防止路径及符号链接穿越；单文件最多 512 MiB，64 KiB 分块，完成并保存后用 `RENAME_EXCL` 原子发布。同名竞态也不覆盖，中断清理临时文件。每个目录最多 5000 条目，不支持非 UTF-8 文件名。上传权限 0600，不保留 Windows 元数据和可执行位。系统受保护目录可能另需文件访问授权。
-- 纯文字单次最多 64 KiB UTF-8，不含空字符。浏览器剪贴板拒绝授权时显示错误；Ctrl+V 可使用浏览器原生粘贴事件。
+- 纯文字单次最多 64 KiB UTF-8，不含空字符。剪贴板图片最多 10 MiB PNG、1600 万像素、边长 8192；Mac 完整解码校验后才修改剪贴板。图片只在内存中传输，30 秒无后续分块丢弃，断开清理；图片分块与文件上传分别处理。浏览器剪贴板拒绝授权时显示错误；Ctrl+V 可使用浏览器原生粘贴事件。
 - Mac 设置在 `~/Library/Application Support/LanDesk/settings.json`。固定码明文保存在当前用户可读写的 0600 文件，随机模式不保存生成的码。原子保存，损坏设置明确报错。
-- Windows 客户端使用 SSH 密码认证，密码不写入配置。首次主机密钥需核对确认，变化时拒绝。其他限制及配置路径见 [客户端说明](client/README.md)。
-- 尚未提供图片剪贴板、音频、驱动级隐私屏、合盖远控或系统登录界面控制保证。
+- Windows 客户端使用 SSH 密码认证。可勾选“记住密码”，密码存入 Windows 凭据管理器，不写入配置文件；取消勾选并保存或连接后删除。首次自动记录主机密钥，变化时拒绝；首次使用信任无法验证第一次连接的主机身份。其他限制及配置路径见 [客户端说明](client/README.md)。
+- 尚未提供 Mac 到 Windows 的图片复制、音频、驱动级隐私屏、合盖远控或系统登录界面控制保证。
 
 ## 构建与验证
 
@@ -49,9 +49,9 @@ python3 scripts/bundle.py
 
 应用输出在 Cargo target 目录的 `release/bundle/macos/LanDesk.app`。`build.rs` 从 `xcrun` 获取实际 Swift 链接路径以支持 Command Line Tools。开发包使用临时签名，更新后可能需要重新授权；只重新添加 LanDesk，不重置其他应用权限。
 
-Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行。本轮客户端源码已通过 Windows 格式检查、5 项连接测试、完整客户端 Clippy 检查及 Release 编译：[构建记录与下载包](https://github.com/dripai/LanDesk/actions/runs/37808563245)。下载 `LanDeskClient-windows-x64` 后解压运行 `LanDeskClient.exe`。Windows 托盘、GPU 渲染及连接实际 Mac 的验收仍需 Windows 实机，不能将构建成功等同于这些功能已验证。
+Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行。本轮客户端源码已通过 Windows 格式检查、6 项测试（含 Windows 凭据管理器）、完整客户端 Clippy 检查及 Release 编译：[构建记录与下载包](https://github.com/dripai/LanDesk/actions/runs/37816709624)。下载 `LanDeskClient-windows-x64` 后解压运行 `LanDeskClient.exe`。Windows 托盘、GPU 渲染及连接实际 Mac 的验收仍需 Windows 实机，不能将构建成功等同于这些功能已验证。
 
-已完成的源码验证：30 项 Mac Rust 测试、6 项网页键盘和宽度边界测试、5 项客户端测试。客户端测试包括配置原子保存、损坏配置报错、首次主机密钥信任、密钥变化拒绝、真实本地 SSH 加密通道 64 KiB 往返及取消后释放端口。
+已完成的源码验证：33 项 Mac Rust 测试、10 项网页测试、5 项跨平台客户端测试；Windows 额外的凭据保存、账户绑定、删除和配置保存失败后的回滚测试已通过。客户端测试包括配置原子保存、损坏配置报错、首次自动记录主机密钥、密钥变化拒绝、真实本地 SSH 加密通道 64 KiB 往返及取消后释放端口。
 
 独立网页模拟会话已通过实际鼠标拖拽（面板 280 → 432 像素）、方向键调宽、子目录及路径导航验证。新版在恢复权限并重启后，也已完成真实本机连接、画面采集、用户目录加载及面板方向键调宽验证；Mac 主窗口最小化后重新连接成功，画面及文件服务保持正常。电源断言在会话期间存在，断开后释放。熄屏后的真实采集和 Windows 客户端实机效果尚未验证。
 
@@ -60,3 +60,11 @@ Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.ym
 核心依赖：`screencapturekit 11.0.0`、`enigo 0.6.1`、`axum 0.8.9`；客户端为 `gpui-kit 0.7.1`、`russh 0.64.1`、`tray-icon 0.21.2`，分别锁定在两份 Cargo.lock。
 
 实现依据：[Apple 屏幕采集](https://developer.apple.com/documentation/screencapturekit/capturing-screen-content-in-macos)、[动态采集配置](https://developer.apple.com/documentation/screencapturekit/scstream/updateconfiguration(_:completionhandler:))、[AppKit 剪贴板](https://developer.apple.com/documentation/appkit/nspasteboard/string(fortype:))、[GPUI Kit 平台要求](https://gpui-kit.com/docs/installation/)。文件面板参考常见远程文件管理器的路径导航和紧凑列表，保留上下分区；参考：[AnyDesk 文件管理](https://support.anydesk.com/file-manager-and-file-transfer)。
+
+## 文件上传的后续评估
+
+当前开发小文件交互可继续使用现有的 512 MiB 单文件上限与分块传输。断点续传适合频繁传大文件或网络不稳定的情况，尚未实现；实现前需确定部分文件的保留期限、磁盘配额和重连认证，并校验源文件与目标目录身份，不能只保存一个偏移量。当前断开仍清理未完成上传。
+
+可配置上传上限有价值，建议由 Mac 服务端配置并告知客户端，客户端只做提前提示；尚未提供此设置，不允许浏览器自行提高服务端限制。
+
+图片粘贴验证：独立浏览器模拟会话已确认读取 PNG 并分块发送；Mac 新版恢复权限后，真实本机会话的粘贴按钮已使测试图片出现在当前应用输入框，未发送消息。Windows Ctrl+V、Windows 到 Mac 的完整图片链路仍需实机验收。采用 [Clipboard API 与事件](https://www.w3.org/TR/clipboard-apis/) 和 [NSPasteboard](https://developer.apple.com/documentation/appkit/nspasteboard)，不处理 HTML 或文件剪贴板。
