@@ -50,13 +50,13 @@ python3 scripts/bundle.py
 
 应用输出在 Cargo target 目录的 `release/bundle/macos/LanDesk.app`。`build.rs` 从 `xcrun` 获取实际 Swift 链接路径以支持 Command Line Tools。开发包使用临时签名，更新后可能需要重新授权；只重新添加 LanDesk，不重置其他应用权限。
 
-Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行。本轮多服务器客户端已通过 [Windows 格式、14 项核心测试、Clippy 及 Release 构建](https://github.com/dripai/LanDesk/actions/runs/37833212339)。下载该构建的 `LanDeskClient-windows-x64`，解压运行 `target/release/LanDeskClient.exe`。对应源码提交为 `6054a30`；历史单服务器包不包含本轮功能。
+Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行。多服务器客户端此前已通过 [Windows 格式、14 项核心测试、Clippy 及 Release 构建](https://github.com/dripai/LanDesk/actions/runs/37833212339)，但该包随后实机发现右侧表单空白，不再推荐使用。已在 `0b54c8a` 修正左侧滚动容器占满窗口的问题；修复提交已触发新构建，本轮按要求不等待结果。请在 [Windows client 构建列表](https://github.com/dripai/LanDesk/actions/workflows/windows-client.yml) 选择包含该修复的成功构建，下载 `LanDeskClient-windows-x64` 后解压运行 `target/release/LanDeskClient.exe`。
 
 本轮已验证：23 项 Mac Rust 测试、10 项网页测试、12 项本机客户端核心测试，格式及 Clippy 检查通过。Windows 的 14 项测试包含凭据隔离、账户绑定、删除及配置失败回滚，全部通过。双服务器集成测试通过真实本地 SSH 会话验证同端口路径分流、64 KiB WebSocket 往返、单台断开不影响其他服务器、30 秒无远控自动关闭及刷新宽限期。
 
 独立浏览器模拟会话已验证 `/s/<哈希>/` 下资源加载、自动连接、断开和手动重连，以及服务器标签标题。Mac 服务测试确认来源缺失、跨站来源、Host 不匹配被拒绝，第二个控制会话不能接管已有会话。
 
-本轮 Mac 应用已打包，尚未替换正在运行的应用；新客户端需要同时更新 Mac 端网页。Windows 实际 GPU 界面、托盘、多台真实 Mac 远控以及熄屏持续采集仍未验收。编译和核心测试不代替这些实机验证。
+本轮 Mac 应用已打包，尚未替换正在运行的应用；新客户端需要同时更新 Mac 端网页。Windows 右侧表单空白已根据 GPUI Component 0.7.1 实际滚动容器源码修正：在外层明确设置 220 像素宽度，避免默认全宽将详情区挤成零宽；修复后的 Windows 界面仍待实机复验。托盘、多台真实 Mac 远控以及熄屏持续采集仍未验收。编译和核心测试不代替这些实机验证。
 
 此前版本已实测 Mac 画面、键鼠、中文、目录导航和面板调宽；Mac 窗口最小化后仍可连接，电源防睡眠断言随会话建立和释放。图片粘贴按钮已在本机真实会话使测试图片进入目标应用输入框，Windows Ctrl+V 到 Mac 的完整图片链路尚未实测。
 
