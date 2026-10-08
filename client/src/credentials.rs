@@ -6,8 +6,9 @@ use windows_sys::Win32::{Foundation::ERROR_NOT_FOUND, Security::Credentials::*};
 use zeroize::{Zeroize, Zeroizing};
 
 const TARGET: &str = "LanDeskClient/SSH";
+static ACCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SavedPassword {
     host: String,
@@ -91,14 +92,18 @@ fn read_at(target: &str) -> Result<Option<SavedPassword>> {
 }
 
 fn write_at(target: &str, saved: Option<&SavedPassword>) -> Result<()> {
-    let mut target = wide(target);
+    let mut target_wide = wide(target);
     let Some(saved) = saved else {
-        if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
+        if unsafe { CredDeleteW(target_wide.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
                 return Err(error).context("无法删除保存的 SSH 密码");
             }
         }
+        ensure!(
+            read_at(target)?.is_none(),
+            "Windows SSH 凭据删除后状态核验失败"
+        );
         return Ok(());
     };
     let mut bytes = Zeroizing::new(serde_json::to_vec(saved)?);
@@ -109,7 +114,7 @@ fn write_at(target: &str, saved: Option<&SavedPassword>) -> Result<()> {
     let mut username = wide(&saved.user);
     let record = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,
-        TargetName: target.as_mut_ptr(),
+        TargetName: target_wide.as_mut_ptr(),
         CredentialBlobSize: bytes.len() as u32,
         CredentialBlob: bytes.as_mut_ptr(),
         Persist: CRED_PERSIST_LOCAL_MACHINE,
@@ -120,6 +125,10 @@ fn write_at(target: &str, saved: Option<&SavedPassword>) -> Result<()> {
         unsafe { CredWriteW(&record, 0) } != 0,
         "无法保存 Windows SSH 凭据：{}",
         std::io::Error::last_os_error()
+    );
+    ensure!(
+        read_at(target)?.as_ref() == Some(saved),
+        "Windows SSH 凭据保存后状态核验失败"
     );
     Ok(())
 }
@@ -132,6 +141,9 @@ fn target(id: &str) -> Result<String> {
     Ok(format!("LanDeskClient/SSH/{id}"))
 }
 pub fn read(id: &str) -> Result<Option<SavedPassword>> {
+    let _lock = ACCESS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("凭据操作状态不可用"))?;
     read_at(&target(id)?)
 }
 
@@ -140,6 +152,9 @@ pub fn commit(
     path: &Path,
     changes: Vec<(String, Option<SavedPassword>)>,
 ) -> Result<()> {
+    let _lock = ACCESS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("凭据操作状态不可用"))?;
     let changes = changes
         .into_iter()
         .map(|(id, saved)| Ok((target(&id)?, saved)))
@@ -182,6 +197,9 @@ fn transaction(
     Ok(())
 }
 pub fn migrate(config: &Connections, path: &Path) -> Result<()> {
+    let _lock = ACCESS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("凭据操作状态不可用"))?;
     ensure!(config.profiles.len() == 1, "旧配置迁移缺少唯一连接");
     let profile = &config.profiles[0];
     let old = read_at(TARGET)?;
@@ -209,6 +227,7 @@ mod tests {
     use super::*;
     #[test]
     fn credential_round_trip_account_binding_delete_and_settings_rollback() {
+        let _lock = ACCESS.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let target = format!(
             "LanDeskClient/test/{}-{}",
@@ -251,6 +270,7 @@ mod tests {
     }
     #[test]
     fn independent_credentials_and_multi_record_rollback() {
+        let _lock = ACCESS.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let base = format!(
             "LanDeskClient/test/{}-{}",
@@ -292,20 +312,25 @@ mod tests {
             ],
         )
         .unwrap();
+        let error = transaction(
+            &config,
+            temp.path(),
+            vec![
+                (a.clone(), None),
+                (c.clone(), Some(SavedPassword::new(&first, "changed"))),
+            ],
+        )
+        .unwrap_err();
         assert!(
-            transaction(
-                &config,
-                temp.path(),
-                vec![
-                    (a.clone(), None),
-                    (c.clone(), Some(SavedPassword::new(&first, "changed")))
-                ]
-            )
-            .is_err()
+            error.to_string().contains("无法原子保存连接列表"),
+            "expected config failure with successful rollback, got: {error:#}"
         );
         assert_eq!(&*read_at(&a).unwrap().unwrap().password(), "one");
         assert_eq!(&*read_at(&b).unwrap().unwrap().password(), "two");
-        assert!(read_at(&c).unwrap().is_none());
+        assert!(
+            read_at(&c).unwrap().is_none(),
+            "new credential survived rollback: {error:#}"
+        );
         transaction(&config, &path, vec![(a.clone(), None)]).unwrap();
         assert!(read_at(&a).unwrap().is_none());
         assert_eq!(&*read_at(&b).unwrap().unwrap().password(), "two");

@@ -30,7 +30,7 @@ jobs:
       - name: Format
         run: cargo fmt --manifest-path client/Cargo.toml --check
       - name: Test connection core
-        run: cargo test --manifest-path client/Cargo.toml --locked --lib
+        run: cargo test --manifest-path client/Cargo.toml --locked --no-default-features --lib
       - name: Check client
         run: cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
       - name: Build Windows x64
