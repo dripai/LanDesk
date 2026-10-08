@@ -19,13 +19,13 @@ Mac 运行 Rust 远控服务，Windows 通过 SSH 加密隧道和浏览器操作
 
 已移除物理屏幕上的黑色遮罩及其采集排除逻辑，远端可以看到 LanDesk 窗口。认证后的远控会话持有 IOKit `PreventUserIdleSystemSleep` 断言，结束时释放；它允许显示器休眠，同时阻止系统因空闲自动睡眠。合盖、主动睡眠和低电量不在此保证范围内。
 
-macOS 提供 `pmset displaysleepnow`，用于立即关闭显示器而非让整机睡眠。Apple 也提供“显示器关闭时防止自动睡眠”设置。本机是 Apple M1、macOS 26.5.1；熄屏后 ScreenCaptureKit 是否持续输出、远程操作是否唤醒屏幕仍待实测，因此目前未提供“一直熄屏远控”开关。
+macOS 提供 `pmset displaysleepnow`，用于立即关闭显示器而非让整机睡眠。Apple 也提供“显示器关闭时防止自动睡眠”设置。可通过 `pmset -g cap` 查询当前设备是否支持 `displaysleep`。熄屏后 ScreenCaptureKit 是否持续输出、远程操作是否唤醒屏幕仍待实测，因此目前未提供“一直熄屏远控”开关。
 
 官方依据：[Apple 显示器与睡眠设置](https://support.apple.com/en-nz/guide/mac-help/-mchle41a6ccd/mac)、[IOPMAssertionCreateWithName](https://developer.apple.com/documentation/iokit/1557134-iopmassertioncreatewithname)、[CGDisplayIsAsleep](https://developer.apple.com/documentation/coregraphics/cgdisplayisasleep(_:))。命令与断言行为同时核对了本机 SDK 的 `pmset(1)` 和 `IOPMLib.h`。
 
 ## 边界
 
-- Mac 服务端要求 macOS 14.2 或更高，当前只验证 M1 / macOS 26.5.1。单显示器、单控制会话；显示器布局变化时断开。
+- Mac 服务端要求 macOS 14.2 或更高。单显示器、单控制会话；显示器布局变化时断开。
 - ScreenCaptureKit 按 Retina 实际像素采集，JPEG 质量 92，目标 15 帧/秒，最多 1600 万像素。帧率和带宽取决于分辨率、设备和网络，慢连接只保留最新画面。
 - 只监听 `127.0.0.1:17890`；SSH 加密远程链路，浏览器额外校验来源与六位连接码，每分钟最多五次失败认证。心跳丢失最长 15 秒结束会话。
 - 文件范围限当前 Mac 用户目录。通过目录句柄与 `O_NOFOLLOW` 防止路径及符号链接穿越；单文件最多 512 MiB，64 KiB 分块，完成并保存后用 `RENAME_EXCL` 原子发布。同名竞态也不覆盖，中断清理临时文件。每个目录最多 5000 条目，不支持非 UTF-8 文件名。上传权限 0600，不保留 Windows 元数据和可执行位。系统受保护目录可能另需文件访问授权。
@@ -36,7 +36,7 @@ macOS 提供 `pmset displaysleepnow`，用于立即关闭显示器而非让整�
 
 ## 构建与验证
 
-Mac 本机使用 Rust 1.99.0 和 Apple Command Line Tools：
+Mac 构建需要 Rust 与 Apple Command Line Tools：
 
 ```sh
 cargo test --locked
@@ -51,7 +51,9 @@ python3 scripts/bundle.py
 
 Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行，下载产物后解压运行。当前源码的 Windows 编译、托盘和真实连接验证仍在进行，不能将提交工作流视为构建已通过。
 
-已完成的源码验证：30 项 Mac Rust 测试、6 项网页键盘和宽度边界测试、客户端设置原子保存与损坏配置测试。本轮 UI 实机、熄屏和 Windows 客户端结果待补充。
+已完成的源码验证：30 项 Mac Rust 测试、6 项网页键盘和宽度边界测试、5 项客户端测试。客户端测试包括配置原子保存、损坏配置报错、首次主机密钥信任、密钥变化拒绝、真实本地 SSH 加密通道 64 KiB 往返及取消后释放端口。
+
+独立网页模拟会话已通过实际鼠标拖拽（面板 280 → 432 像素）、方向键调宽、子目录及路径导航验证；模拟会话不等同于真实远控。开发包更新后的权限恢复规则见本节构建说明。熄屏后的真实采集和 Windows 客户端实机效果尚未验证。
 
 此前版本已实际验证远程画面、键鼠、中文文本发送、应用最小化与恢复保持连接；这些历史结果不代替本轮新功能验收。
 

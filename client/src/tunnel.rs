@@ -5,6 +5,7 @@ use russh::{
     keys::{self, PublicKeyOrCertificate},
 };
 use std::{
+    io::Write,
     path::PathBuf,
     sync::{Arc, mpsc},
     time::Duration,
@@ -55,10 +56,38 @@ impl client::Handler for Handler {
                 .context("等待主机指纹确认超时")??,
             "未信任 SSH 主机，已取消连接"
         );
-        keys::known_hosts::learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)
+        save_host_key(&self.host, self.port, &key, &self.known_hosts)
             .context("无法保存已确认的 SSH 主机密钥")?;
         Ok(true)
     }
+}
+
+fn save_host_key(
+    host: &str,
+    port: u16,
+    key: &keys::PublicKey,
+    path: &std::path::Path,
+) -> Result<()> {
+    let parent = path.parent().context("主机信任文件路径无效")?;
+    std::fs::create_dir_all(parent)?;
+    let old = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(&old)?;
+    // Keep russh's OpenSSH serialization, but publish only after verifying its
+    // buffered write and syncing it. Its append helper alone does not report
+    // errors from BufWriter::drop and can leave an incomplete live file.
+    keys::known_hosts::learn_known_hosts_path(host, port, key, file.path())?;
+    ensure!(
+        keys::check_known_hosts_path(host, port, key, file.path())?,
+        "主机密钥写入不完整"
+    );
+    file.as_file().sync_all()?;
+    file.persist(path).context("主机信任文件保存失败")?;
+    Ok(())
 }
 
 pub async fn run(
