@@ -66,7 +66,7 @@ pub async fn run(
     password: Zeroizing<String>,
     known_hosts: PathBuf,
     events: mpsc::Sender<Event>,
-    mut cancel: oneshot::Receiver<()>,
+    cancel: oneshot::Receiver<()>,
 ) -> Result<()> {
     settings.validate()?;
     ensure!(!password.is_empty(), "请输入 Mac SSH 密码");
@@ -74,6 +74,17 @@ pub async fn run(
     let listener = TcpListener::bind(("127.0.0.1", PORT))
         .await
         .context("本机 17890 端口被占用，请关闭旧连接脚本或另一个客户端")?;
+    run_bound(settings, password, known_hosts, events, cancel, listener).await
+}
+
+async fn run_bound(
+    settings: Settings,
+    password: Zeroizing<String>,
+    known_hosts: PathBuf,
+    events: mpsc::Sender<Event>,
+    mut cancel: oneshot::Receiver<()>,
+    listener: TcpListener,
+) -> Result<()> {
     events.send(Event::Status("正在连接 SSH…".into()))?;
     let config = Arc::new(client::Config {
         nodelay: true,
@@ -126,4 +137,186 @@ pub async fn run(
     )
     .await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::keys::{Algorithm, PrivateKey};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct EchoServer;
+    impl russh::server::Handler for EchoServer {
+        type Error = anyhow::Error;
+        async fn auth_password(
+            &mut self,
+            user: &str,
+            password: &str,
+        ) -> Result<russh::server::Auth> {
+            Ok(if user == "tester" && password == "test-only" {
+                russh::server::Auth::Accept
+            } else {
+                russh::server::Auth::reject()
+            })
+        }
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            host: &str,
+            port: u32,
+            _: &str,
+            _: u32,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<()> {
+            ensure!(
+                host == "127.0.0.1" && port == u32::from(PORT),
+                "unexpected forwarding destination"
+            );
+            reply.accept().await;
+            tokio::spawn(async move {
+                let (mut input, mut output) = tokio::io::split(channel.into_stream());
+                let _ = tokio::io::copy(&mut input, &mut output).await;
+            });
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn encrypted_tunnel_transfers_bytes_and_cancellation_releases_listener() {
+        timeout(Duration::from_secs(10), async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("known_hosts");
+            let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+            let ssh_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let ssh_port = ssh_listener.local_addr().unwrap().port();
+            keys::known_hosts::learn_known_hosts_path(
+                "127.0.0.1",
+                ssh_port,
+                key.public_key(),
+                &path,
+            )
+            .unwrap();
+            let config = Arc::new(russh::server::Config {
+                keys: vec![key],
+                ..Default::default()
+            });
+            let server = tokio::spawn(async move {
+                let (socket, _) = ssh_listener.accept().await.unwrap();
+                russh::server::run_stream(config, socket, EchoServer)
+                    .await
+                    .unwrap()
+                    .await
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let settings = Settings {
+                host: "127.0.0.1".into(),
+                user: "tester".into(),
+                ssh_port,
+                ..Settings::default()
+            };
+            let (events, receiver) = mpsc::channel();
+            let (cancel, cancelled) = oneshot::channel();
+            let tunnel = tokio::spawn(run_bound(
+                settings,
+                Zeroizing::new("test-only".into()),
+                path,
+                events,
+                cancelled,
+                listener,
+            ));
+            loop {
+                if let Ok(Event::Ready) = receiver.try_recv() {
+                    break;
+                }
+                assert!(!tunnel.is_finished(), "tunnel failed before ready");
+                tokio::task::yield_now().await;
+            }
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let bytes: Vec<u8> = (0..65536).map(|n| (n % 251) as u8).collect();
+            socket.write_all(&bytes).await.unwrap();
+            let mut received = vec![0; bytes.len()];
+            socket.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, bytes);
+            cancel.send(()).unwrap();
+            tunnel.await.unwrap().unwrap();
+            assert_eq!(socket.read(&mut [0]).await.unwrap(), 0);
+            let _listener = TcpListener::bind(address).await.unwrap();
+            server.abort();
+        })
+        .await
+        .unwrap();
+    }
+
+    fn key() -> PublicKeyOrCertificate {
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
+            .unwrap()
+            .public_key()
+            .clone()
+            .into()
+    }
+    fn handler(path: PathBuf, events: mpsc::Sender<Event>) -> Handler {
+        Handler {
+            host: "example.test".into(),
+            port: 22,
+            known_hosts: path,
+            events,
+        }
+    }
+    #[tokio::test]
+    async fn first_host_requires_explicit_trust_and_changed_key_is_rejected() {
+        use russh::client::Handler as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("known_hosts");
+        let server_key = key();
+        let (events, receiver) = mpsc::channel();
+        let mut client = handler(path.clone(), events);
+        let confirmation = async {
+            loop {
+                if let Ok(Event::Trust { fingerprint, reply }) = receiver.try_recv() {
+                    assert!(fingerprint.starts_with("SHA256:"));
+                    assert!(!path.exists(), "trust is not persisted before approval");
+                    reply.send(true).unwrap();
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        let (accepted, ()) = tokio::join!(client.check_server_key(&server_key), confirmation);
+        assert!(accepted.unwrap());
+        assert!(client.check_server_key(&server_key).await.unwrap());
+        assert!(
+            receiver.try_recv().is_err(),
+            "known key should not prompt again"
+        );
+        let original = std::fs::read(&path).unwrap();
+        assert!(client.check_server_key(&key()).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+    #[tokio::test]
+    async fn rejecting_or_abandoning_host_trust_does_not_persist_a_key() {
+        use russh::client::Handler as _;
+        for reject in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("known_hosts");
+            let (events, receiver) = mpsc::channel();
+            let mut client = handler(path.clone(), events);
+            let server_key = key();
+            let confirmation = async {
+                loop {
+                    if let Ok(Event::Trust { reply, .. }) = receiver.try_recv() {
+                        if reject {
+                            reply.send(false).unwrap();
+                        }
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            };
+            let (accepted, ()) = tokio::join!(client.check_server_key(&server_key), confirmation);
+            assert!(accepted.is_err());
+            assert!(!path.exists());
+        }
+    }
 }

@@ -4345,6 +4345,7 @@ dependencies = [
  "anyhow",
  "dirs 6.0.0",
  "gpui-kit",
+ "rand 0.10.3",
  "raw-window-handle",
  "russh",
  "serde",

@@ -29,3 +29,5 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "W
 [profile.release]
 strip = "debuginfo"
 
+[dev-dependencies]
+rand = "0.10"

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use gpui_kit::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::{
@@ -84,7 +84,8 @@ impl Tray {
 }
 
 fn hwnd(window: &Window) -> Result<HWND> {
-    let handle = HasWindowHandle::window_handle(window).context("无法取得客户端窗口句柄")?;
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|error| anyhow::anyhow!("无法取得客户端窗口句柄：{error}"))?;
     match handle.as_raw() {
         RawWindowHandle::Win32(handle) => Ok(handle.hwnd.get() as HWND),
         _ => anyhow::bail!("客户端窗口不是 Win32 窗口"),
