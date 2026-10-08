@@ -8,6 +8,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use landesk_client::{
+    credentials::{self, SavedPassword},
     settings::Settings,
     tunnel::{self, Event},
 };
@@ -31,7 +32,7 @@ struct Client {
     events: mpsc::Receiver<Event>,
     sender: mpsc::Sender<Event>,
     cancel: Option<oneshot::Sender<()>>,
-    trust: Option<(String, oneshot::Sender<bool>)>,
+    remember_password: bool,
     busy: bool,
     ready: bool,
     quitting: bool,
@@ -59,11 +60,13 @@ impl Client {
     fn new(runtime: Arc<Runtime>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let loaded = Settings::directory().and_then(|dir| {
             let path = dir.join("settings.json");
-            Ok((Settings::load(&path)?, path))
+            let settings = Settings::load(&path)?;
+            let remembered = credentials::read()?.is_some_and(|saved| saved.matches(&settings));
+            Ok((settings, path, remembered))
         });
-        let (settings, settings_path, startup_error) = match loaded {
-            Ok((settings, path)) => (settings, Some(path), None),
-            Err(error) => (Settings::default(), None, Some(format!("{error:#}"))),
+        let (settings, settings_path, remember_password, startup_error) = match loaded {
+            Ok((settings, path, remembered)) => (settings, Some(path), remembered, None),
+            Err(error) => (Settings::default(), None, false, Some(format!("{error:#}"))),
         };
         let (tray, tray_error) = match Tray::new() {
             Ok(tray) => (Some(tray), None),
@@ -113,7 +116,7 @@ impl Client {
             ),
             user: input(&settings.user, "Mac 用户名", false, window, cx),
             port: input(&settings.ssh_port.to_string(), "22", false, window, cx),
-            password: input("", "仅用于本次 SSH 连接", true, window, cx),
+            password: input("", "输入密码；已记住的密码可留空", true, window, cx),
             status: startup_error.clone().unwrap_or_else(|| "未连接".into()),
             settings,
             settings_path,
@@ -122,7 +125,7 @@ impl Client {
             events,
             sender,
             cancel: None,
-            trust: None,
+            remember_password,
             busy: false,
             ready: false,
             quitting: false,
@@ -144,12 +147,32 @@ impl Client {
         value.validate()?;
         Ok(value)
     }
+    fn password_for(&self, settings: &Settings, cx: &App) -> anyhow::Result<Zeroizing<String>> {
+        let typed = self.password.read(cx).value();
+        if !typed.is_empty() {
+            return Ok(Zeroizing::new(typed.to_string()));
+        }
+        if self.remember_password
+            && let Some(saved) = credentials::read()?
+            && saved.matches(settings)
+        {
+            return Ok(saved.password());
+        }
+        anyhow::bail!("请输入当前 Mac 用户的 SSH 密码")
+    }
     fn save(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let value = self.read_settings(cx)?;
-        value.save(
+        let saved = if self.remember_password {
+            Some(SavedPassword::new(&value, &self.password_for(&value, cx)?))
+        } else {
+            None
+        };
+        credentials::save(
+            &value,
             self.settings_path
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("请先修复启动错误"))?,
+            saved.as_ref(),
         )?;
         self.settings = value;
         Ok(())
@@ -158,14 +181,19 @@ impl Client {
         if self.busy || self.startup_error.is_some() {
             return;
         }
+        let password = match self
+            .read_settings(cx)
+            .and_then(|settings| self.password_for(&settings, cx))
+        {
+            Ok(password) => password,
+            Err(error) => {
+                self.status = format!("{error:#}");
+                cx.notify();
+                return;
+            }
+        };
         if let Err(error) = self.save(cx) {
             self.status = format!("{error:#}");
-            cx.notify();
-            return;
-        }
-        let password = Zeroizing::new(self.password.read(cx).value().to_string());
-        if password.is_empty() {
-            self.status = "请输入 Mac SSH 密码".into();
             cx.notify();
             return;
         }
@@ -195,7 +223,6 @@ impl Client {
             self.status = "正在断开…".into();
         }
         self.ready = false;
-        self.trust = None;
         cx.notify();
     }
     fn quit(&mut self, cx: &mut Context<Self>) {
@@ -210,13 +237,6 @@ impl Client {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Status(status) => self.status = status,
-                Event::Trust { fingerprint, reply } => {
-                    self.trust = Some((fingerprint, reply));
-                    self.status = "首次连接，请核对 Mac SSH 主机指纹".into();
-                    if let Err(error) = tray::show(window) {
-                        self.status = error.to_string();
-                    }
-                }
                 Event::Ready => {
                     self.ready = true;
                     self.status = "已连接 · SSH 加密隧道运行中".into();
@@ -228,7 +248,6 @@ impl Client {
                     self.cancel = None;
                     self.busy = false;
                     self.ready = false;
-                    self.trust = None;
                     self.status = result
                         .err()
                         .map(|e| format!("{e:#}"))
@@ -272,46 +291,52 @@ impl Client {
 impl Render for Client {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.busy;
-        let fields = [
-            ("Mac 地址", &self.host),
-            ("用户名", &self.user),
-            ("SSH 端口", &self.port),
-            ("SSH 密码", &self.password),
-        ];
+        let blocked = busy || self.startup_error.is_some();
         let mut content = div()
             .v_flex()
             .w_full()
             .p_6()
             .gap_4()
             .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .text_2xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("LanDeskClient"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("连接 Mac，打开远程桌面"),
-            );
-        for (label, state) in fields {
+            .text_color(cx.theme().foreground);
+        for (label, state) in [
+            ("Mac 地址", &self.host),
+            ("用户名", &self.user),
+            ("SSH 端口", &self.port),
+            ("SSH 密码", &self.password),
+        ] {
             content = content.child(
                 div()
-                    .v_flex()
-                    .gap_1()
-                    .child(div().text_sm().child(label))
-                    .child(Input::new(state).disabled(busy || self.startup_error.is_some())),
+                    .h_flex()
+                    .gap_3()
+                    .items_center()
+                    .child(div().w(px(80.)).flex_shrink_0().text_sm().child(label))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(state).disabled(blocked)),
+                    ),
             );
         }
         content = content
             .child(
+                div().pl(px(92.)).child(
+                    Checkbox::new("remember-password")
+                        .label("记住密码")
+                        .checked(self.remember_password)
+                        .disabled(blocked)
+                        .on_click(cx.listener(|this, checked, _, cx| {
+                            this.remember_password = *checked;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(
                 Checkbox::new("auto-browser")
                     .label("连接后打开浏览器")
                     .checked(self.settings.open_browser)
-                    .disabled(busy)
+                    .disabled(blocked)
                     .on_click(cx.listener(|this, checked, _, cx| {
                         this.settings.open_browser = *checked;
                         cx.notify();
@@ -321,7 +346,7 @@ impl Render for Client {
                 Checkbox::new("tray")
                     .label("最小化或关闭窗口时留在托盘")
                     .checked(self.settings.minimize_to_tray)
-                    .disabled(busy)
+                    .disabled(blocked)
                     .on_click(cx.listener(|this, checked, _, cx| {
                         this.settings.minimize_to_tray = *checked;
                         cx.notify();
@@ -335,7 +360,7 @@ impl Render for Client {
                         Button::new("connect")
                             .primary()
                             .label("连接")
-                            .disabled(busy || self.startup_error.is_some())
+                            .disabled(blocked)
                             .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
                     )
                     .child(
@@ -353,7 +378,7 @@ impl Render for Client {
                     .child(
                         Button::new("save")
                             .label("保存设置")
-                            .disabled(busy || self.startup_error.is_some())
+                            .disabled(blocked)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.status = match this.save(cx) {
                                     Ok(()) => "设置已保存".into(),
@@ -364,41 +389,6 @@ impl Render for Client {
                     ),
             )
             .child(div().text_sm().child(self.status.clone()));
-        if let Some((fingerprint, _)) = &self.trust {
-            content = content.child(
-                div()
-                    .v_flex()
-                    .gap_2()
-                    .p_3()
-                    .rounded_md()
-                    .bg(cx.theme().muted)
-                    .child(div().text_sm().child(format!(
-                        "{}:{}\n{fingerprint}",
-                        self.settings.host, self.settings.ssh_port
-                    )))
-                    .child(
-                        div()
-                            .h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("trust")
-                                    .primary()
-                                    .label("指纹一致，信任并连接")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some((_, reply)) = this.trust.take() {
-                                            let _ = reply.send(true);
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("reject")
-                                    .label("取消")
-                                    .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
-                            ),
-                    ),
-            );
-        }
         div()
             .id("client-settings-scroll")
             .size_full()
@@ -429,10 +419,10 @@ pub fn run() {
                 }),
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(560.), px(760.)),
+                    size(px(560.), px(460.)),
                     cx,
                 ))),
-                window_min_size: Some(size(px(520.), px(720.))),
+                window_min_size: Some(size(px(520.), px(440.))),
                 ..Default::default()
             };
             if let Err(error) = gpui_kit::open_window(options, cx, |window, cx| {

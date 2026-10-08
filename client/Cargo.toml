@@ -24,7 +24,7 @@ zeroize = "1"
 gpui-kit = "=0.7.1"
 raw-window-handle = "=0.6.2"
 tray-icon = "=0.21.2"
-windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security_Credentials"] }
 
 [profile.release]
 strip = "debuginfo"

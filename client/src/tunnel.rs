@@ -18,10 +18,6 @@ const PORT: u16 = 17890;
 
 pub enum Event {
     Status(String),
-    Trust {
-        fingerprint: String,
-        reply: oneshot::Sender<bool>,
-    },
     Ready,
     Stopped(Result<()>),
 }
@@ -30,7 +26,6 @@ struct Handler {
     host: String,
     port: u16,
     known_hosts: PathBuf,
-    events: mpsc::Sender<Event>,
 }
 impl client::Handler for Handler {
     type Error = anyhow::Error;
@@ -45,19 +40,8 @@ impl client::Handler for Handler {
         {
             return Ok(true);
         }
-        let (reply, answer) = oneshot::channel();
-        self.events.send(Event::Trust {
-            fingerprint: key.fingerprint(keys::HashAlg::Sha256).to_string(),
-            reply,
-        })?;
-        ensure!(
-            timeout(Duration::from_secs(120), answer)
-                .await
-                .context("等待主机指纹确认超时")??,
-            "未信任 SSH 主机，已取消连接"
-        );
         save_host_key(&self.host, self.port, &key, &self.known_hosts)
-            .context("无法保存已确认的 SSH 主机密钥")?;
+            .context("无法保存首次连接的 SSH 主机密钥")?;
         Ok(true)
     }
 }
@@ -125,11 +109,10 @@ async fn run_bound(
         host: settings.host.clone(),
         port: settings.ssh_port,
         known_hosts,
-        events: events.clone(),
     };
     let mut session = tokio::select! {
         _ = &mut cancel => return Ok(()),
-        result = timeout(Duration::from_secs(140), client::connect(config, (settings.host.as_str(), settings.ssh_port), handler)) => result.context("SSH 连接超时")??,
+        result = timeout(Duration::from_secs(20), client::connect(config, (settings.host.as_str(), settings.ssh_port), handler)) => result.context("SSH 连接超时")??,
     };
     let result = tokio::select! {
         _ = &mut cancel => Ok(()),
@@ -285,67 +268,33 @@ mod tests {
             .clone()
             .into()
     }
-    fn handler(path: PathBuf, events: mpsc::Sender<Event>) -> Handler {
+    fn handler(path: PathBuf) -> Handler {
         Handler {
             host: "example.test".into(),
             port: 22,
             known_hosts: path,
-            events,
         }
     }
     #[tokio::test]
-    async fn first_host_requires_explicit_trust_and_changed_key_is_rejected() {
+    async fn first_host_is_recorded_automatically_and_changed_key_is_rejected() {
         use russh::client::Handler as _;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("known_hosts");
         let server_key = key();
-        let (events, receiver) = mpsc::channel();
-        let mut client = handler(path.clone(), events);
-        let confirmation = async {
-            loop {
-                if let Ok(Event::Trust { fingerprint, reply }) = receiver.try_recv() {
-                    assert!(fingerprint.starts_with("SHA256:"));
-                    assert!(!path.exists(), "trust is not persisted before approval");
-                    reply.send(true).unwrap();
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        };
-        let (accepted, ()) = tokio::join!(client.check_server_key(&server_key), confirmation);
-        assert!(accepted.unwrap());
+        let mut client = handler(path.clone());
         assert!(client.check_server_key(&server_key).await.unwrap());
-        assert!(
-            receiver.try_recv().is_err(),
-            "known key should not prompt again"
-        );
+        assert!(path.exists());
         let original = std::fs::read(&path).unwrap();
+        assert!(client.check_server_key(&server_key).await.unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
         assert!(client.check_server_key(&key()).await.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
     #[tokio::test]
-    async fn rejecting_or_abandoning_host_trust_does_not_persist_a_key() {
+    async fn host_record_errors_are_not_silently_accepted() {
         use russh::client::Handler as _;
-        for reject in [true, false] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("known_hosts");
-            let (events, receiver) = mpsc::channel();
-            let mut client = handler(path.clone(), events);
-            let server_key = key();
-            let confirmation = async {
-                loop {
-                    if let Ok(Event::Trust { reply, .. }) = receiver.try_recv() {
-                        if reject {
-                            reply.send(false).unwrap();
-                        }
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-            };
-            let (accepted, ()) = tokio::join!(client.check_server_key(&server_key), confirmation);
-            assert!(accepted.is_err());
-            assert!(!path.exists());
-        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut client = handler(directory.path().to_owned());
+        assert!(client.check_server_key(&key()).await.is_err());
     }
 }
