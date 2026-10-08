@@ -31,6 +31,7 @@ macOS 提供 `pmset displaysleepnow`，用于立即关闭显示器而非让整�
 - 文件范围限当前 Mac 用户目录。通过目录句柄与 `O_NOFOLLOW` 防止路径及符号链接穿越；单文件最多 512 MiB，64 KiB 分块，完成并保存后用 `RENAME_EXCL` 原子发布。同名竞态也不覆盖，中断清理临时文件。每个目录最多 5000 条目，不支持非 UTF-8 文件名。上传权限 0600，不保留 Windows 元数据和可执行位。系统受保护目录可能另需文件访问授权。
 - 纯文字单次最多 64 KiB UTF-8，不含空字符。剪贴板图片最多 10 MiB PNG、1600 万像素、边长 8192；Mac 完整解码校验后才修改剪贴板。图片只在内存中传输，30 秒无后续分块丢弃，断开清理；图片分块与文件上传分别处理。浏览器剪贴板拒绝授权时显示错误；Ctrl+V 可使用浏览器原生粘贴事件。
 - 已移除 Mac 连接码设置。旧的 `~/Library/Application Support/LanDesk/settings.json` 不再读取或写入；升级不会删除该文件。
+- 统一端口下的服务器标签共享浏览器同源；哈希路径用于连接去重和请求分流，不提供网页脚本之间的安全隔离。此模式用于自己信任的 Mac。参见 [URL Origin 标准](https://url.spec.whatwg.org/#concept-url-origin)。
 - Windows 客户端使用 SSH 密码认证。可勾选“记住密码”，密码存入 Windows 凭据管理器，不写入配置文件；取消勾选并保存或连接后删除。首次自动记录主机密钥，变化时拒绝；首次使用信任无法验证第一次连接的主机身份。其他限制及配置路径见 [客户端说明](client/README.md)。
 - 尚未提供 Mac 到 Windows 的图片复制、音频、驱动级隐私屏、合盖远控或系统登录界面控制保证。
 
@@ -49,13 +50,15 @@ python3 scripts/bundle.py
 
 应用输出在 Cargo target 目录的 `release/bundle/macos/LanDesk.app`。`build.rs` 从 `xcrun` 获取实际 Swift 链接路径以支持 Command Line Tools。开发包使用临时签名，更新后可能需要重新授权；只重新添加 LanDesk，不重置其他应用权限。
 
-Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行。此前单服务器客户端源码已通过 Windows 格式检查、6 项测试（含 Windows 凭据管理器）、完整客户端 Clippy 检查及 Release 编译：[构建记录与下载包](https://github.com/dripai/LanDesk/actions/runs/37816709624)。下载 `LanDeskClient-windows-x64` 后解压运行 `LanDeskClient.exe`。Windows 托盘、GPU 渲染及连接实际 Mac 的验收仍需 Windows 实机，不能将构建成功等同于这些功能已验证。
+Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行。本轮多服务器客户端已通过 [Windows 格式、14 项核心测试、Clippy 及 Release 构建](https://github.com/dripai/LanDesk/actions/runs/37833212339)。下载该构建的 `LanDeskClient-windows-x64`，解压运行 `target/release/LanDeskClient.exe`。对应源码提交为 `6054a30`；历史单服务器包不包含本轮功能。
 
-已完成的源码验证：23 项 Mac Rust 测试、10 项网页测试、5 项跨平台客户端测试；Windows 额外的凭据保存、账户绑定、删除和配置保存失败后的回滚测试已通过。此前客户端测试包括配置原子保存、损坏配置报错、首次自动记录主机密钥、密钥变化拒绝、真实本地 SSH 加密通道 64 KiB 往返及取消后释放端口。
+本轮已验证：23 项 Mac Rust 测试、10 项网页测试、12 项本机客户端核心测试，格式及 Clippy 检查通过。Windows 的 14 项测试包含凭据隔离、账户绑定、删除及配置失败回滚，全部通过。双服务器集成测试通过真实本地 SSH 会话验证同端口路径分流、64 KiB WebSocket 往返、单台断开不影响其他服务器、30 秒无远控自动关闭及刷新宽限期。
 
-独立网页模拟会话已通过实际鼠标拖拽（面板 280 → 432 像素）、方向键调宽、子目录及路径导航验证。新版在恢复权限并重启后，也已完成真实本机连接、画面采集、用户目录加载及面板方向键调宽验证；Mac 主窗口最小化后重新连接成功，画面及文件服务保持正常。电源断言在会话期间存在，断开后释放。熄屏后的真实采集和 Windows 客户端实机效果尚未验证。
+独立浏览器模拟会话已验证 `/s/<哈希>/` 下资源加载、自动连接、断开和手动重连，以及服务器标签标题。Mac 服务测试确认来源缺失、跨站来源、Host 不匹配被拒绝，第二个控制会话不能接管已有会话。
 
-此前版本已实际验证远程画面、键鼠、中文文本发送、应用最小化与恢复保持连接；这些历史结果不代替本轮新功能验收。
+本轮 Mac 应用已打包，尚未替换正在运行的应用；新客户端需要同时更新 Mac 端网页。Windows 实际 GPU 界面、托盘、多台真实 Mac 远控以及熄屏持续采集仍未验收。编译和核心测试不代替这些实机验证。
+
+此前版本已实测 Mac 画面、键鼠、中文、目录导航和面板调宽；Mac 窗口最小化后仍可连接，电源防睡眠断言随会话建立和释放。图片粘贴按钮已在本机真实会话使测试图片进入目标应用输入框，Windows Ctrl+V 到 Mac 的完整图片链路尚未实测。
 
 核心依赖：`screencapturekit 11.0.0`、`enigo 0.6.1`、`axum 0.8.9`；客户端为 `gpui-kit 0.7.1`、`russh 0.64.1`、`tray-icon 0.21.2`，分别锁定在两份 Cargo.lock。
 
@@ -66,11 +69,3 @@ Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.ym
 当前开发小文件交互可继续使用现有的 512 MiB 单文件上限与分块传输。断点续传适合频繁传大文件或网络不稳定的情况，尚未实现；实现前需确定部分文件的保留期限、磁盘配额和重连认证，并校验源文件与目标目录身份，不能只保存一个偏移量。当前断开仍清理未完成上传。
 
 可配置上传上限有价值，建议由 Mac 服务端配置并告知客户端，客户端只做提前提示；尚未提供此设置，不允许浏览器自行提高服务端限制。
-
-图片粘贴验证：独立浏览器模拟会话已确认读取 PNG 并分块发送；Mac 新版恢复权限后，真实本机会话的粘贴按钮已使测试图片出现在当前应用输入框，未发送消息。Windows Ctrl+V、Windows 到 Mac 的完整图片链路仍需实机验收。采用 [Clipboard API 与事件](https://www.w3.org/TR/clipboard-apis/) 和 [NSPasteboard](https://developer.apple.com/documentation/appkit/nspasteboard)，不处理 HTML 或文件剪贴板。
-
-取消连接码验证：23 项 Mac Rust 测试、10 项网页测试、格式检查和 Clippy 通过，Mac 应用已打包。独立模拟网页已验证打开自动连接、主动断开和手动重连；来源缺失、跨站来源及 Host 不匹配均被拒绝，第二个会话不能接管现有控制会话。本次尚未替换正在运行的 Mac 应用，真实远控仍待更新后验证。
-
-客户端无远控连接自动关闭：本机连接核心已完成实现及验证，新版 Windows 构建和实机仍待验证。按远控 WebSocket 生命周期计时，保留 30 秒刷新宽限期；此行为仅适用于 LanDeskClient，独立 `.cmd` 脚本仍需手动关闭。多服务器列表及同端口 SHA-256 路径分流已实现，使用方法及配置迁移见[客户端说明](client/README.md)。
-
-多服务器本轮：已实现左侧服务器列表、添加/编辑/删除、每连接凭据隔离及统一网页入口。客户端核心本机测试、Windows 构建结果以本轮交付记录为准；历史单服务器下载包不包含这些功能。Mac 网页改为相对资源及 WebSocket 路径，使用新版客户端需同步更新 Mac 应用。
