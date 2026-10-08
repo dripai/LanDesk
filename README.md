@@ -2,6 +2,21 @@
 
 Mac 运行 Rust 远控服务，Windows 通过 SSH 加密隧道和浏览器操作桌面。Windows 启动器为 [LanDeskClient](client/README.md)，使用 GPUI / gpui-component；原有 `scripts/LanDesk.cmd` 仍可单独使用，两者不能同时占用本机 17890 端口。
 
+## 版本管理
+
+从 `v0.1.1` 起，以 Git 附注标签 `vMAJOR.MINOR.PATCH` 标识整个仓库的发布版本。修复递增 PATCH，新增功能递增 MINOR，不兼容变更递增 MAJOR；已发布标签不移动、不覆盖。客户端 Cargo 包版本独立维护。
+
+发布前完成相关验证，提交本次改动，再创建标签并推送分支及标签。例如：
+
+```sh
+git add <本次发布文件>
+git commit -m "<本次改动说明>"
+git tag -a v0.1.1 -m "LanDesk v0.1.1"
+git push --atomic origin main v0.1.1
+```
+
+后续发布使用新的版本号；涉及 Mac 应用版本更新时，同步修改根目录 `Cargo.toml`、`Cargo.lock` 和 `scripts/bundle.py` 的应用版本信息。
+
 ## 使用
 
 1. Mac 打开 `LanDesk.app`，在系统设置中授予屏幕录制和辅助功能权限，然后重新打开应用。若系统另行请求远程桌面权限，需要允许。启动不会自动申请权限。
