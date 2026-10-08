@@ -21,7 +21,7 @@ if errorlevel 1 (
 )
 echo Keep this window open while using LanDesk.
 echo Enter your Mac SSH password below. The browser opens automatically.
-echo In the browser, enter the connection code shown in LanDesk on your Mac.
+echo The browser connects automatically. No additional connection code is needed.
 echo Press Ctrl+C or close this window to stop the encrypted tunnel.
 echo.
 start "" /b powershell.exe -NoProfile -Command "for($i=0;$i -lt 180;$i++) { $c=New-Object Net.Sockets.TcpClient; $ready=$false; try { $c.Connect('127.0.0.1',17890); $ready=$true } catch {} finally { $c.Dispose() }; if($ready) { Start-Process 'http://127.0.0.1:17890'; exit }; Start-Sleep -Seconds 1 }"

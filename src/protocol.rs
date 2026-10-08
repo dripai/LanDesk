@@ -1,28 +1,13 @@
 use serde::Deserialize;
-use subtle::ConstantTimeEq;
 
 pub const PORT: u16 = 17890;
 pub const MAX_TEXT_BYTES: usize = 65_536;
 pub const UPLOAD_CHUNK_BYTES: usize = 65_536;
 
-pub fn connection_code() -> anyhow::Result<String> {
-    const RANGE: u32 = 1_000_000;
-    let ceiling = u32::MAX - u32::MAX % RANGE;
-    loop {
-        let value = getrandom::u32().map_err(|e| anyhow::anyhow!("无法生成连接码: {e}"))?;
-        // Reject the incomplete final range so all six-digit codes are equally likely.
-        if value < ceiling {
-            return Ok(format!("{:06}", value % RANGE));
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientMessage {
-    Hello {
-        code: String,
-    },
+    Hello {},
     Heartbeat,
     Pointer {
         x: f64,
@@ -78,19 +63,6 @@ pub enum ClientMessage {
     Disconnect,
 }
 
-pub fn code_matches(expected: &str, entered: &str) -> bool {
-    let entered = entered.trim();
-    valid_code(entered) && bool::from(expected.as_bytes().ct_eq(entered.as_bytes()))
-}
-
-pub fn valid_code(code: &str) -> bool {
-    code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-pub fn valid_code_edit(code: &str) -> bool {
-    code.len() <= 6 && code.bytes().all(|byte| byte.is_ascii_digit())
-}
-
 pub fn origin_allowed(origin: &str, host: &str) -> bool {
     [format!("127.0.0.1:{PORT}"), format!("localhost:{PORT}")]
         .iter()
@@ -113,29 +85,6 @@ pub fn pointer_position(x: f64, y: f64, width: i32, height: i32) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn code_requires_six_digits_and_preserves_leading_zeroes() {
-        assert!(code_matches("001234", "001234"));
-        assert!(code_matches("001234", " 001234 "));
-        for entered in [
-            "",
-            "1234",
-            "001235",
-            "00-1234",
-            "00 1234",
-            "ABCDEF",
-            "００１２３４",
-        ] {
-            assert!(!code_matches("001234", entered));
-        }
-    }
-    #[test]
-    fn generated_codes_have_exactly_six_ascii_digits() {
-        let code = connection_code().unwrap();
-        assert_eq!(code.len(), 6);
-        assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
-        assert!(code_matches(&code, &code));
-    }
     #[test]
     fn origin_blocks_foreign_sites_and_rebinding() {
         assert!(origin_allowed("http://127.0.0.1:17890", "127.0.0.1:17890"));

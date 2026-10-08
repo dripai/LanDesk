@@ -9,10 +9,20 @@ description = "LanDesk Windows SSH connection client"
 [[bin]]
 name = "LanDeskClient"
 path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui-kit", "dep:raw-window-handle", "dep:tray-icon"]
 
 [dependencies]
 anyhow = "1"
 dirs = "6"
+sha2 = "=0.10.9"
+url = "=2.5.8"
+http-body-util = "=0.1.5"
+hyper = { version = "=1.12.0", features = ["http1", "client", "server"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
 russh = "=0.64.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,9 +31,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
-gpui-kit = "=0.7.1"
-raw-window-handle = "=0.6.2"
-tray-icon = "=0.21.2"
+gpui-kit = { version = "=0.7.1", optional = true }
+raw-window-handle = { version = "=0.6.2", optional = true }
+tray-icon = { version = "=0.21.2", optional = true }
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security_Credentials"] }
 
 [profile.release]
@@ -31,3 +41,4 @@ strip = "debuginfo"
 
 [dev-dependencies]
 rand = "0.10"
+tokio = { version = "1", features = ["test-util"] }

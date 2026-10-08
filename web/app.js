@@ -3,13 +3,8 @@ import {createKeyboard} from './keyboard.js';
 import {createFiles} from './files.js';
 import {createImagePaste} from './clipboard.js';
 const $ = id => document.getElementById(id);
-$('code').addEventListener('input', () => {
-  const input = $('code');
-  const caret = input.selectionStart ?? input.value.length;
-  const position = Math.min(6, input.value.slice(0, caret).replace(/[^0-9]/g, '').length);
-  input.value = input.value.replace(/[^0-9]/g, '').slice(0, 6);
-  input.setSelectionRange(position, position);
-});
+const serverName = new URLSearchParams(location.hash.slice(1)).get('name');
+if (serverName) document.title = `${serverName} · LanDesk`;
 let socket = null, heartbeat = null, imageURL = null, drawing = false, lastMove = 0;
 const send = value => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
 function notify(message) {
@@ -127,10 +122,12 @@ function end(message) {
   $('screen').removeAttribute('src');
   if(document.fullscreenElement) document.exitFullscreen().catch(()=>{});
 }
-$('connect-form').addEventListener('submit', event => {
-  event.preventDefault(); $('connect').disabled=true; $('login-status').textContent='正在连接…';
-  socket=new WebSocket(`ws://${location.host}/ws`); socket.binaryType='blob';
-  socket.onopen=()=>send({type:'hello',code:$('code').value});
+function connect() {
+  if (socket) return;
+  $('connect').disabled=true; $('login-status').textContent='正在连接…';
+  const wsURL = new URL('./ws', location.href); wsURL.protocol = 'ws:'; wsURL.hash = ''; wsURL.search = '';
+  socket=new WebSocket(wsURL); socket.binaryType='blob';
+  socket.onopen=()=>send({type:'hello'});
   socket.onmessage=event=>{
     if(event.data instanceof Blob) {
       if(drawing) return;
@@ -159,7 +156,7 @@ $('connect-form').addEventListener('submit', event => {
     }
     if(message.type==='error') { end(message.message); return; }
     if(message.type==='ready') {
-      $('login').hidden=true; $('session').hidden=false; $('code').value='';
+      $('login').hidden=true; $('session').hidden=false;
       $('status').textContent='已连接'; drawing=false;
       send({type:'heartbeat'}); heartbeat=setInterval(()=>send({type:'heartbeat'}),3000);
       keyboard.focus();
@@ -170,9 +167,10 @@ $('connect-form').addEventListener('submit', event => {
     }
 
   };
-  socket.onerror=()=>end('无法连接，请确认 Mac 应用和 SSH 连接脚本都在运行');
+  socket.onerror=()=>end('无法连接，请确认 Mac 应用和 LanDeskClient 或 SSH 隧道都在运行');
   socket.onclose=()=>{ if(socket) end('连接已断开'); };
-});
+}
+$('connect-form').addEventListener('submit', event => { event.preventDefault(); connect(); });
 $('disconnect').addEventListener('click',()=>{ releaseAll(); send({type:'disconnect'}); end('已断开'); });
 $('fullscreen').addEventListener('click',()=>{ const p=document.fullscreenElement?document.exitFullscreen():$('session').requestFullscreen(); p.catch(()=>{}); });
 function pointer(event) {
@@ -214,3 +212,5 @@ $('display-form').addEventListener('submit', event => {
   resolutionTimer = setTimeout(() => { resolutionTimer = null; $('display-apply').disabled = false; notify('分辨率切换超时，实际采集状态尚未确认'); }, 10000);
   send({type:'set_resolution',width});
 });
+
+connect();

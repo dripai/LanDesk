@@ -2,8 +2,7 @@ use crate::{
     capture::{Capture, FrameEvent},
     files::{FileSession, HomeFiles},
     native::{Native, permissions},
-    protocol::{ClientMessage, PORT, code_matches, origin_allowed},
-    settings::CodeSettings,
+    protocol::{ClientMessage, PORT, origin_allowed},
 };
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
@@ -26,8 +25,6 @@ use std::{
 #[derive(Clone)]
 pub struct AppState {
     pub native: Native,
-    pub settings: Arc<Mutex<CodeSettings>>,
-    pub attempts: Arc<Mutex<Vec<Instant>>>,
     pub files: Arc<HomeFiles>,
 }
 
@@ -164,34 +161,17 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
         .await?
         .context("连接已关闭")??;
     let Message::Text(text) = message else {
-        bail!("请先输入连接码");
+        bail!("请先建立会话");
     };
-    let ClientMessage::Hello { code } = serde_json::from_str(&text)? else {
-        bail!("请先输入连接码");
+    let ClientMessage::Hello {} = serde_json::from_str(&text)? else {
+        bail!("请先建立会话");
     };
-    {
-        let mut attempts = state
-            .attempts
-            .lock()
-            .map_err(|_| anyhow::anyhow!("认证状态不可用"))?;
-        attempts.retain(|t| t.elapsed() < Duration::from_secs(60));
-        ensure!(attempts.len() < 5, "连接码错误次数过多，请一分钟后再试");
-        let settings = state
-            .settings
-            .lock()
-            .map_err(|_| anyhow::anyhow!("连接码设置不可用"))?;
-        if !code_matches(&settings.code, &code) {
-            attempts.push(Instant::now());
-            bail!("连接码不正确，请查看 Mac 上的 LanDesk 窗口");
-        }
-        // Serialize session acquisition with code changes, so an old code cannot race an update.
-        state
-            .native
-            .shared
-            .active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| anyhow::anyhow!("已有一个连接，请先断开"))?;
-    }
+    state
+        .native
+        .shared
+        .active
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| anyhow::anyhow!("已有一个连接，请先断开"))?;
     let _guard = SessionGuard(state.native.clone());
     state.native.shared.cancel.store(false, Ordering::Release);
     let (capture_allowed, input_allowed) = permissions();
@@ -208,7 +188,7 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
         .native
         .begin_input(capture.point_width, capture.point_height)
         .await?;
-    // Do not cover the host until capture has produced a real frame.
+    // Report readiness only after capture has produced a real frame.
     tokio::time::timeout(
         Duration::from_secs(8),
         capture.frames.wait_for(|frame| frame.is_some()),
@@ -256,7 +236,7 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
                             ClientMessage::Heartbeat => heartbeat=Instant::now(),
                             ClientMessage::Disconnect => break,
 
-                            ClientMessage::Hello { .. } => bail!("重复认证消息"),
+                            ClientMessage::Hello { .. } => bail!("重复握手消息"),
                             ClientMessage::PasteImageChunk { id, offset, total, data } => {
                                 let result = async {
                                     let complete = images.chunk(id, offset, total, &data)?;
@@ -361,8 +341,6 @@ mod tests {
                     tx,
                     shared: Arc::new(Shared::default()),
                 },
-                settings: Arc::new(Mutex::new(CodeSettings::fixture("123456"))),
-                attempts: Arc::new(Mutex::new(Vec::new())),
                 files: Arc::new(HomeFiles::open(std::path::Path::new("/private/tmp")).unwrap()),
             },
             rx,
@@ -390,7 +368,7 @@ mod tests {
         request
     }
     #[tokio::test]
-    async fn file_and_clipboard_operations_require_authentication() {
+    async fn file_and_clipboard_operations_require_session_handshake() {
         let (state, _rx) = state();
         let (addr, handle) = serve(state).await;
         for command in [
@@ -406,55 +384,46 @@ mod tests {
                 .await
                 .unwrap();
             let response = ws.next().await.unwrap().unwrap().into_text().unwrap();
-            assert!(response.contains("请先输入连接码"));
+            assert!(response.contains("请先建立会话"));
         }
         handle.abort();
     }
     #[tokio::test]
-    async fn foreign_websites_cannot_open_control_socket() {
+    async fn foreign_missing_and_mismatched_origins_cannot_open_control_socket() {
         let (state, _rx) = state();
         let (addr, handle) = serve(state).await;
-        let error = connect_async(request(addr, "http://foreign.example"))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("403"));
-        handle.abort();
-    }
-    #[tokio::test]
-    async fn bad_codes_are_rejected_before_capture_and_rate_limited() {
-        let (state, _rx) = state();
-        let shared = state.native.shared.clone();
-        let (addr, handle) = serve(state).await;
-        for attempt in 0..6 {
-            let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
-                .await
-                .unwrap();
-            ws.send(WsMessage::Text(r#"{"type":"hello","code":"WRONG"}"#.into()))
-                .await
-                .unwrap();
-            let response = ws.next().await.unwrap().unwrap().into_text().unwrap();
-            assert!(response.contains(if attempt < 5 {
-                "连接码不正确"
-            } else {
-                "错误次数过多"
-            }));
-            assert!(!shared.active.load(Ordering::Acquire));
+        for (host, origin) in [
+            ("127.0.0.1:17890", Some("http://foreign.example")),
+            ("127.0.0.1:17890", Some("http://localhost:17890")),
+            (
+                "foreign.example:17890",
+                Some("http://foreign.example:17890"),
+            ),
+            ("127.0.0.1:17890", Some("null")),
+            ("127.0.0.1:17890", None),
+        ] {
+            let mut request = request(addr, origin.unwrap_or(""));
+            request.headers_mut().insert("host", host.parse().unwrap());
+            if origin.is_none() {
+                request.headers_mut().remove("origin");
+            }
+            let error = connect_async(request).await.unwrap_err();
+            assert!(error.to_string().contains("403"), "{host} {origin:?}");
         }
         handle.abort();
     }
     #[tokio::test]
-    async fn second_session_does_not_take_over_existing_controller() {
+    async fn hello_without_code_reaches_session_check_and_preserves_existing_controller() {
         let (state, _rx) = state();
         state.native.shared.active.store(true, Ordering::Release);
+        let shared = state.native.shared.clone();
         let (addr, handle) = serve(state).await;
         let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
             .await
             .unwrap();
-        ws.send(WsMessage::Text(
-            r#"{"type":"hello","code":"123456"}"#.into(),
-        ))
-        .await
-        .unwrap();
+        ws.send(WsMessage::Text(r#"{"type":"hello"}"#.into()))
+            .await
+            .unwrap();
         assert!(
             ws.next()
                 .await
@@ -464,30 +433,7 @@ mod tests {
                 .unwrap()
                 .contains("已有一个连接")
         );
-        handle.abort();
-    }
-    #[tokio::test]
-    async fn authentication_uses_updated_code_and_rejects_previous_code() {
-        let (state, _rx) = state();
-        state.settings.lock().unwrap().code = "001234".into();
-        // Avoid capture APIs: the valid code must reach the occupied-session check.
-        state.native.shared.active.store(true, Ordering::Release);
-        let (addr, handle) = serve(state).await;
-        for (code, expected) in [("123456", "连接码不正确"), ("001234", "已有一个连接")]
-        {
-            let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
-                .await
-                .unwrap();
-            ws.send(WsMessage::Text(
-                serde_json::json!({"type":"hello","code":code})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-            let response = ws.next().await.unwrap().unwrap().into_text().unwrap();
-            assert!(response.contains(expected));
-        }
+        assert!(shared.active.load(Ordering::Acquire));
         handle.abort();
     }
     #[test]
