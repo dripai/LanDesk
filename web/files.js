@@ -45,6 +45,7 @@ export function createFiles(panel, send, sendBinary, notify) {
     pending.clear(); $('directories').replaceChildren(); $('file-items').replaceChildren(); $('upload-status').textContent = '';
     $('upload-files').disabled = false; $('file-picker').value = ''; panel.hidden = true; resizer.hidden = true;
     $('upload-progress').hidden = true; drag = null; resizer.classList.remove('dragging');
+    panel.parentElement.style.removeProperty('--remote-width');
   }
   function formatSize(size) {
     if (size < 1024) return `${size} B`;
@@ -147,6 +148,7 @@ export function createFiles(panel, send, sendBinary, notify) {
     resizer.hidden = panel.hidden;
     const width = panelWidth(chosenWidth ?? (gap >= 180 ? Math.min(320, gap) : 280), session.clientWidth);
     panel.style.width = `${width}px`;
+    session.style.setProperty('--remote-width', `${session.clientWidth - (panel.hidden ? 0 : width + 6)}px`);
     resizer.setAttribute('aria-valuenow', width);
     resizer.setAttribute('aria-valuemin', panelWidth(0, session.clientWidth));
     resizer.setAttribute('aria-valuemax', panelWidth(Infinity, session.clientWidth));
