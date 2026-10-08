@@ -420,6 +420,9 @@ impl Client {
                         match event {
                             Event::Status(status) => session.status = status,
                             Event::Ready => {
+                                if session.cancel.is_none() {
+                                    continue;
+                                }
                                 session.ready = true;
                                 session.status = "已连接 · 无远控连接 30 秒后断开".into();
                                 if let Some(profile) =
@@ -466,18 +469,19 @@ impl Client {
                 Action::Quit => self.quit(cx),
             }
         }
-        if self.config.minimize_to_tray && self.tray.is_some() {
-            if let Err(error) = tray::minimized(window).and_then(|minimized| {
+        if self.config.minimize_to_tray
+            && self.tray.is_some()
+            && let Err(error) = tray::minimized(window).and_then(|minimized| {
                 if minimized {
                     tray::hide(window)
                 } else {
                     Ok(())
                 }
-            }) {
-                self.config.minimize_to_tray = false;
-                self.status = error.to_string();
-                cx.notify();
-            }
+            })
+        {
+            self.config.minimize_to_tray = false;
+            self.status = error.to_string();
+            cx.notify();
         }
     }
 }
