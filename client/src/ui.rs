@@ -730,6 +730,7 @@ impl Render for Client {
             .child(
                 div()
                     .id("server-list-scroll")
+                    .w(px(220.))
                     .h_full()
                     .flex_shrink_0()
                     .overflow_y_scrollbar()
