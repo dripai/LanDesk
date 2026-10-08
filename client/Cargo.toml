@@ -1,0 +1,31 @@
+[package]
+name = "landesk-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+description = "LanDesk Windows SSH connection client"
+
+[[bin]]
+name = "LanDeskClient"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+russh = "=0.64.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+gpui-kit = "=0.7.1"
+raw-window-handle = "=0.6.2"
+tray-icon = "=0.21.2"
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+
+[profile.release]
+strip = "debuginfo"
+

@@ -1,0 +1,25 @@
+# LanDeskClient
+
+Windows 10 / 11 x64 客户端，用 GPUI Kit 0.7.1（GPUI / gpui-component）管理 SSH 加密隧道，远程桌面使用默认浏览器。托盘基于 tray-icon 0.21.2；最小化与恢复使用 Win32 窗口 API。
+
+1. 从本仓库 Actions 的 **Windows client** 成功运行中下载 `LanDeskClient-windows-x64`，解压后运行 `LanDeskClient.exe`。
+2. 填写 Mac 地址、用户名、SSH 端口和密码。Mac 应先开启“远程登录”，并运行已获屏幕录制和辅助功能权限的 LanDesk。
+3. 首次连接核对显示的 SHA256 主机指纹；可在 Mac 执行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 查看对应指纹。主机密钥变化会中止连接，不自动接受。
+4. 浏览器打开后输入 Mac LanDesk 窗口里的六位连接码。
+5. 默认最小化或关闭客户端窗口时留在托盘，隧道继续运行。单击托盘图标恢复窗口，右键可断开或退出。关闭浏览器只结束远控会话；客户端“断开”或托盘“退出”才停止 SSH 隧道。
+
+地址、用户名、端口、自动打开浏览器和托盘偏好保存在 `%APPDATA%\LanDeskClient\settings.json`；信任过的主机保存在同目录 `known_hosts`。密码仅用于本次连接，不保存，连接时清空输入框。当前使用 SSH 密码认证，不支持密钥、跳板机或 SSH 主机证书。
+
+本地地址固定为 `127.0.0.1:17890`，Mac 目标同样为 `127.0.0.1:17890`，以匹配浏览器服务的来源检查。端口占用会明确报错，请先关闭旧的 `.cmd` 连接窗口。连接失败后不会自动重试密码。
+
+构建需要 Rust stable MSVC、Visual Studio C++ 工具链、Windows SDK 和 CMake。执行：
+
+```sh
+cargo test --manifest-path client/Cargo.toml --locked --lib
+cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
+cargo build --manifest-path client/Cargo.toml --locked --release
+```
+
+Actions 的构建通过仅证明 Windows 编译及测试成功。托盘、GPU 渲染、Windows 中文输入和真实 Mac SSH 连接仍需要 Windows 实机验收。开发构建未做代码签名。
+
+官方资料：[GPUI Kit 安装与平台要求](https://gpui-kit.com/docs/installation/)、[russh 0.64.1](https://docs.rs/russh/0.64.1/russh/)、[tray-icon 0.21.2](https://docs.rs/tray-icon/0.21.2/tray_icon/)、[Win32 ShowWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)。

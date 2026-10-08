@@ -1,0 +1,37 @@
+[package]
+name = "landesk"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.87"
+description = "Mac 局域网远程桌面，通过 SSH 隧道和浏览器连接"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "=0.8.9", features = ["ws"] }
+futures-util = "0.3"
+getrandom = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+libc = "=0.2.190"
+enigo = { version = "=0.6.1", default-features = false }
+objc2 = "=0.6.3"
+objc2-app-kit = "=0.3.2"
+objc2-foundation = "=0.3.2"
+screencapturekit = { version = "=11.0.0", features = ["macos_14_2"] }
+
+[dev-dependencies]
+tokio-tungstenite = "=0.29.0"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"

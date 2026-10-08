@@ -1,0 +1,45 @@
+name: Windows client
+
+on:
+  push:
+    branches: [main]
+    paths: ["client/**", ".github/workflows/windows-client.yml"]
+  pull_request:
+    paths: ["client/**", ".github/workflows/windows-client.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/client/target
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          cmake --version
+      - name: Format
+        run: cargo fmt --manifest-path client/Cargo.toml --check
+      - name: Test connection core
+        run: cargo test --manifest-path client/Cargo.toml --locked --lib
+      - name: Check client
+        run: cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Build Windows x64
+        run: cargo build --manifest-path client/Cargo.toml --locked --release --bin LanDeskClient
+      - uses: actions/upload-artifact@v7
+        with:
+          name: LanDeskClient-windows-x64
+          path: |
+            client/target/release/LanDeskClient.exe
+            client/README.md
+          if-no-files-found: error
+          retention-days: 30

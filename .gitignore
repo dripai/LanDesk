@@ -1,0 +1,7 @@
+/work/
+/target/
+/client/target/
+/HANDOFF.md
+*.log
+.DS_Store
+__pycache__/
