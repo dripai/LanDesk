@@ -26,7 +26,7 @@ impl Tray {
     pub fn new() -> Result<Self> {
         let menu = Menu::new();
         let show = MenuItem::new("打开 LanDeskClient", true, None);
-        let disconnect = MenuItem::new("断开连接", true, None);
+        let disconnect = MenuItem::new("断开全部连接", true, None);
         let quit = MenuItem::new("退出", true, None);
         menu.append_items(&[&show, &disconnect, &quit])?;
         let mut pixels = Vec::with_capacity(32 * 32 * 4);

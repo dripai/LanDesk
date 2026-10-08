@@ -1,4 +1,4 @@
-use crate::settings::Settings;
+use crate::settings::{Connections, Settings};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -23,14 +23,21 @@ impl Drop for SavedPassword {
 impl SavedPassword {
     pub fn new(settings: &Settings, password: &str) -> Self {
         Self {
-            host: settings.host.clone(),
+            host: settings.normalized_host(),
             user: settings.user.clone(),
             port: settings.ssh_port,
             password: password.into(),
         }
     }
     pub fn matches(&self, settings: &Settings) -> bool {
-        self.host == settings.host && self.user == settings.user && self.port == settings.ssh_port
+        Settings {
+            host: self.host.clone(),
+            ..Settings::default()
+        }
+        .normalized_host()
+            == settings.normalized_host()
+            && self.user == settings.user
+            && self.port == settings.ssh_port
     }
     pub fn password(&self) -> Zeroizing<String> {
         Zeroizing::new(self.password.clone())
@@ -117,32 +124,84 @@ fn write_at(target: &str, saved: Option<&SavedPassword>) -> Result<()> {
     Ok(())
 }
 
-pub fn read() -> Result<Option<SavedPassword>> {
-    read_at(TARGET)
+fn target(id: &str) -> Result<String> {
+    ensure!(
+        id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "连接标识无效"
+    );
+    Ok(format!("LanDeskClient/SSH/{id}"))
+}
+pub fn read(id: &str) -> Result<Option<SavedPassword>> {
+    read_at(&target(id)?)
 }
 
-pub fn save(settings: &Settings, path: &Path, password: Option<&SavedPassword>) -> Result<()> {
-    save_at(TARGET, settings, path, password)
-}
-
-fn save_at(
-    target: &str,
-    settings: &Settings,
+pub fn commit(
+    config: &Connections,
     path: &Path,
-    password: Option<&SavedPassword>,
+    changes: Vec<(String, Option<SavedPassword>)>,
 ) -> Result<()> {
-    settings.validate()?;
-    let previous = read_at(target)?;
-    write_at(target, password)?;
-    if let Err(error) = settings.save(path) {
-        if let Err(rollback) = write_at(target, previous.as_ref()) {
+    let changes = changes
+        .into_iter()
+        .map(|(id, saved)| Ok((target(&id)?, saved)))
+        .collect::<Result<Vec<_>>>()?;
+    transaction(config, path, changes)
+}
+fn transaction(
+    config: &Connections,
+    path: &Path,
+    changes: Vec<(String, Option<SavedPassword>)>,
+) -> Result<()> {
+    config.validate()?;
+    let mut seen = std::collections::HashSet::new();
+    let mut previous = Vec::new();
+    for (target, _) in &changes {
+        ensure!(seen.insert(target), "重复的凭据操作");
+        previous.push((target.clone(), read_at(target)?));
+    }
+    let result = (|| {
+        for (target, password) in &changes {
+            write_at(target, password.as_ref())?;
+        }
+        config.save(path)
+    })();
+    if let Err(error) = result {
+        let mut failures = Vec::new();
+        for (target, password) in previous.iter().rev() {
+            if let Err(error) = write_at(target, password.as_ref()) {
+                failures.push(format!("{error:#}"));
+            }
+        }
+        if !failures.is_empty() {
             bail!(
-                "设置保存失败：{error:#}；凭据回滚也失败：{rollback:#}，请检查 Windows 凭据管理器"
+                "保存失败：{error:#}；凭据回滚失败：{}，请检查 Windows 凭据管理器",
+                failures.join("；")
             );
         }
         return Err(error);
     }
     Ok(())
+}
+pub fn migrate(config: &Connections, path: &Path) -> Result<()> {
+    ensure!(config.profiles.len() == 1, "旧配置迁移缺少唯一连接");
+    let profile = &config.profiles[0];
+    let old = read_at(TARGET)?;
+    let destination = target(&profile.id())?;
+    ensure!(
+        read_at(&destination)?.is_none(),
+        "迁移目标凭据已存在，请先检查凭据管理器"
+    );
+    // Preserve an existing password only when it belongs to the imported account.
+    if let Some(saved) = &old {
+        ensure!(
+            saved.matches(profile),
+            "旧密码与当前连接不匹配，请先检查凭据管理器"
+        );
+    }
+    transaction(
+        config,
+        path,
+        vec![(destination, old), (TARGET.into(), None)],
+    )
 }
 
 #[cfg(test)]
@@ -170,20 +229,85 @@ mod tests {
         };
         let saved = SavedPassword::new(&settings, "测试-password");
         let path = temp.path().join("settings.json");
-        save_at(&target, &settings, &path, Some(&saved)).unwrap();
+        let config = Connections {
+            profiles: vec![settings.clone()],
+            ..Connections::default()
+        };
+        transaction(&config, &path, vec![(target.clone(), Some(saved))]).unwrap();
         let loaded = read_at(&target).unwrap().unwrap();
         assert!(loaded.matches(&settings));
         assert_eq!(&*loaded.password(), "测试-password");
         settings.host = "other.test".into();
         assert!(!loaded.matches(&settings));
         let changed = SavedPassword::new(&settings, "replacement");
-        assert!(save_at(&target, &settings, temp.path(), Some(&changed)).is_err());
+        assert!(transaction(&config, temp.path(), vec![(target.clone(), Some(changed))]).is_err());
         assert_eq!(
             &*read_at(&target).unwrap().unwrap().password(),
             "测试-password"
         );
-        save_at(&target, &settings, &path, None).unwrap();
+        transaction(&config, &path, vec![(target.clone(), None)]).unwrap();
         assert!(read_at(&target).unwrap().is_none());
         assert!(!std::fs::read_to_string(path).unwrap().contains("password"));
+    }
+    #[test]
+    fn independent_credentials_and_multi_record_rollback() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = format!(
+            "LanDeskClient/test/{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        );
+        let a = format!("{base}/a");
+        let b = format!("{base}/b");
+        let c = format!("{base}/c");
+        struct Cleanup(Vec<String>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for target in &self.0 {
+                    let _ = write_at(target, None);
+                }
+            }
+        }
+        let _cleanup = Cleanup(vec![a.clone(), b.clone(), c.clone()]);
+        let first = Settings {
+            host: "192.0.2.1".into(),
+            user: "dev".into(),
+            ..Settings::default()
+        };
+        let second = Settings {
+            host: "192.0.2.2".into(),
+            ..first.clone()
+        };
+        let config = Connections {
+            profiles: vec![first.clone(), second.clone()],
+            ..Connections::default()
+        };
+        let path = temp.path().join("settings.json");
+        transaction(
+            &config,
+            &path,
+            vec![
+                (a.clone(), Some(SavedPassword::new(&first, "one"))),
+                (b.clone(), Some(SavedPassword::new(&second, "two"))),
+            ],
+        )
+        .unwrap();
+        assert!(
+            transaction(
+                &config,
+                temp.path(),
+                vec![
+                    (a.clone(), None),
+                    (c.clone(), Some(SavedPassword::new(&first, "changed")))
+                ]
+            )
+            .is_err()
+        );
+        assert_eq!(&*read_at(&a).unwrap().unwrap().password(), "one");
+        assert_eq!(&*read_at(&b).unwrap().unwrap().password(), "two");
+        assert!(read_at(&c).unwrap().is_none());
+        transaction(&config, &path, vec![(a.clone(), None)]).unwrap();
+        assert!(read_at(&a).unwrap().is_none());
+        assert_eq!(&*read_at(&b).unwrap().unwrap().password(), "two");
     }
 }

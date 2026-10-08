@@ -2,12 +2,12 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LanDesk</title><link rel="stylesheet" href="/style.css"><script src="/app.js" type="module"></script>
+  <title>LanDesk</title><link rel="stylesheet" href="./style.css"><script src="./app.js" type="module"></script>
 </head>
 <body>
   <main id="login">
-    <div class="mark">L</div><h1>LanDesk</h1><p>连接你的 Mac</p>
-    <form id="connect-form"><label for="code">Mac 窗口里的连接码</label><input id="code" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="输入6位数字" pattern="[0-9]{6}" minlength="6" maxlength="6" required><button id="connect">连接</button></form>
+    <div class="mark">L</div><h1>LanDesk</h1>
+    <form id="connect-form"><button id="connect">重新连接</button></form>
     <p id="login-status" role="status"></p>
   </main>
   <section id="session" hidden>

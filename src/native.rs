@@ -1,8 +1,6 @@
 use crate::{
-    formatter::CodeFormatter,
     input::Input,
     protocol::{ClientMessage, MAX_TEXT_BYTES},
-    settings::{CodeSettings, Preference},
 };
 use anyhow::{Result, ensure};
 use objc2::{
@@ -22,7 +20,7 @@ use objc2_foundation::{
 };
 use std::{
     sync::atomic::{AtomicBool, Ordering},
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     time::Instant,
 };
 use tokio::sync::oneshot;
@@ -51,35 +49,6 @@ define_class!(
         fn request_input(&self, _sender: &AnyObject) {
             // Enigo's native permission prompt; this generates no input events.
             let _ = enigo::Enigo::new(&enigo::Settings::default());
-        }
-    }
-);
-
-struct CodeActionIvars {
-    field: Retained<NSTextField>,
-    sender: mpsc::Sender<Preference>,
-}
-
-define_class!(
-    #[unsafe(super = NSObject)]
-    #[thread_kind = MainThreadOnly]
-    #[ivars = CodeActionIvars]
-    struct CodeActions;
-    unsafe impl NSObjectProtocol for CodeActions {}
-    impl CodeActions {
-        #[unsafe(method(saveFixed:))]
-        fn save_fixed(&self, _sender: &AnyObject) {
-            if self.ivars().sender.send(Preference::Fixed {
-                code: self.ivars().field.stringValue().to_string(),
-            }).is_err() {
-                eprintln!("连接码设置窗口已关闭");
-            }
-        }
-        #[unsafe(method(useRandom:))]
-        fn use_random(&self, _sender: &AnyObject) {
-            if self.ivars().sender.send(Preference::Random {}).is_err() {
-                eprintln!("连接码设置窗口已关闭");
-            }
         }
     }
 );
@@ -194,11 +163,7 @@ fn label(
     field
 }
 
-pub fn run(
-    native: Native,
-    rx: mpsc::Receiver<Command>,
-    settings: Arc<Mutex<CodeSettings>>,
-) -> Result<()> {
+pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
     let mtm = MainThreadMarker::new().expect("native UI runs on main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -210,7 +175,7 @@ pub fn run(
     let panel = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 550.0)),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 320.0)),
             NSWindowStyleMask::Titled
                 | NSWindowStyleMask::Closable
                 | NSWindowStyleMask::Miniaturizable,
@@ -228,68 +193,14 @@ pub fn run(
     };
     panel.setDelegate(Some(ProtocolObject::from_ref(&*lifecycle)));
     panel.center();
-    label(&panel, mtm, "LanDesk", 494.0, 28.0);
+    label(&panel, mtm, "LanDesk", 264.0, 28.0);
     label(
         &panel,
         mtm,
-        "Windows 打开 LanDeskClient，输入下方连接码",
-        448.0,
+        "通过 LanDeskClient 建立 SSH 连接后，浏览器自动进入桌面",
+        218.0,
         16.0,
     );
-    let initial = settings
-        .lock()
-        .map_err(|_| anyhow::anyhow!("连接码设置不可用"))?;
-    let code_label = label(&panel, mtm, &initial.code, 402.0, 28.0);
-    let mode_label = label(&panel, mtm, initial.preference.description(), 366.0, 13.0);
-    let field = NSTextField::textFieldWithString(&NSString::from_str(&initial.code), mtm);
-    field.setFormatter(Some(&CodeFormatter::new()));
-    drop(initial);
-    let field_label = label(&panel, mtm, "自定义 6 位数字", 316.0, 14.0);
-    field_label.setFrame(NSRect::new(
-        NSPoint::new(24.0, 316.0),
-        NSSize::new(155.0, 36.0),
-    ));
-    field.setFrame(NSRect::new(
-        NSPoint::new(180.0, 322.0),
-        NSSize::new(160.0, 32.0),
-    ));
-    field.setFont(Some(&NSFont::systemFontOfSize(20.0)));
-    panel
-        .contentView()
-        .expect("native content view")
-        .addSubview(&field);
-    let (settings_tx, settings_rx) = mpsc::channel();
-    let code_actions: Retained<CodeActions> = unsafe {
-        let actions = CodeActions::alloc(mtm).set_ivars(CodeActionIvars {
-            field: field.clone(),
-            sender: settings_tx,
-        });
-        msg_send![super(actions), init]
-    };
-    let mut code_buttons = Vec::new();
-    for (title, action, x) in [
-        ("保存为固定码", sel!(saveFixed:), 24.0),
-        ("切换为随机码", sel!(useRandom:), 290.0),
-    ] {
-        let button = unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str(title),
-                Some(&code_actions),
-                Some(action),
-                mtm,
-            )
-        };
-        button.setFrame(NSRect::new(
-            NSPoint::new(x, 270.0),
-            NSSize::new(250.0, 32.0),
-        ));
-        panel
-            .contentView()
-            .expect("native content view")
-            .addSubview(&button);
-        code_buttons.push(button);
-    }
-    let settings_status = label(&panel, mtm, "", 220.0, 13.0);
     let status = label(&panel, mtm, "等待连接", 170.0, 15.0);
     let permission_label = label(&panel, mtm, "", 120.0, 13.0);
     let actions: Retained<PermissionActions> =
@@ -327,24 +238,6 @@ pub fn run(
     let mut awake: Option<crate::power::KeepAwake> = None;
     while !native.shared.shutdown.load(Ordering::Acquire) {
         objc2::rc::autoreleasepool(|_| {
-            while let Ok(preference) = settings_rx.try_recv() {
-                let result = settings
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("连接码设置不可用"))
-                    .and_then(|mut settings| {
-                        settings.change(preference, &native.shared.active)?;
-                        code_label.setStringValue(&NSString::from_str(&settings.code));
-                        mode_label
-                            .setStringValue(&NSString::from_str(settings.preference.description()));
-                        field.setStringValue(&NSString::from_str(&settings.code));
-                        Ok(())
-                    });
-                let message = match result {
-                    Ok(()) => "已保存，立即生效".to_string(),
-                    Err(error) => format!("{error:#}"),
-                };
-                settings_status.setStringValue(&NSString::from_str(&message));
-            }
             while let Ok(command) = rx.try_recv() {
                 match command {
                     Command::PasteImage { png, reply } => {
@@ -425,11 +318,6 @@ pub fn run(
                 }
             }
             if last_update.elapsed().as_secs_f32() >= 1.0 {
-                let editable = !native.shared.active.load(Ordering::Acquire);
-                field.setEnabled(editable);
-                for button in &code_buttons {
-                    button.setEnabled(editable);
-                }
                 let (capture, input) = permissions();
                 permission_label.setStringValue(&NSString::from_str(&format!(
                     "屏幕录制：{}    辅助功能：{}",
