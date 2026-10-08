@@ -36,7 +36,7 @@ SSH 主机信任文件仍为同目录 `known_hosts`，同进程并发更新加�
 
 ```sh
 cargo fmt --manifest-path client/Cargo.toml --check
-cargo test --manifest-path client/Cargo.toml --locked --lib
+cargo test --manifest-path client/Cargo.toml --locked --no-default-features --lib
 cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
 cargo build --manifest-path client/Cargo.toml --locked --release
 ```

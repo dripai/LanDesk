@@ -207,7 +207,9 @@ impl Connections {
         Ok(())
     }
     pub fn replace(&mut self, old: Option<&str>, mut profile: Settings) -> Result<String> {
-        profile.host = profile.normalized_host();
+        // Normalize the identity, but preserve the SSH host spelling so editing an
+        // imported profile does not silently bypass its existing known_hosts entry.
+        profile.host = profile.host.trim().to_owned();
         profile.validate()?;
         let id = profile.id();
         ensure!(
@@ -260,6 +262,10 @@ mod connection_tests {
         assert_eq!(a.id(), b.id());
         assert_eq!(a.id().len(), 64);
         assert_eq!(profile("Mac.LOCAL.").id(), profile("mac.local").id());
+        let mut config = Connections::default();
+        config.replace(None, profile("Mac.LOCAL.")).unwrap();
+        assert_eq!(config.profiles[0].host, "Mac.LOCAL.");
+        assert!(config.replace(None, profile("mac.local")).is_err());
         b.ssh_port = 2222;
         assert_ne!(a.id(), b.id());
     }
