@@ -3,6 +3,7 @@ use gpui_kit::component::{
     button::*,
     checkbox::Checkbox,
     input::{Input, InputState},
+    scroll::ScrollableElement,
     *,
 };
 use gpui_kit::*;
@@ -279,7 +280,7 @@ impl Render for Client {
         ];
         let mut content = div()
             .v_flex()
-            .size_full()
+            .w_full()
             .p_6()
             .gap_4()
             .bg(cx.theme().background)
@@ -398,7 +399,11 @@ impl Render for Client {
                     ),
             );
         }
-        content
+        div()
+            .id("client-settings-scroll")
+            .size_full()
+            .overflow_y_scrollbar()
+            .child(content.flex_shrink_0())
     }
 }
 
