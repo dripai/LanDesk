@@ -49,11 +49,11 @@ python3 scripts/bundle.py
 
 应用输出在 Cargo target 目录的 `release/bundle/macos/LanDesk.app`。`build.rs` 从 `xcrun` 获取实际 Swift 链接路径以支持 Command Line Tools。开发包使用临时签名，更新后可能需要重新授权；只重新添加 LanDesk，不重置其他应用权限。
 
-Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行，下载产物后解压运行。当前源码的 Windows 编译、托盘和真实连接验证仍在进行，不能将提交工作流视为构建已通过。
+Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行。本轮客户端源码已通过 Windows 格式检查、5 项连接测试、完整客户端 Clippy 检查及 Release 编译：[构建记录与下载包](https://github.com/dripai/LanDesk/actions/runs/37808563245)。下载 `LanDeskClient-windows-x64` 后解压运行 `LanDeskClient.exe`。Windows 托盘、GPU 渲染及连接实际 Mac 的验收仍需 Windows 实机，不能将构建成功等同于这些功能已验证。
 
 已完成的源码验证：30 项 Mac Rust 测试、6 项网页键盘和宽度边界测试、5 项客户端测试。客户端测试包括配置原子保存、损坏配置报错、首次主机密钥信任、密钥变化拒绝、真实本地 SSH 加密通道 64 KiB 往返及取消后释放端口。
 
-独立网页模拟会话已通过实际鼠标拖拽（面板 280 → 432 像素）、方向键调宽、子目录及路径导航验证；模拟会话不等同于真实远控。开发包更新后的权限恢复规则见本节构建说明。熄屏后的真实采集和 Windows 客户端实机效果尚未验证。
+独立网页模拟会话已通过实际鼠标拖拽（面板 280 → 432 像素）、方向键调宽、子目录及路径导航验证。新版在恢复权限并重启后，也已完成真实本机连接、画面采集、用户目录加载及面板方向键调宽验证；Mac 主窗口最小化后重新连接成功，画面及文件服务保持正常。电源断言在会话期间存在，断开后释放。熄屏后的真实采集和 Windows 客户端实机效果尚未验证。
 
 此前版本已实际验证远程画面、键鼠、中文文本发送、应用最小化与恢复保持连接；这些历史结果不代替本轮新功能验收。
 
