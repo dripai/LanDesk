@@ -1,4 +1,5 @@
 mod capture;
+pub mod desktop;
 pub mod files;
 mod ui;
 
@@ -27,7 +28,7 @@ impl HostPlatform for WindowsPlatform {
         }
     }
     fn check_permissions(&self) -> Result<()> {
-        capture::check_desktop()
+        desktop::service::process_id().map(|_| ())
     }
     fn capture(&self) -> Result<Box<dyn CaptureSession>> {
         Ok(Box::new(capture::Capture::start()?))
@@ -37,9 +38,10 @@ impl HostPlatform for WindowsPlatform {
             .context("无法读取当前用户目录")?
             .into())
     }
-    fn input(&self, width: i32, height: i32) -> Result<Box<dyn InputController>> {
-        capture::check_desktop()?;
-        Ok(Box::new(super::enigo_input::Input::new(width, height)?))
+    fn input(&self, _width: i32, _height: i32) -> Result<Box<dyn InputController>> {
+        Ok(Box::new(desktop::broker::Input(
+            desktop::broker::Broker::current()?,
+        )))
     }
     fn keep_awake(&self) -> Result<Box<dyn SessionPower>> {
         ensure!(
