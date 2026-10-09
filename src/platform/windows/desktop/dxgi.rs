@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, ensure};
 use windows::{
     Win32::{
-        Foundation::HMODULE,
+        Foundation::{HMODULE, POINT},
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
             Direct3D11::*,
             Dxgi::{Common::*, *},
+            Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
         },
     },
     core::Interface,
@@ -26,6 +27,7 @@ impl Capture {
     pub fn new() -> Result<Self> {
         unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+            let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
             let mut selected = None;
             let mut adapters = 0;
             loop {
@@ -47,15 +49,13 @@ impl Capture {
                     if !desc.AttachedToDesktop.as_bool() {
                         continue;
                     }
-                    ensure!(selected.is_none(), "当前版本仅支持一个显示器");
-                    ensure!(
-                        desc.DesktopCoordinates.left == 0 && desc.DesktopCoordinates.top == 0,
-                        "显示器原点不受支持"
-                    );
+                    if desc.Monitor != primary {
+                        continue;
+                    }
                     selected = Some((adapter.clone(), output, desc));
                 }
             }
-            let (adapter, output, output_desc) = selected.context("当前会话没有可采集的显示器")?;
+            let (adapter, output, output_desc) = selected.context("Windows 未提供可采集的主屏输出；无外接显示器时需要虚拟显示器，LanDesk 尚未集成虚拟显示驱动")?;
             let mut device = None;
             let mut context = None;
             D3D11CreateDevice(
