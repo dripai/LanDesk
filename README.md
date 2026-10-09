@@ -61,4 +61,4 @@ Mac 打包：`python3 scripts/bundle.py`，输出位于 Cargo target 的 `releas
 
 Windows 服务端：`cargo build --locked --release`，输出 `target/release/landesk.exe`。[服务端工作流](.github/workflows/server.yml)在 Mac/Windows 分别执行测试、Clippy 和构建，Windows artifact 为 `LanDeskServer-windows-x64`。客户端继续使用 [Windows client 工作流](.github/workflows/windows-client.yml)与 `LanDeskClient-windows-x64` artifact。
 
-本轮本机通过服务端 38 项、网页 14 项、客户端连接核心 12 项测试；Mac 与 Windows GNU 目标的全目标 Clippy 通过，Mac 应用打包与签名检查通过。Windows 桌面采集、键鼠、剪贴板、文件 ACL、UAC 和系统 SSH 端口变更仍需实机验收；交叉编译检查不代表这些功能已经验证。用户已确认重构前 Mac 远控及文件阻塞修复使用正常；重构版本尚未安装，需更新后复验。
+本轮本机通过服务端 39 项、网页 14 项、客户端连接核心 12 项测试；Mac 与 Windows GNU 目标的全目标 Clippy 通过，Mac 应用打包与签名检查通过。Windows 桌面采集、键鼠、剪贴板、文件 ACL、UAC 和系统 SSH 端口变更仍需实机验收；交叉编译检查不代表这些功能已经验证。用户已确认重构前 Mac 远控及文件阻塞修复使用正常；重构版本尚未安装，需更新后复验。

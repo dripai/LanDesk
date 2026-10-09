@@ -79,13 +79,11 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+        // ReplaceFile opens the replacement with no sharing. Close our writable
+        // handle first, but keep TempPath ownership for cleanup on failure.
+        let temporary = temporary.into_temp_path();
         let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let source: Vec<u16> = temporary
-            .path()
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
+        let source: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
         // ReplaceFile preserves the original file's ACL; do not replace it with
         // the temporary file's inherited permissions.
         ensure!(
@@ -157,6 +155,16 @@ pub fn wait_for_ssh(port: u16) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn atomic_write_replaces_existing_contents_and_cleans_temporary_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config");
+        std::fs::write(&path, "original").unwrap();
+        atomic_write(&path, b"first").unwrap();
+        atomic_write(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+    #[test]
     fn rejects_invalid_or_conflicting_ports() {
         for value in ["0", "65536", "17890", "22;id", "-1"] {
             assert!(parse_port(value).is_err());
@@ -182,7 +190,7 @@ mod tests {
             || Ok(()),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("已恢复原配置"));
+        assert!(error.to_string().contains("已恢复原配置"), "{error:#}");
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
         assert!(!path.with_extension("landesk-backup").exists());
         assert!(transaction(&path, b"new", || bail!("restart failed"), || Ok(())).is_err());
