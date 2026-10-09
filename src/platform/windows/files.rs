@@ -16,11 +16,36 @@ use windows_sys::Win32::{
     Foundation::GENERIC_WRITE,
     Storage::FileSystem::{
         DELETE, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo,
-        SetFileInformationByHandle,
+        GetFinalPathNameByHandleW, SetFileInformationByHandle,
     },
 };
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const PREFIX: &str = ".landesk-upload-";
+
+fn destination_name(dir: &Dir, name: &str) -> Result<Vec<u16>> {
+    // cap-std keeps this directory open without FILE_SHARE_DELETE. Resolve the
+    // pinned directory's full path, not a path supplied by the browser.
+    let handle = dir.as_raw_handle();
+    let size = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, 0) };
+    ensure!(
+        size > 0,
+        "无法解析上传目录：{}",
+        std::io::Error::last_os_error()
+    );
+    let mut path = vec![0u16; size as usize];
+    let length = unsafe { GetFinalPathNameByHandleW(handle, path.as_mut_ptr(), size, 0) };
+    ensure!(
+        length > 0 && length < size,
+        "无法解析上传目录：{}",
+        std::io::Error::last_os_error()
+    );
+    path.truncate(length as usize);
+    if path.last() != Some(&(b'\\' as u16)) {
+        path.push(b'\\' as u16);
+    }
+    path.extend(name.encode_utf16());
+    Ok(path)
+}
 
 fn valid_name(name: &str) -> Result<()> {
     ensure!(
@@ -180,16 +205,16 @@ impl FileTransfer for Upload {
         let file = self.file.as_ref().context("上传已结束")?;
         file.sync_all()?;
         ensure!(!cancelled.load(Ordering::Acquire), "文件会话已取消");
-        // cap-std pins the directory against replacement. Publish by file handle
-        // with ReplaceIfExists=false; no path-based check/rename race.
-        let name: Vec<u16> = self.target.encode_utf16().collect();
-        let bytes = (std::mem::offset_of!(FILE_RENAME_INFO, FileName) + name.len() * 2)
+        // Win32 FileRenameInfo uses an absolute destination and null root.
+        // Keep the directory pinned and ReplaceIfExists=false during publish.
+        let name = destination_name(&self.dir, &self.target)?;
+        let bytes = (std::mem::offset_of!(FILE_RENAME_INFO, FileName) + (name.len() + 1) * 2)
             .max(std::mem::size_of::<FILE_RENAME_INFO>());
         let mut storage = vec![0usize; bytes.div_ceil(std::mem::size_of::<usize>())];
         unsafe {
             let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
             (*info).Anonymous.ReplaceIfExists = false;
-            (*info).RootDirectory = self.dir.as_raw_handle();
+            (*info).RootDirectory = std::ptr::null_mut();
             (*info).FileNameLength = (name.len() * 2) as u32;
             std::ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
             ensure!(
@@ -261,5 +286,18 @@ mod tests {
         drop(race);
         assert_eq!(std::fs::read(root.path().join("race")).unwrap(), b"keep");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+    #[test]
+    fn upload_uses_pinned_unicode_directory_and_short_destination_name() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("目录");
+        std::fs::create_dir(&nested).unwrap();
+        let home = HomeFiles::open(root.path()).unwrap();
+        let mut upload = home.start_upload(1, "目录", "文", 3).unwrap();
+        assert!(std::fs::rename(&nested, root.path().join("moved")).is_err());
+        upload.chunk(b"abc").unwrap();
+        upload.finish(&AtomicBool::new(false)).unwrap();
+        assert_eq!(std::fs::read(nested.join("文")).unwrap(), b"abc");
+        assert_eq!(std::fs::read_dir(nested).unwrap().count(), 1);
     }
 }

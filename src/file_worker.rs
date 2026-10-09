@@ -221,8 +221,12 @@ mod tests {
     use super::*;
     use crate::platform::filesystem::HomeFiles;
 
-    fn service() -> FileService {
-        FileService::new(HomeFiles::open(&std::env::temp_dir()).unwrap())
+    fn service() -> (tempfile::TempDir, FileService) {
+        // Shared system temp contains files created/deleted by other tests and
+        // processes, so directory reads there are not a stable fixture.
+        let root = tempfile::tempdir().unwrap();
+        let service = FileService::new(HomeFiles::open(root.path()).unwrap());
+        (root, service)
     }
     fn list(id: u32) -> FileRequest {
         FileRequest::Message(ClientMessage::ListDirectory {
@@ -233,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_does_not_wait_for_os_and_reconnect_cannot_spawn_more_workers() {
-        let service = service();
+        let (_root, service) = service();
         let (mut files, started, release) = service.blocked_channel();
         assert!(files.submit(list(1)).is_none());
         started.await.unwrap();
@@ -265,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn abandoning_response_poll_keeps_request_and_deadline() {
-        let service = service();
+        let (_root, service) = service();
         let (mut files, started, release) = service.blocked_channel();
         files.submit(list(1));
         started.await.unwrap();
@@ -282,14 +286,16 @@ mod tests {
 
     #[tokio::test]
     async fn file_error_does_not_poison_following_requests() {
-        let mut files = service().connect();
+        let (_root, service) = service();
+        let mut files = service.connect();
         files.submit(FileRequest::Message(ClientMessage::ListDirectory {
             id: 1,
             path: "..".into(),
         }));
         assert_eq!(files.response().await["type"], "file_error");
         files.submit(list(2));
-        assert_eq!(files.response().await["type"], "directory");
+        let response = files.response().await;
+        assert_eq!(response["type"], "directory", "{response}");
     }
 
     #[tokio::test]
