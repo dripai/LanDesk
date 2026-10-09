@@ -3,6 +3,7 @@ compile_error!("LanDesk 服务端目前仅支持 macOS，Windows 请使用浏览
 
 mod capture;
 mod clipboard_image;
+mod file_worker;
 mod files;
 mod input;
 mod native;
@@ -27,7 +28,7 @@ fn main() -> Result<()> {
     };
     let state = server::AppState {
         native: native.clone(),
-        files: Arc::new(files::HomeFiles::open(std::path::Path::new(
+        files: file_worker::FileService::new(files::HomeFiles::open(std::path::Path::new(
             &objc2_foundation::NSHomeDirectory().to_string(),
         ))?),
     };

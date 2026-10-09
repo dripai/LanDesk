@@ -1,6 +1,6 @@
 use crate::{
     capture::{Capture, FrameEvent},
-    files::{FileSession, HomeFiles},
+    file_worker::{FileChannel, FileRequest, FileService},
     native::{Native, permissions},
     protocol::{ClientMessage, PORT, origin_allowed},
 };
@@ -18,14 +18,13 @@ use axum::{
 use futures_util::SinkExt;
 use std::{
     sync::atomic::Ordering,
-    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 #[derive(Clone)]
 pub struct AppState {
     pub native: Native,
-    pub files: Arc<HomeFiles>,
+    pub files: FileService,
 }
 
 struct SessionGuard(Native);
@@ -215,12 +214,36 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
         socket.send(Message::Binary(jpeg.as_ref().clone().into())),
     )
     .await??;
+    let mut frames = capture.frames.clone();
+    control_loop(
+        socket,
+        &state,
+        state.files.connect(),
+        &mut frames,
+        sequence,
+        |width| {
+            capture.set_resolution(width)?;
+            Ok((capture.width, capture.height))
+        },
+    )
+    .await?;
+    state.native.end_session().await?;
+    Ok(())
+}
+
+async fn control_loop(
+    socket: &mut WebSocket,
+    state: &AppState,
+    mut files: FileChannel,
+    frames: &mut tokio::sync::watch::Receiver<Option<FrameEvent>>,
+    sequence: u64,
+    mut set_resolution: impl FnMut(Option<u32>) -> Result<(u32, u32)>,
+) -> Result<()> {
     let mut heartbeat = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut events = 0_u32;
     let mut rate_window = Instant::now();
     let mut last_sequence = sequence;
-    let files = Arc::new(Mutex::new(FileSession::new(state.files.clone())));
     let mut images = crate::clipboard_image::Images::default();
     loop {
         tokio::select! {
@@ -260,17 +283,17 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
                                 send_json(socket,response).await?;
                             }
                             ClientMessage::SetResolution { width } => {
-                                let result = tokio::task::block_in_place(|| capture.set_resolution(width));
+                                let result = tokio::task::block_in_place(|| set_resolution(width));
                                 let response = match result {
-                                    Ok(()) => serde_json::json!({"type":"resolution","width":capture.width,"height":capture.height,"requested_width":width}),
+                                    Ok((w, h)) => serde_json::json!({"type":"resolution","width":w,"height":h,"requested_width":width}),
                                     Err(error) => serde_json::json!({"type":"resolution_error","message":format!("{error:#}")}),
                                 };
                                 send_json(socket,response).await?;
                             }
                             message @ (ClientMessage::ListDirectory { .. } | ClientMessage::UploadStart { .. } | ClientMessage::UploadFinish { .. } | ClientMessage::UploadCancel { .. }) => {
-                                let files = files.clone();
-                                let response = tokio::task::spawn_blocking(move || files.lock().map_err(|_| anyhow::anyhow!("文件会话不可用")).map(|mut files| files.message(message))).await??;
-                                send_json(socket,response).await?;
+                                if let Some(response) = files.submit(FileRequest::Message(message)) {
+                                    send_json(socket,response).await?;
+                                }
                             }
                             other => state.native.input(other).await?,
                         }
@@ -279,15 +302,16 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
                     Message::Ping(value) => { socket.send(Message::Pong(value)).await?; }
                     Message::Pong(_) => {}
                     Message::Binary(data) => {
-                        let files = files.clone();
-                        let response = tokio::task::spawn_blocking(move || files.lock().map_err(|_| anyhow::anyhow!("文件会话不可用")).map(|mut files| files.chunk(&data))).await??;
-                        send_json(socket,response).await?;
+                        if let Some(response) = files.submit(FileRequest::Chunk(data.to_vec())) {
+                            send_json(socket,response).await?;
+                        }
                     }
                 }
             }
-            changed = capture.frames.changed() => {
+            response = files.response() => send_json(socket,response).await?,
+            changed = frames.changed() => {
                 changed.context("画面采集已停止")?;
-                let frame = capture.frames.borrow_and_update().clone();
+                let frame = frames.borrow_and_update().clone();
                 match frame {
                     Some(FrameEvent::Frame { jpeg, sequence }) if sequence != last_sequence => {
                         tokio::time::timeout(Duration::from_secs(3),socket.send(Message::Binary(jpeg.as_ref().clone().into()))).await??;
@@ -305,7 +329,6 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
             }
         }
     }
-    state.native.end_session().await?;
     Ok(())
 }
 
@@ -325,8 +348,10 @@ pub async fn run(listener: tokio::net::TcpListener, state: AppState) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::files::HomeFiles;
     use crate::native::{Command, Shared};
     use futures_util::StreamExt;
+    use std::sync::Arc;
     use std::sync::mpsc;
     use tokio_tungstenite::{
         connect_async,
@@ -341,7 +366,9 @@ mod tests {
                     tx,
                     shared: Arc::new(Shared::default()),
                 },
-                files: Arc::new(HomeFiles::open(std::path::Path::new("/private/tmp")).unwrap()),
+                files: FileService::new(
+                    HomeFiles::open(std::path::Path::new("/private/tmp")).unwrap(),
+                ),
             },
             rx,
         )
@@ -446,5 +473,132 @@ mod tests {
             Command::RestoreSession { .. }
         ));
         assert!(!state.native.shared.active.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn blocked_directory_does_not_block_frames_disconnect_or_release_session() {
+        blocked_directory_connection(EndConnection::Disconnect).await;
+    }
+
+    #[tokio::test]
+    async fn closed_browser_releases_session_while_directory_is_blocked() {
+        blocked_directory_connection(EndConnection::Close).await;
+    }
+
+    #[tokio::test]
+    async fn missing_heartbeat_releases_session_while_directory_is_blocked() {
+        blocked_directory_connection(EndConnection::HeartbeatTimeout).await;
+    }
+
+    enum EndConnection {
+        Disconnect,
+        Close,
+        HeartbeatTimeout,
+    }
+
+    async fn blocked_directory_connection(end: EndConnection) {
+        let (state, commands) = state();
+        let shared = state.native.shared.clone();
+        let (files, started, release) = state.files.blocked_channel();
+        let (frames, receiver) = tokio::sync::watch::channel(None);
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let context = Arc::new(std::sync::Mutex::new(Some((files, receiver, finished))));
+        let app = Router::new().route(
+            "/ws",
+            get(move |upgrade: WebSocketUpgrade| {
+                let state = state.clone();
+                let (files, mut receiver, finished) = context.lock().unwrap().take().unwrap();
+                async move {
+                    upgrade.on_upgrade(move |mut socket| async move {
+                        state.native.shared.active.store(true, Ordering::Release);
+                        let guard = SessionGuard(state.native.clone());
+                        let result =
+                            control_loop(&mut socket, &state, files, &mut receiver, 0, |_| {
+                                Ok((1, 1))
+                            })
+                            .await;
+                        drop(guard);
+                        let _ = finished.send(result);
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+            .await
+            .unwrap();
+        ws.send(WsMessage::Text(
+            r#"{"type":"list_directory","id":1,"path":""}"#.into(),
+        ))
+        .await
+        .unwrap();
+        started.await.unwrap();
+        ws.send(WsMessage::Text(r#"{"type":"heartbeat"}"#.into()))
+            .await
+            .unwrap();
+        frames
+            .send(Some(FrameEvent::Frame {
+                jpeg: Arc::new(vec![1, 2, 3]),
+                sequence: 1,
+            }))
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(1), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.into_data().as_ref(), &[1, 2, 3]);
+        match end {
+            EndConnection::Disconnect => {
+                ws.send(WsMessage::Text(r#"{"type":"disconnect"}"#.into()))
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(1), done)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            }
+            EndConnection::Close => {
+                drop(ws);
+                // Abrupt socket closure can report an IO error, but must release ownership.
+                let _ = tokio::time::timeout(Duration::from_secs(1), done)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            EndConnection::HeartbeatTimeout => {
+                let message = tokio::time::timeout(Duration::from_secs(12), ws.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .into_text()
+                    .unwrap();
+                assert!(message.contains("file_error") && message.contains("超时"));
+                let error = tokio::time::timeout(Duration::from_secs(7), done)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.to_string().contains("连接超时"));
+            }
+        }
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            Command::RestoreSession { .. }
+        ));
+        assert!(
+            shared
+                .active
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        );
+        release.send(()).unwrap();
+        server.abort();
     }
 }
