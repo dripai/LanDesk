@@ -7,7 +7,10 @@ use std::{
     io::Write,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -229,9 +232,10 @@ impl Upload {
         Ok(json!({"type":"upload_progress","id":self.id,"written":self.written}))
     }
 
-    fn finish(&mut self) -> Result<Value> {
+    fn finish(&mut self, cancelled: &AtomicBool) -> Result<Value> {
         ensure!(self.written == self.expected, "上传尚未完整接收");
         self.file.sync_all().context("保存上传文件失败")?;
+        ensure!(!cancelled.load(Ordering::Acquire), "文件会话已取消");
         // macOS 10.12+: one atomic rename, with no replacement even if the target appeared during upload.
         ensure!(
             unsafe {
@@ -274,10 +278,19 @@ impl Drop for Upload {
 pub struct FileSession {
     home: Arc<HomeFiles>,
     upload: Option<Upload>,
+    cancelled: Arc<AtomicBool>,
 }
 impl FileSession {
+    #[cfg(test)]
     pub fn new(home: Arc<HomeFiles>) -> Self {
-        Self { home, upload: None }
+        Self::with_cancellation(home, Arc::new(AtomicBool::new(false)))
+    }
+    pub fn with_cancellation(home: Arc<HomeFiles>, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            home,
+            upload: None,
+            cancelled,
+        }
     }
     fn abort(&mut self) -> Result<()> {
         if let Some(mut upload) = self.upload.take() {
@@ -310,15 +323,16 @@ impl FileSession {
                 let result = (|| {
                     ensure!(self.upload.is_none(), "已有文件正在上传");
                     self.upload = Some(Upload::start(&self.home, id, &path, &name, size)?);
+                    ensure!(!self.cancelled.load(Ordering::Acquire), "文件会话已取消");
                     Ok(json!({"type":"upload_ready","id":id,"chunk_size":UPLOAD_CHUNK_BYTES}))
                 })();
-                (id, result, false)
+                (id, result, self.cancelled.load(Ordering::Acquire))
             }
             ClientMessage::UploadFinish { id } => {
                 let result = (|| {
                     let upload = self.upload.as_mut().context("没有正在上传的文件")?;
                     ensure!(upload.id == id, "上传编号不匹配");
-                    let value = upload.finish()?;
+                    let value = upload.finish(&self.cancelled)?;
                     self.upload.take();
                     Ok(value)
                 })();
@@ -388,6 +402,21 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.path).unwrap();
         }
+    }
+
+    #[test]
+    fn cancelled_upload_is_not_published_and_cleans_temporary_file() {
+        let f = Fixture::new();
+        let mut session = f.session();
+        assert_eq!(
+            f.start(&mut session, "cancelled.txt", 0)["type"],
+            "upload_ready"
+        );
+        session.cancelled.store(true, Ordering::Release);
+        let response = session.message(ClientMessage::UploadFinish { id: 1 });
+        assert_eq!(response["type"], "file_error");
+        assert_eq!(response["upload_active"], false);
+        assert_eq!(f.count(), 0);
     }
 
     #[test]
