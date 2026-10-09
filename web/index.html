@@ -16,8 +16,8 @@
       <span id="status" class="visually-hidden" role="status">正在连接</span>
       <div id="toolbar-controls">
         <button id="text-button" type="button" aria-label="输入中文" title="输入中文"><span aria-hidden="true">文</span></button>
-        <button id="clipboard-copy" type="button" aria-label="复制 Mac 文字到本机剪贴板" title="先在 Mac 复制文字，再点此取回"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 4H4v12M12 12v5M10 15l2 2 2-2"/></svg></button>
-        <button id="clipboard-paste" type="button" aria-label="粘贴本机文字或图片到 Mac" title="粘贴文字或图片到 Mac"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5v17h14V4h-3M9 12l3-3 3 3M12 9v7"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg></button>
+        <button id="clipboard-copy" type="button" aria-label="复制远程文字到本机剪贴板" title="先在远程电脑复制文字，再点此取回"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 4H4v12M12 12v5M10 15l2 2 2-2"/></svg></button>
+        <button id="clipboard-paste" type="button" aria-label="粘贴本机文字或图片到远程电脑" title="粘贴文字或图片到远程电脑"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5v17h14V4h-3M9 12l3-3 3 3M12 9v7"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg></button>
         <button id="files-button" type="button" aria-label="文件面板" title="文件面板" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3zM3 6V4h7l2 2h9v3"/></svg></button>
         <button id="display-button" type="button" aria-label="采集分辨率" title="采集分辨率"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="15" rx="2"/><path d="M7 21h10M12 18v3M5 7h4M5 7v4M19 14h-4M19 14v-4"/></svg></button>
         <button id="fullscreen" type="button" aria-label="全屏" title="全屏"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5"/></svg></button>
@@ -25,16 +25,16 @@
       </div>
       <button id="toolbar-toggle" type="button" aria-label="收起工具条" title="收起工具条" aria-expanded="true" aria-controls="toolbar-controls"><span aria-hidden="true">−</span></button>
     </div>
-    <div id="viewport" aria-label="远程桌面，点击后使用键盘和鼠标"><img id="screen" alt="Mac 远程桌面" draggable="false"><textarea id="keyboard-input" aria-label="远程键盘输入" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></div>
+    <div id="viewport" aria-label="远程桌面，点击后使用键盘和鼠标"><img id="screen" alt="远程桌面" draggable="false"><textarea id="keyboard-input" aria-label="远程键盘输入" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></div>
     <div id="files-resizer" role="separator" aria-label="调整文件面板宽度" aria-orientation="vertical" tabindex="0" hidden></div>
-    <aside id="files-panel" aria-label="Mac 文件" hidden>
+    <aside id="files-panel" aria-label="远程文件" hidden>
       <header class="files-header"><div id="file-path" title="当前目录"></div><div class="files-actions"><button id="file-up" type="button" title="上级目录" aria-label="上级目录">↑</button><button id="file-refresh" type="button" title="刷新目录" aria-label="刷新目录">↻</button></div></header>
       <section class="directory-section"><h2>目录 <span id="directory-count"></span></h2><div id="directories"></div></section>
       <section id="file-drop"><div class="files-heading"><h2>文件 <span id="file-count"></span></h2><button id="upload-files" type="button">上传</button><input id="file-picker" type="file" multiple hidden></div><div id="file-items"></div><div class="drop-hint">拖入文件，上传到当前目录</div><progress id="upload-progress" max="100" value="0" aria-label="上传进度" hidden></progress><div id="upload-status" role="status"></div></section>
     </aside>
     <div id="notice" role="status" hidden></div>
   </section>
-  <dialog id="text-dialog"><form id="text-form"><label for="text">输入到 Mac</label><textarea id="text" rows="4" maxlength="1000" placeholder="输入中文或其他文本"></textarea><div class="actions"><button type="button" id="text-cancel">取消</button><button>发送</button></div></form></dialog>
-  <dialog id="display-dialog"><form id="display-form"><label for="resolution-mode">采集分辨率</label><select id="resolution-mode"><option value="native">原始像素（默认）</option><option value="1280">宽 1280 像素</option><option value="1920">宽 1920 像素</option><option value="2560">宽 2560 像素</option><option value="custom">自定义宽度</option></select><input id="resolution-width" type="number" min="640" step="1" aria-label="自定义采集宽度" hidden><p id="resolution-status">始终等比例显示，不改变 Mac 系统分辨率。</p><div class="actions"><button type="button" id="display-cancel">取消</button><button id="display-apply">应用</button></div></form></dialog>
+  <dialog id="text-dialog"><form id="text-form"><label for="text">输入到远程电脑</label><textarea id="text" rows="4" maxlength="1000" placeholder="输入中文或其他文本"></textarea><div class="actions"><button type="button" id="text-cancel">取消</button><button>发送</button></div></form></dialog>
+  <dialog id="display-dialog"><form id="display-form"><label for="resolution-mode">采集分辨率</label><select id="resolution-mode"><option value="native">原始像素（默认）</option><option value="1280">宽 1280 像素</option><option value="1920">宽 1920 像素</option><option value="2560">宽 2560 像素</option><option value="custom">自定义宽度</option></select><input id="resolution-width" type="number" min="640" step="1" aria-label="自定义采集宽度" hidden><p id="resolution-status">始终等比例显示，不改变 远程系统分辨率。</p><div class="actions"><button type="button" id="display-cancel">取消</button><button id="display-apply">应用</button></div></form></dialog>
 </body>
 </html>

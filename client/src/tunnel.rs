@@ -171,11 +171,11 @@ async fn run_bound(
     let result = tokio::select! {
         _ = &mut cancel => Ok(StopReason::Disconnected),
         result = async {
-            events.send(Event::Status("正在验证 Mac 用户…".into()))?;
+            events.send(Event::Status("正在验证远程用户…".into()))?;
             let auth = timeout(Duration::from_secs(20), Arc::get_mut(&mut session).context("SSH 认证期间会话已被占用")?.authenticate_password(&settings.user, password.to_string())).await.context("SSH 密码验证超时")??;
             drop(password);
-            ensure!(auth.success(), "SSH 密码验证失败，请检查用户名、密码及 Mac 远程登录设置");
-            let probe = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("Mac 服务检查超时")?.context("无法访问 Mac LanDesk，请先启动 Mac 应用")?;
+            ensure!(auth.success(), "SSH 密码验证失败，请检查用户名、密码及 远程 SSH 服务设置");
+            let probe = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("远程服务检查超时")?.context("无法访问 LanDesk 服务端，请先在目标电脑启动应用")?;
             probe.close().await?;
             let (activity, mut activity_changes) = viewer::activity();
             incoming.activate()?;

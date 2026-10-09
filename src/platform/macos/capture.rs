@@ -36,11 +36,7 @@ fn capture_dimensions(point_width: f64, point_height: f64, scale: f32) -> Result
     Ok((width as u32, height as u32))
 }
 
-#[derive(Clone)]
-pub enum FrameEvent {
-    Frame { jpeg: Arc<Vec<u8>>, sequence: u64 },
-    Error(String),
-}
+use crate::platform::FrameEvent;
 
 pub struct Capture {
     stream: SCStream,

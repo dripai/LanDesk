@@ -13,8 +13,20 @@ pub struct Input {
 
 fn map_key(key: &str) -> Result<Key> {
     Ok(match key {
-        "Control" => Key::Meta, // Windows Ctrl shortcuts become Mac Command shortcuts.
-        "Meta" => Key::Control,
+        "Control" => {
+            if cfg!(target_os = "macos") {
+                Key::Meta
+            } else {
+                Key::Control
+            }
+        }
+        "Meta" => {
+            if cfg!(target_os = "macos") {
+                Key::Control
+            } else {
+                Key::Meta
+            }
+        }
         "Alt" => Key::Alt,
         "Shift" => Key::Shift,
         "Enter" => Key::Return,
@@ -50,14 +62,20 @@ fn map_key(key: &str) -> Result<Key> {
 impl Input {
     pub fn paste(&mut self) -> Result<()> {
         self.release_all()?;
-        self.enigo.key(Key::Meta, Direction::Press)?;
+        let modifier = if cfg!(target_os = "macos") {
+            Key::Meta
+        } else {
+            Key::Control
+        };
+        self.enigo.key(modifier, Direction::Press)?;
         let paste = self.enigo.key(Key::Unicode('v'), Direction::Click);
-        let release = self.enigo.key(Key::Meta, Direction::Release);
+        let release = self.enigo.key(modifier, Direction::Release);
         paste?;
         release?;
         Ok(())
     }
     pub fn new(width: i32, height: i32) -> Result<Self> {
+        #[cfg(target_os = "macos")]
         ensure!(
             objc2::MainThreadMarker::new().is_some(),
             "键鼠控制必须在主线程启动"
@@ -67,9 +85,8 @@ impl Input {
             release_keys_when_dropped: true,
             ..Settings::default()
         };
-        let enigo = Enigo::new(&settings).map_err(|e| {
-            anyhow::anyhow!("无法控制键鼠，请授予 LanDesk 辅助功能权限并重启应用: {e}")
-        })?;
+        let enigo = Enigo::new(&settings)
+            .map_err(|e| anyhow::anyhow!("无法控制键鼠，请检查当前桌面会话及控制权限: {e}"))?;
         Ok(Self {
             enigo,
             keys: HashSet::new(),
@@ -79,6 +96,7 @@ impl Input {
         })
     }
     pub fn handle(&mut self, message: ClientMessage) -> Result<()> {
+        #[cfg(target_os = "macos")]
         ensure!(
             objc2::MainThreadMarker::new().is_some(),
             "键鼠操作必须在主线程执行"
@@ -173,9 +191,29 @@ impl Drop for Input {
     }
 }
 
+use crate::platform::InputController;
+impl InputController for Input {
+    fn handle(&mut self, message: ClientMessage) -> Result<()> {
+        self.handle(message)
+    }
+    fn paste(&mut self) -> Result<()> {
+        self.paste()
+    }
+    fn release_all(&mut self) -> Result<()> {
+        self.release_all()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shortcuts_preserve_control() {
+        assert_eq!(map_key("Control").unwrap(), Key::Control);
+        assert_eq!(map_key("Meta").unwrap(), Key::Meta);
+    }
+    #[cfg(target_os = "macos")]
     #[test]
     fn worker_thread_is_rejected_before_native_input_apis() {
         let error = match Input::new(100, 100) {
@@ -184,6 +222,7 @@ mod tests {
         };
         assert!(error.to_string().contains("主线程"));
     }
+    #[cfg(target_os = "macos")]
     #[test]
     fn windows_shortcuts_map_to_mac_command() {
         assert_eq!(map_key("Control").unwrap(), Key::Meta);

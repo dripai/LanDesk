@@ -1,7 +1,7 @@
 use crate::{
-    capture::{Capture, FrameEvent},
+    desktop::DesktopControl,
     file_worker::{FileChannel, FileRequest, FileService},
-    native::{Native, permissions},
+    platform::{CurrentPlatform, FrameEvent, HostPlatform},
     protocol::{ClientMessage, PORT, origin_allowed},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -23,11 +23,11 @@ use std::{
 
 #[derive(Clone)]
 pub struct AppState {
-    pub native: Native,
+    pub native: DesktopControl,
     pub files: FileService,
 }
 
-struct SessionGuard(Native);
+struct SessionGuard(DesktopControl);
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         // Queue restoration before allowing a new session to acquire ownership.
@@ -110,7 +110,23 @@ pub fn router(state: AppState) -> Router {
                 )
             }),
         )
+        .route(
+            "/platform.js",
+            get(|| async {
+                page_headers(
+                    (
+                        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                        include_str!("../web/platform.js"),
+                    )
+                        .into_response(),
+                )
+            }),
+        )
         .route("/ws", get(upgrade))
+        .route(
+            "/info",
+            get(|| async { page_headers(axum::Json(CurrentPlatform.info()).into_response()) }),
+        )
         .with_state(state)
 }
 
@@ -162,42 +178,37 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
     let Message::Text(text) = message else {
         bail!("请先建立会话");
     };
-    let ClientMessage::Hello {} = serde_json::from_str(&text)? else {
+    let ClientMessage::Hello { protocol_version } = serde_json::from_str(&text)? else {
         bail!("请先建立会话");
     };
+    ensure!(
+        protocol_version == crate::platform::PROTOCOL_VERSION,
+        "服务端协议版本不匹配，请更新 LanDesk 并刷新页面"
+    );
     state
         .native
         .shared
         .active
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| anyhow::anyhow!("已有一个连接，请先断开"))?;
     let _guard = SessionGuard(state.native.clone());
+    ensure!(
+        !state.native.shared.maintenance.load(Ordering::SeqCst),
+        "正在修改系统 SSH 端口，请完成后使用新端口连接"
+    );
     state.native.shared.cancel.store(false, Ordering::Release);
-    let (capture_allowed, input_allowed) = permissions();
-    ensure!(
-        capture_allowed,
-        "请在 Mac 系统设置中授予 LanDesk 屏幕录制权限，然后关闭并重新打开应用"
-    );
-    ensure!(
-        input_allowed,
-        "请在 Mac 系统设置中授予 LanDesk 辅助功能权限，然后关闭并重新打开应用"
-    );
-    let mut capture = tokio::task::spawn_blocking(Capture::start).await??;
-    state
-        .native
-        .begin_input(capture.point_width, capture.point_height)
-        .await?;
+    CurrentPlatform.check_permissions()?;
+    let mut capture = tokio::task::spawn_blocking(|| CurrentPlatform.capture()).await??;
+    let (input_width, input_height) = capture.input_dimensions();
+    state.native.begin_input(input_width, input_height).await?;
+    let mut frames = capture.frames();
     // Report readiness only after capture has produced a real frame.
     tokio::time::timeout(
         Duration::from_secs(8),
-        capture.frames.wait_for(|frame| frame.is_some()),
+        frames.wait_for(|frame| frame.is_some()),
     )
     .await??;
-    let first_frame = capture
-        .frames
-        .borrow_and_update()
-        .clone()
-        .context("首帧丢失")?;
+    let first_frame = frames.borrow_and_update().clone().context("首帧丢失")?;
     let FrameEvent::Frame { jpeg, sequence } = first_frame else {
         let FrameEvent::Error(error) = first_frame else {
             unreachable!()
@@ -206,7 +217,7 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
     };
     send_json(
         socket,
-        serde_json::json!({"type":"ready","width":capture.width,"height":capture.height}),
+        serde_json::json!({"type":"ready","width":capture.dimensions().0,"height":capture.dimensions().1,"server":CurrentPlatform.info()}),
     )
     .await?;
     tokio::time::timeout(
@@ -214,7 +225,6 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
         socket.send(Message::Binary(jpeg.as_ref().clone().into())),
     )
     .await??;
-    let mut frames = capture.frames.clone();
     control_loop(
         socket,
         &state,
@@ -223,7 +233,7 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
         sequence,
         |width| {
             capture.set_resolution(width)?;
-            Ok((capture.width, capture.height))
+            Ok(capture.dimensions())
         },
     )
     .await?;
@@ -348,8 +358,8 @@ pub async fn run(listener: tokio::net::TcpListener, state: AppState) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::files::HomeFiles;
-    use crate::native::{Command, Shared};
+    use crate::desktop::{Command, Shared};
+    use crate::platform::filesystem::HomeFiles;
     use futures_util::StreamExt;
     use std::sync::Arc;
     use std::sync::mpsc;
@@ -362,13 +372,11 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         (
             AppState {
-                native: Native {
+                native: DesktopControl {
                     tx,
                     shared: Arc::new(Shared::default()),
                 },
-                files: FileService::new(
-                    HomeFiles::open(std::path::Path::new("/private/tmp")).unwrap(),
-                ),
+                files: FileService::new(HomeFiles::open(&std::env::temp_dir()).unwrap()),
             },
             rx,
         )
@@ -448,9 +456,11 @@ mod tests {
         let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
             .await
             .unwrap();
-        ws.send(WsMessage::Text(r#"{"type":"hello"}"#.into()))
-            .await
-            .unwrap();
+        ws.send(WsMessage::Text(
+            r#"{"type":"hello","protocol_version":1}"#.into(),
+        ))
+        .await
+        .unwrap();
         assert!(
             ws.next()
                 .await
@@ -473,6 +483,27 @@ mod tests {
             Command::RestoreSession { .. }
         ));
         assert!(!state.native.shared.active.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn ssh_maintenance_rejects_new_sessions_without_leaking_ownership() {
+        let (state, _commands) = state();
+        let shared = state.native.shared.clone();
+        let maintenance = shared.begin_maintenance().unwrap();
+        let (addr, handle) = serve(state).await;
+        let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+            .await
+            .unwrap();
+        ws.send(WsMessage::Text(
+            r#"{"type":"hello","protocol_version":1}"#.into(),
+        ))
+        .await
+        .unwrap();
+        let response = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(response.contains("正在修改系统 SSH 端口"));
+        assert!(!shared.active.load(Ordering::Acquire));
+        drop(maintenance);
+        handle.abort();
     }
 
     #[tokio::test]

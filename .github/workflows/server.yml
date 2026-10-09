@@ -1,0 +1,59 @@
+name: LanDesk server
+
+on:
+  push:
+    branches: [main, "codex/**"]
+    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", "build.rs", "scripts/bundle.py", ".github/workflows/server.yml"]
+  pull_request:
+    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", "build.rs", "scripts/bundle.py", ".github/workflows/server.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare Rust
+        run: rustup update stable
+      - name: Format
+        run: cargo +stable fmt --all -- --check
+      - name: Test
+        run: cargo +stable test --locked
+      - name: Clippy
+        run: cargo +stable clippy --locked --all-targets -- -D warnings
+      - name: Web tests
+        shell: bash
+        run: node --test web/*.test.mjs
+      - name: Windows server
+        if: runner.os == 'Windows'
+        run: cargo +stable build --locked --release
+      - name: Mac bundle
+        if: runner.os == 'macOS'
+        run: python3 scripts/bundle.py
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: LanDeskServer-windows-x64
+          path: |
+            target/release/landesk.exe
+            README.md
+          if-no-files-found: error
+      - name: Archive Mac bundle
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent target/release/bundle/macos/LanDesk.app LanDeskServer-macos.zip
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'macOS'
+        with:
+          name: LanDeskServer-macos
+          path: LanDeskServer-macos.zip
+          if-no-files-found: error

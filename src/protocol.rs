@@ -7,7 +7,9 @@ pub const UPLOAD_CHUNK_BYTES: usize = 65_536;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientMessage {
-    Hello {},
+    Hello {
+        protocol_version: u32,
+    },
     Heartbeat,
     Pointer {
         x: f64,
