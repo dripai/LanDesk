@@ -7,6 +7,17 @@ use std::{
 };
 use tokio::sync::watch;
 
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGMainDisplayID() -> u32;
+}
+
+fn primary_display_index(ids: impl IntoIterator<Item = u32>, primary: u32) -> Result<usize> {
+    ids.into_iter()
+        .position(|id| id == primary)
+        .context("系统主屏暂不可用，请等待显示器切换完成后重连")
+}
+
 const JPEG_QUALITY: u8 = 92;
 const MAX_RGB_BYTES: usize = 48_000_000;
 
@@ -149,16 +160,12 @@ impl Capture {
         let content = SCShareableContent::get()
             .context("无法采集屏幕，请授予 LanDesk 屏幕录制权限并重启应用")?;
         let displays = content.displays();
-        ensure!(
-            displays.len() == 1,
-            "第一版仅支持一个显示器，请断开其他显示器后重连"
-        );
-        let display = &displays[0];
+        let index = primary_display_index(
+            displays.iter().map(|display| display.display_id()),
+            unsafe { CGMainDisplayID() },
+        )?;
+        let display = &displays[index];
         let bounds = display.frame();
-        ensure!(
-            bounds.origin.x == 0.0 && bounds.origin.y == 0.0,
-            "当前显示器坐标原点不受支持"
-        );
         let filter = SCContentFilter::create()
             .with_display(display)
             .with_excluding_windows(&[])
@@ -216,6 +223,14 @@ impl Drop for Capture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_selects_system_primary_in_multi_display_list() {
+        assert_eq!(primary_display_index([80, 42, 99], 42).unwrap(), 1);
+        assert_eq!(primary_display_index([42], 42).unwrap(), 0);
+        assert!(primary_display_index([80, 99], 42).is_err());
+        assert!(primary_display_index([], 42).is_err());
+    }
 
     #[test]
     fn selected_resolution_preserves_aspect_and_original_mode() {
