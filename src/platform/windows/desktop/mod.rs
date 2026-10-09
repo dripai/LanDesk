@@ -4,6 +4,7 @@ mod dxgi;
 mod install;
 pub(super) mod service;
 mod sys;
+mod virtual_display;
 pub(super) mod wire;
 pub(super) mod worker;
 

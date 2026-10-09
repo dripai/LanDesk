@@ -12,6 +12,15 @@ use windows::{
     core::Interface,
 };
 
+#[derive(Debug)]
+pub struct NoOutput;
+impl std::fmt::Display for NoOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Windows 当前会话没有已连接的显示输出")
+    }
+}
+impl std::error::Error for NoOutput {}
+
 pub struct Capture {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -29,6 +38,7 @@ impl Capture {
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
             let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
             let mut selected = None;
+            let mut attached = 0;
             let mut adapters = 0;
             loop {
                 let adapter = match factory.EnumAdapters1(adapters) {
@@ -49,13 +59,21 @@ impl Capture {
                     if !desc.AttachedToDesktop.as_bool() {
                         continue;
                     }
+                    attached += 1;
                     if desc.Monitor != primary {
                         continue;
                     }
                     selected = Some((adapter.clone(), output, desc));
                 }
             }
-            let (adapter, output, output_desc) = selected.context("Windows 未提供可采集的主屏输出；无外接显示器时需要虚拟显示器，LanDesk 尚未集成虚拟显示驱动")?;
+            if attached == 0 {
+                return Err(NoOutput.into());
+            }
+            let (adapter, output, output_desc) = selected
+                .ok_or_else(|| {
+                    windows::core::Error::from_hresult(DXGI_ERROR_NOT_CURRENTLY_AVAILABLE)
+                })
+                .context("Windows 尚未提供系统主屏的 DXGI 输出")?;
             let mut device = None;
             let mut context = None;
             D3D11CreateDevice(

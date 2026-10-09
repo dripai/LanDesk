@@ -61,7 +61,8 @@ impl Broker {
                 }
             })?;
         let (width, height) = result
-            .recv_timeout(Duration::from_secs(15))
+            // Includes first-time PnP enumeration and display-driver startup.
+            .recv_timeout(Duration::from_secs(45))
             .context("等待桌面服务响应失败")?
             .map_err(anyhow::Error::msg)?;
         *current = Arc::downgrade(&broker);

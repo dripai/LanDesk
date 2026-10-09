@@ -8,7 +8,7 @@
 ## 使用
 
 1. 被控电脑运行 `LanDeskServer.app`（Mac）或 `LanDeskServer.exe`（Windows），设置访问密码（至少 10 个字符），点击“保存并启动”。默认连接端口 **17891**。首次未设密码时不监听网络；之后启动自动加载配置并监听。
-2. Mac 自行授予屏幕录制、辅助功能权限并重开。Windows 首次启动及更新自动请求管理员授权，安装随应用提供的桌面服务，无需另装软件；如显示防火墙提示，允许预期网络访问；LanDesk 不修改系统 SSH 配置或防火墙规则。
+2. Mac 自行授予屏幕录制、辅助功能权限并重开。Windows 首次启动及更新自动请求管理员授权，一起安装桌面服务和内置签名虚拟显示驱动，无需另行下载软件；如显示防火墙提示，允许预期网络访问；LanDesk 不修改系统 SSH 配置或防火墙规则。
 3. Windows 打开 [LanDeskClient](client/README.md)，添加服务器的 IP/主机名、连接端口和 **LanDesk 访问密码**，点击“连接”后自动打开网页。不填写系统用户名或密码。两端需要一起更新；旧版本不能连接新版服务端。
 4. 每台服务器使用 `http://127.0.0.1:17890/s/<地址哈希>/` 独立标签。网页自动识别 Mac/Windows 能力，没有六位连接码。首次自动记录设备密钥，后续密钥变化拒绝连接。
 5. 点击画面操作。连接 Mac 时 Ctrl 快捷键映射 Command；连接 Windows 时保留 Ctrl。支持方向键长按、中文与全角标点，松开或失焦释放按键。
@@ -53,9 +53,9 @@ Windows 已实现 `LanDeskDesktop` LocalSystem 服务与交互会话桌面进程
 
 服务程序放在 `%ProgramFiles%\LanDeskServer\<版本哈希>\LanDeskServer.exe`。下载的程序负责安装并以原用户身份启动已安装版本；更新会重启桌面服务并断开当时的采集。服务自动启动，但网络监听仍由用户界面的 LanDeskServer 持有：**锁屏时可保持远控；关闭应用、注销或重启后未启动用户应用时，不能远程连接。** 尚未提供启动登录前的无人值守连接及发送 Ctrl+Alt+Del 的独立功能；启用强制安全注意序列的系统登录流程尚未覆盖。Windows 熄屏能力仍为 false，Linux 后端尚未实现。
 
-无显示器的 Windows 主机需要系统提供虚拟显示输出，当前 LanDesk 尚未集成虚拟显示驱动，不能据此宣称支持无屏主机。Mac 目前采集已有系统主屏，不创建虚拟屏幕；实体屏幕熄屏也未实现。
+Windows x64 已接入无屏自动创建虚拟显示器：内置 [Virtual Display Driver 25.7.23](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23) 签名包，通过系统驱动安装接口暂存；连接时 DXGI 没有已连接输出才创建设备，默认 1920×1080@60Hz，断开后释放。原有上游 VDD 配置会保留，实际分辨率遵循该配置；有显示输出时继续采集主屏。Windows 10 无屏 mini 主机的驱动安装、画面及键鼠仍待实机验收，不能将交叉检查当作功能已验证。[驱动来源、配置和验收步骤](third_party/virtual-display/README.md)。Mac 目前采集已有系统主屏，不创建虚拟屏幕；实体屏幕熄屏也未实现。
 
-需要卸载后台服务时，退出 LanDeskServer，在管理员终端执行 `LanDeskServer.exe --uninstall-desktop-service`。此命令停止并删除服务注册，不删除用户配置或程序版本目录。
+需要卸载后台服务时，退出 LanDeskServer，在管理员终端执行 `LanDeskServer.exe --uninstall-desktop-service`。此命令停止并删除服务注册、结束桌面进程并释放其虚拟显示设备；保留用户配置、程序版本目录和驱动缓存。
 
 
 ## 构建与验证
@@ -69,6 +69,6 @@ node --test web/*.test.mjs
 
 Mac 打包：`python3 scripts/bundle.py`，输出位于 Cargo target 的 `release/bundle/macos/LanDeskServer.app`。开发包使用临时签名，更新后可能需要自行恢复权限；不重置其他应用权限。
 
-Windows 服务端：`cargo build --locked --release`，输出 `target/release/LanDeskServer.exe`。[服务端工作流](.github/workflows/server.yml)在 Mac/Windows 分别执行测试、Clippy 和构建，artifact 为 `LanDeskServer-windows-x64` / `LanDeskServer-macos`。客户端使用 [Windows client 工作流](.github/workflows/windows-client.yml)，artifact 为 `LanDeskClient-windows-x64`。Windows 构建使用 MSVC、Windows SDK 和 CMake；最终用户不需要构建工具。
+Windows 服务端：先执行 `python scripts/prepare_virtual_display.py` 下载并校验固定版本驱动，再执行 `cargo build --locked --release`，输出 `target/release/LanDeskServer.exe`（含驱动，无需旁置文件）。[服务端工作流](.github/workflows/server.yml)自动准备驱动并验证签名，在 Mac/Windows 分别执行测试、Clippy 和构建，artifact 为 `LanDeskServer-windows-x64` / `LanDeskServer-macos`。客户端使用 [Windows client 工作流](.github/workflows/windows-client.yml)，artifact 为 `LanDeskClient-windows-x64`。Windows 构建使用 Python 3、MSVC、Windows SDK 和 CMake；最终用户不需要构建工具。
 
 自动化测试覆盖密码校验与设备身份保持、实际 TCP 加密通道中的 HTTP/WebSocket 收发、拒绝命令行及任意转发、密码轮换断连、配置失败保留旧服务，以及原有网页和远控会话回归。测试通过不代表 Windows/Mac 桌面采集、权限、键鼠或防火墙已完成实机验收。开机登录前无人值守连接、Linux 服务端、设备发现及中继尚未实现。

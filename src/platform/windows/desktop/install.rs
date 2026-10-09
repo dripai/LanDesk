@@ -98,7 +98,7 @@ fn elevate(argument: &str) -> Result<()> {
         Ok(())
     }
 }
-fn directory(path: &Path) -> Result<()> {
+pub(super) fn directory(path: &Path) -> Result<()> {
     match std::fs::create_dir(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -132,6 +132,7 @@ pub fn install() -> Result<()> {
         temp.persist_noclobber(&target)
             .context("保存桌面服务失败")?;
     }
+    super::virtual_display::install()?;
     let manager = service::manager(SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE)?;
     let name = wide(service::NAME);
     let binary = wide(format!("\"{}\" --desktop-service", target.display()));
