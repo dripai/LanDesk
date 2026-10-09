@@ -10,21 +10,21 @@ root = Path(__file__).resolve().parent.parent
 subprocess.run(["cargo", "build", "--release", "--locked"], cwd=root, check=True)
 metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=root, text=True, encoding="utf-8"))
 target = Path(metadata["target_directory"]) / "release"
-bundle = target / "bundle" / "macos" / "LanDesk.app"
+bundle = target / "bundle" / "macos" / "LanDeskServer.app"
 macos = bundle / "Contents" / "MacOS"
 macos.mkdir(parents=True, exist_ok=True)
-shutil.copy2(target / "landesk", macos / "LanDesk")
+shutil.copy2(target / "LanDeskServer", macos / "LanDeskServer")
 info = {
-    "CFBundleName": "LanDesk",
-    "CFBundleDisplayName": "LanDesk",
+    "CFBundleName": "LanDeskServer",
+    "CFBundleDisplayName": "LanDeskServer",
     "CFBundleIdentifier": "local.aiwork.LanDesk",
-    "CFBundleExecutable": "LanDesk",
+    "CFBundleExecutable": "LanDeskServer",
     "CFBundleVersion": "2",
     "CFBundleShortVersionString": "0.1.1",
     "CFBundlePackageType": "APPL",
     "LSMinimumSystemVersion": "14.2",
     "NSHighResolutionCapable": True,
-    "NSScreenCaptureUsageDescription": "通过你主动建立的 SSH 隧道向自己的浏览器提供 Mac 桌面画面。",
+    "NSScreenCaptureUsageDescription": "通过 LanDeskClient 的加密连接提供 Mac 桌面画面。",
 }
 with (bundle / "Contents" / "Info.plist").open("wb") as file:
     plistlib.dump(info, file)

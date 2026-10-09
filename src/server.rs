@@ -2,7 +2,7 @@ use crate::{
     desktop::DesktopControl,
     file_worker::{FileChannel, FileRequest, FileService},
     platform::{CurrentPlatform, FrameEvent, HostPlatform},
-    protocol::{ClientMessage, PORT, origin_allowed},
+    protocol::{ClientMessage, origin_allowed},
 };
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
@@ -144,7 +144,7 @@ async fn upgrade(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
     if !origin_allowed(origin, host) {
-        return (StatusCode::FORBIDDEN, "只允许本机浏览器或 SSH 隧道连接").into_response();
+        return (StatusCode::FORBIDDEN, "只允许 LanDeskClient 网页入口连接").into_response();
     }
     upgrade
         .max_message_size(512 * 1024)
@@ -194,7 +194,7 @@ async fn session(socket: &mut WebSocket, state: AppState) -> Result<()> {
     let _guard = SessionGuard(state.native.clone());
     ensure!(
         !state.native.shared.maintenance.load(Ordering::SeqCst),
-        "正在修改系统 SSH 端口，请完成后使用新端口连接"
+        "正在保存连接设置，请完成后重新连接"
     );
     state.native.shared.cancel.store(false, Ordering::Release);
     CurrentPlatform.check_permissions()?;
@@ -342,9 +342,8 @@ async fn control_loop(
     Ok(())
 }
 
-pub async fn run(listener: tokio::net::TcpListener, state: AppState) -> Result<()> {
+pub async fn run(listener: crate::transport::Listener, state: AppState) -> Result<()> {
     let shared = state.native.shared.clone();
-    println!("LanDesk 已启动，仅监听 http://127.0.0.1:{PORT}");
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
             while !shared.shutdown.load(Ordering::Acquire) {
@@ -486,7 +485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_maintenance_rejects_new_sessions_without_leaking_ownership() {
+    async fn connection_maintenance_rejects_new_sessions_without_leaking_ownership() {
         let (state, _commands) = state();
         let shared = state.native.shared.clone();
         let maintenance = shared.begin_maintenance().unwrap();
@@ -500,7 +499,7 @@ mod tests {
         .await
         .unwrap();
         let response = ws.next().await.unwrap().unwrap().into_text().unwrap();
-        assert!(response.contains("正在修改系统 SSH 端口"));
+        assert!(response.contains("正在保存连接设置"));
         assert!(!shared.active.load(Ordering::Acquire));
         drop(maintenance);
         handle.abort();

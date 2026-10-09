@@ -45,19 +45,19 @@ impl client::Handler for Handler {
     async fn check_server_key(&mut self, server: &PublicKeyOrCertificate) -> Result<bool> {
         ensure!(
             server.certificate().is_none(),
-            "首版暂不支持 SSH 主机证书，请使用普通主机密钥"
+            "首版暂不支持设备证书，请使用普通主机密钥"
         );
         let _lock = HOST_KEYS
             .lock()
-            .map_err(|_| anyhow::anyhow!("SSH 主机信任状态不可用"))?;
+            .map_err(|_| anyhow::anyhow!("设备信任状态不可用"))?;
         let key = server.public_key();
         if keys::check_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)
-            .context("SSH 主机密钥已变化或信任文件无法读取，请核对 Mac 主机")?
+            .context("设备密钥已变化或信任文件无法读取，请核对目标设备")?
         {
             return Ok(true);
         }
         save_host_key(&self.host, self.port, &key, &self.known_hosts)
-            .context("无法保存首次连接的 SSH 主机密钥")?;
+            .context("无法保存首次连接的设备密钥")?;
         Ok(true)
     }
 }
@@ -127,7 +127,7 @@ pub async fn run(
     routes: Routes,
 ) -> Result<StopReason> {
     settings.validate()?;
-    ensure!(!password.is_empty(), "请输入 Mac SSH 密码");
+    ensure!(!password.is_empty(), "请输入 LanDesk 访问密码");
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
     let registration = Registration::new(settings.id(), routes, sender);
     run_bound(
@@ -152,7 +152,7 @@ async fn run_bound(
     mut cancel: oneshot::Receiver<()>,
     mut incoming: Incoming,
 ) -> Result<StopReason> {
-    events.send(Event::Status("正在连接 SSH…".into()))?;
+    events.send(Event::Status("正在建立加密连接…".into()))?;
     let config = Arc::new(client::Config {
         nodelay: true,
         keepalive_interval: Some(Duration::from_secs(15)),
@@ -160,21 +160,21 @@ async fn run_bound(
         ..Default::default()
     });
     let handler = Handler {
-        host: settings.host.clone(),
-        port: settings.ssh_port,
+        host: settings.normalized_host(),
+        port: settings.port,
         known_hosts,
     };
     let mut session = Arc::new(tokio::select! {
         _ = &mut cancel => return Ok(StopReason::Disconnected),
-        result = timeout(Duration::from_secs(20), client::connect(config, (settings.host.as_str(), settings.ssh_port), handler)) => result.context("SSH 连接超时")??,
+        result = timeout(Duration::from_secs(20), client::connect(config, (settings.host.as_str(), settings.port), handler)) => result.context("加密连接超时")??,
     });
     let result = tokio::select! {
         _ = &mut cancel => Ok(StopReason::Disconnected),
         result = async {
-            events.send(Event::Status("正在验证远程用户…".into()))?;
-            let auth = timeout(Duration::from_secs(20), Arc::get_mut(&mut session).context("SSH 认证期间会话已被占用")?.authenticate_password(&settings.user, password.to_string())).await.context("SSH 密码验证超时")??;
+            events.send(Event::Status("正在验证访问密码…".into()))?;
+            let auth = timeout(Duration::from_secs(20), Arc::get_mut(&mut session).context("访问认证期间会话已被占用")?.authenticate_password("landesk", password.to_string())).await.context("访问密码验证超时")??;
             drop(password);
-            ensure!(auth.success(), "SSH 密码验证失败，请检查用户名、密码及 远程 SSH 服务设置");
+            ensure!(auth.success(), "访问密码验证失败，请使用 LanDeskServer 设置的密码");
             let probe = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("远程服务检查超时")?.context("无法访问 LanDesk 服务端，请先在目标电脑启动应用")?;
             probe.close().await?;
             let (activity, mut activity_changes) = viewer::activity();
@@ -199,7 +199,7 @@ async fn run_bound(
                     changed = activity_changes.changed() => {
                         changed.context("远控连接状态通道已关闭")?;
                     }
-                    _ = tick.tick() => { ensure!(!session.is_closed(), "SSH 连接已断开"); }
+                    _ = tick.tick() => { ensure!(!session.is_closed(), "加密连接已断开"); }
                     result = transfers.join_next(), if !transfers.is_empty() => {
                         if let Some(Err(error)) = result { bail!("隧道任务异常：{error}"); }
                         if let Some(Ok(Err(error))) = result {
@@ -243,7 +243,7 @@ mod tests {
             user: &str,
             password: &str,
         ) -> Result<russh::server::Auth> {
-            Ok(if user == "tester" && password == "test-only" {
+            Ok(if user == "landesk" && password == "test-only" {
                 russh::server::Auth::Accept
             } else {
                 russh::server::Auth::reject()
@@ -354,8 +354,7 @@ mod tests {
             let address = listener.local_addr().unwrap();
             let settings = Settings {
                 host: "127.0.0.1".into(),
-                user: "tester".into(),
-                ssh_port,
+                port: ssh_port,
                 ..Settings::default()
             };
             let (events, receiver) = mpsc::channel();

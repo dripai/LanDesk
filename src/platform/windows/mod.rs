@@ -1,6 +1,5 @@
 mod capture;
 pub mod files;
-pub mod ssh;
 mod ui;
 
 use super::*;

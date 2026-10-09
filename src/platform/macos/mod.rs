@@ -2,7 +2,6 @@ pub mod capture;
 pub mod files;
 use super::enigo_input as input;
 mod power;
-pub mod ssh;
 mod ui;
 
 use super::*;
