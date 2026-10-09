@@ -13,7 +13,6 @@ pub struct Settings {
     pub name: String,
     pub host: String,
     pub port: u16,
-    pub open_browser: bool,
     pub minimize_to_tray: bool,
 }
 
@@ -23,7 +22,6 @@ impl Default for Settings {
             name: String::new(),
             host: String::new(),
             port: 17891,
-            open_browser: true,
             minimize_to_tray: true,
         }
     }
@@ -92,7 +90,7 @@ pub struct Connections {
 impl Default for Connections {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             profiles: Vec::new(),
             minimize_to_tray: true,
         }
@@ -102,7 +100,23 @@ impl Connections {
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read(path) {
             Ok(bytes) => {
-                let config: Self = serde_json::from_slice(&bytes)
+                let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+                    .context("连接列表格式错误，请检查 connections.json")?;
+                // Remove the retired preference without discarding existing connections.
+                if value.get("version").and_then(|v| v.as_u64()) == Some(2) {
+                    let profiles = value
+                        .get_mut("profiles")
+                        .and_then(|v| v.as_array_mut())
+                        .context("连接列表格式错误")?;
+                    for profile in profiles {
+                        profile
+                            .as_object_mut()
+                            .context("连接条目格式错误")?
+                            .remove("open_browser");
+                    }
+                    value["version"] = 3.into();
+                }
+                let config: Self = serde_json::from_value(value)
                     .context("连接列表格式错误，请检查 connections.json")?;
                 config.validate()?;
                 Ok(config)
@@ -112,7 +126,7 @@ impl Connections {
         }
     }
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.version == 2, "不支持的连接列表版本");
+        ensure!(self.version == 3, "不支持的连接列表版本");
         let mut ids = std::collections::HashSet::new();
         for profile in &self.profiles {
             profile.validate()?;
@@ -198,6 +212,27 @@ mod connection_tests {
         config.profiles.remove(0);
         config.save(&path).unwrap();
         assert_eq!(Connections::load(&path).unwrap().profiles.len(), 1);
+    }
+    #[test]
+    fn removes_retired_browser_preference_without_losing_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let original = Connections {
+            profiles: vec![profile("192.0.2.1")],
+            ..Connections::default()
+        };
+        let mut old = serde_json::to_value(&original).unwrap();
+        old["version"] = 2.into();
+        old["profiles"][0]["open_browser"] = false.into();
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let migrated = Connections::load(&path).unwrap();
+        assert_eq!(migrated, original);
+        migrated.save(&path).unwrap();
+        assert!(
+            !std::fs::read_to_string(path)
+                .unwrap()
+                .contains("open_browser")
+        );
     }
     #[test]
     fn unsupported_or_corrupt_config_is_reported_and_invalid_edit_preserves_file() {

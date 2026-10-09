@@ -24,13 +24,13 @@ const PORT: u16 = 17890;
 pub enum Event {
     Status(String),
     Ready,
+    WaitingForReconnect(String),
     Stopped(Result<StopReason>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum StopReason {
     Disconnected,
-    IdleTimeout,
 }
 
 static HOST_KEYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -101,6 +101,13 @@ enum Incoming {
     Local(TcpListener),
 }
 impl Incoming {
+    fn is_active(&self) -> bool {
+        match self {
+            Self::Routed { registration, .. } => registration.is_active(),
+            #[cfg(test)]
+            Self::Local(_) => true,
+        }
+    }
     fn activate(&mut self) -> Result<()> {
         match self {
             Self::Routed { registration, .. } => registration.activate(),
@@ -130,7 +137,7 @@ pub async fn run(
     ensure!(!password.is_empty(), "请输入 LanDesk 访问密码");
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
     let registration = Registration::new(settings.id(), routes, sender);
-    run_bound(
+    maintain(
         settings,
         password,
         known_hosts,
@@ -144,13 +151,52 @@ pub async fn run(
     .await
 }
 
-async fn run_bound(
+// Keep the authorized route and its in-memory password until explicit disconnect.
+// A new browser request restarts transport after a network failure; no background retry loop.
+async fn maintain(
     settings: Settings,
     password: Zeroizing<String>,
     known_hosts: PathBuf,
     events: mpsc::Sender<Event>,
     mut cancel: oneshot::Receiver<()>,
     mut incoming: Incoming,
+) -> Result<StopReason> {
+    let mut first = None;
+    loop {
+        let result = run_bound(
+            settings.clone(),
+            Zeroizing::new(password.to_string()),
+            known_hosts.clone(),
+            events.clone(),
+            &mut cancel,
+            &mut incoming,
+            first.take(),
+        )
+        .await;
+        match result {
+            Ok(reason) => return Ok(reason),
+            Err(error) if !incoming.is_active() => return Err(error),
+            Err(error) => {
+                events.send(Event::WaitingForReconnect(format!(
+                    "连接中断：{error:#}；可在网页重新连接"
+                )))?;
+            }
+        }
+        first = Some(tokio::select! {
+            _ = &mut cancel => return Ok(StopReason::Disconnected),
+            socket = incoming.accept() => socket?,
+        });
+    }
+}
+
+async fn run_bound(
+    settings: Settings,
+    password: Zeroizing<String>,
+    known_hosts: PathBuf,
+    events: mpsc::Sender<Event>,
+    cancel: &mut oneshot::Receiver<()>,
+    incoming: &mut Incoming,
+    mut first: Option<Box<dyn StreamIo>>,
 ) -> Result<StopReason> {
     events.send(Event::Status("正在建立加密连接…".into()))?;
     let config = Arc::new(client::Config {
@@ -165,11 +211,11 @@ async fn run_bound(
         known_hosts,
     };
     let mut session = Arc::new(tokio::select! {
-        _ = &mut cancel => return Ok(StopReason::Disconnected),
+        _ = &mut *cancel => return Ok(StopReason::Disconnected),
         result = timeout(Duration::from_secs(20), client::connect(config, (settings.host.as_str(), settings.port), handler)) => result.context("加密连接超时")??,
     });
     let result = tokio::select! {
-        _ = &mut cancel => Ok(StopReason::Disconnected),
+        _ = &mut *cancel => Ok(StopReason::Disconnected),
         result = async {
             events.send(Event::Status("正在验证访问密码…".into()))?;
             let auth = timeout(Duration::from_secs(20), Arc::get_mut(&mut session).context("访问认证期间会话已被占用")?.authenticate_password("landesk", password.to_string())).await.context("访问密码验证超时")??;
@@ -177,28 +223,12 @@ async fn run_bound(
             ensure!(auth.success(), "访问密码验证失败，请使用 LanDeskServer 设置的密码");
             let probe = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("远程服务检查超时")?.context("无法访问 LanDesk 服务端，请先在目标电脑启动应用")?;
             probe.close().await?;
-            let (activity, mut activity_changes) = viewer::activity();
             incoming.activate()?;
             events.send(Event::Ready)?;
             let mut transfers = JoinSet::new();
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
-                let deadline = activity_changes.borrow_and_update().deadline();
                 tokio::select! {
-                    _ = async {
-                        match deadline {
-                            Some(deadline) => tokio::time::sleep_until(deadline).await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        // Recheck after waking: a new viewer may have arrived at the deadline.
-                        if activity_changes.borrow().deadline().is_some_and(|end| end <= tokio::time::Instant::now()) {
-                            break Ok(StopReason::IdleTimeout);
-                        }
-                    }
-                    changed = activity_changes.changed() => {
-                        changed.context("远控连接状态通道已关闭")?;
-                    }
                     _ = tick.tick() => { ensure!(!session.is_closed(), "加密连接已断开"); }
                     result = transfers.join_next(), if !transfers.is_empty() => {
                         if let Some(Err(error)) = result { bail!("隧道任务异常：{error}"); }
@@ -206,20 +236,18 @@ async fn run_bound(
                             events.send(Event::Status(format!("网页连接已结束：{error:#}")))?;
                         }
                     }
-                    accepted = incoming.accept(), if transfers.len() < 32 => {
+                    accepted = async { match first.take() { Some(socket) => Ok(socket), None => incoming.accept().await } }, if transfers.len() < 32 => {
                         let socket = accepted?;
                         let session = session.clone();
-                        let activity = activity.clone();
                         transfers.spawn(async move {
                             let channel = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("转发通道打开超时")??;
-                            viewer::forward(socket, channel.into_stream(), activity).await
+                            viewer::forward(socket, channel.into_stream()).await
                         });
                     }
                 }
             }
         } => result,
     };
-    drop(incoming);
     // Dropping the transfer JoinSet cancels every local socket before SSH is closed.
     let _ = timeout(
         Duration::from_secs(3),
@@ -315,6 +343,8 @@ mod tests {
         cancel: Option<oneshot::Sender<()>>,
         task: tokio::task::JoinHandle<Result<StopReason>>,
         server: tokio::task::JoinHandle<()>,
+        cut: tokio::sync::mpsc::Sender<()>,
+        events: mpsc::Receiver<Event>,
     }
     impl Drop for TestTunnel {
         fn drop(&mut self) {
@@ -343,12 +373,21 @@ mod tests {
                 keys: vec![key],
                 ..Default::default()
             });
+            let (cut, mut cut_rx) = tokio::sync::mpsc::channel(1);
             let server = tokio::spawn(async move {
-                let (socket, _) = ssh_listener.accept().await.unwrap();
-                let _ = russh::server::run_stream(config, socket, EchoServer(ssh_port))
-                    .await
-                    .unwrap()
-                    .await;
+                while let Ok((socket, _)) = ssh_listener.accept().await {
+                    let mut connection =
+                        russh::server::run_stream(config.clone(), socket, EchoServer(ssh_port))
+                            .await
+                            .unwrap();
+                    tokio::select! {
+                        _ = &mut connection => {},
+                        _ = cut_rx.recv() => {
+                            let _ = connection.handle().disconnect(Disconnect::ByApplication, "test network interruption".into(), "".into()).await;
+                            let _ = connection.await;
+                        }
+                    }
+                }
             });
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -370,7 +409,7 @@ mod tests {
                     routes,
                 ))
             } else {
-                tokio::spawn(run_bound(
+                tokio::spawn(maintain(
                     settings,
                     Zeroizing::new("test-only".into()),
                     path,
@@ -387,10 +426,12 @@ mod tests {
                 cancel: Some(cancel),
                 task,
                 server,
+                cut,
+                events: receiver,
             };
             timeout(Duration::from_secs(10), async {
                 loop {
-                    if let Ok(Event::Ready) = receiver.try_recv() {
+                    if let Ok(Event::Ready) = fixture.events.try_recv() {
                         break;
                     }
                     assert!(!fixture.task.is_finished(), "tunnel failed before ready");
@@ -418,18 +459,6 @@ mod tests {
             );
             socket
         }
-        async fn assert_closed(&mut self) {
-            assert_eq!(
-                timeout(Duration::from_secs(35), &mut self.task)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap(),
-                StopReason::IdleTimeout
-            );
-            assert!(tokio::net::TcpStream::connect(self.address).await.is_err());
-            let _listener = TcpListener::bind(self.address).await.unwrap();
-        }
     }
 
     #[tokio::test]
@@ -455,40 +484,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_keep_alive_and_failed_upgrades_do_not_prevent_idle_shutdown() {
-        let mut fixture = TestTunnel::new().await;
-        let mut socket = tokio::net::TcpStream::connect(fixture.address)
-            .await
-            .unwrap();
-        socket.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:17890\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").await.unwrap();
-        assert!(read_headers(&mut socket).await.unwrap().contains("200 OK"));
-        fixture.assert_closed().await;
-        assert_eq!(socket.read(&mut [0]).await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn active_viewer_survives_idle_limit_and_last_close_stops_tunnel() {
+    async fn closing_all_viewers_does_not_expire_connection_and_browser_can_reconnect() {
         let mut fixture = TestTunnel::new().await;
         let first = fixture.viewer().await;
-        let mut second = fixture.viewer().await;
         drop(first);
-        tokio::time::sleep(viewer::IDLE_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_secs(32)).await;
         assert!(
             !fixture.task.is_finished(),
-            "another viewer must keep tunnel alive"
+            "closing all tabs must not expire the connection"
         );
-        second.write_all(b"still connected").await.unwrap();
-        let mut bytes = [0; 15];
-        second.read_exact(&mut bytes).await.unwrap();
-        assert_eq!(&bytes, b"still connected");
-        drop(second);
-        // A refresh within the grace period restores the same tunnel.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let refreshed = fixture.viewer().await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!fixture.task.is_finished());
-        drop(refreshed);
-        fixture.assert_closed().await;
+        let mut refreshed = fixture.viewer().await;
+        refreshed.write_all(b"reconnected").await.unwrap();
+        let mut bytes = [0; 11];
+        refreshed.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"reconnected");
+        fixture.cancel.take().unwrap().send(()).unwrap();
+        assert_eq!(
+            (&mut fixture.task).await.unwrap().unwrap(),
+            StopReason::Disconnected
+        );
     }
 
     async fn http(
@@ -513,6 +527,56 @@ mod tests {
         let mut bytes = vec![0; length];
         socket.read_exact(&mut bytes).await.unwrap();
         (headers, String::from_utf8(bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn browser_request_reconnects_broken_transport_and_explicit_disconnect_removes_route() {
+        timeout(Duration::from_secs(15), async {
+            let routes = Routes::default();
+            let mut fixture = TestTunnel::new_with_routes(Some(routes.clone())).await;
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (stop, stopped) = oneshot::channel();
+            let gateway = tokio::spawn(crate::gateway::run(listener, routes.clone(), stopped));
+            let path = format!("/s/{}/probe", fixture.id);
+            assert!(http(address, &path, None).await.0.contains("200 OK"));
+            fixture.cut.send(()).await.unwrap();
+            loop {
+                if let Ok(Event::WaitingForReconnect(_)) = fixture.events.try_recv() {
+                    break;
+                }
+                assert!(!fixture.task.is_finished());
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(routes.read().unwrap().contains_key(&fixture.id));
+            assert!(
+                http(address, &path, Some("http://evil.example"))
+                    .await
+                    .0
+                    .contains("403")
+            );
+            // The same URL triggers a new authenticated transport, without client UI actions.
+            let mut ws = tokio::net::TcpStream::connect(address).await.unwrap();
+            ws.write_all(format!("GET /s/{}/ws HTTP/1.1\r\nHost: 127.0.0.1:17890\r\nOrigin: http://127.0.0.1:17890\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", fixture.id).as_bytes()).await.unwrap();
+            assert!(read_headers(&mut ws).await.unwrap().contains("101"));
+            ws.write_all(b"browser-reconnected").await.unwrap();
+            let mut bytes = [0; 19];
+            ws.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"browser-reconnected");
+            let response = http(address, &path, None).await;
+            assert!(response.0.contains("200 OK"));
+            assert!(response.1.starts_with(&fixture.ssh_port.to_string()));
+            fixture.cancel.take().unwrap().send(()).unwrap();
+            assert_eq!(
+                (&mut fixture.task).await.unwrap().unwrap(),
+                StopReason::Disconnected
+            );
+            assert!(http(address, &path, None).await.0.contains("409"));
+            stop.send(()).unwrap();
+            gateway.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
