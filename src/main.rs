@@ -10,16 +10,21 @@ use std::sync::{Arc, mpsc};
 fn main() {
     if let Err(error) = run() {
         #[cfg(target_os = "windows")]
-        unsafe {
-            use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-            let message: Vec<u16> = format!("{error:#}").encode_utf16().chain(Some(0)).collect();
-            let title: Vec<u16> = "LanDeskServer".encode_utf16().chain(Some(0)).collect();
-            MessageBoxW(
-                std::ptr::null_mut(),
-                message.as_ptr(),
-                title.as_ptr(),
-                MB_OK | MB_ICONERROR,
-            );
+        if !landesk::platform::windows::desktop::background() {
+            unsafe {
+                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                    MB_ICONERROR, MB_OK, MessageBoxW,
+                };
+                let message: Vec<u16> =
+                    format!("{error:#}").encode_utf16().chain(Some(0)).collect();
+                let title: Vec<u16> = "LanDeskServer".encode_utf16().chain(Some(0)).collect();
+                MessageBoxW(
+                    std::ptr::null_mut(),
+                    message.as_ptr(),
+                    title.as_ptr(),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
         }
         #[cfg(not(target_os = "windows"))]
         eprintln!("{error:#}");
@@ -28,6 +33,10 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    if landesk::platform::windows::desktop::startup()? {
+        return Ok(());
+    }
     let path = access::path()?;
     let settings = access::Settings::load(&path)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -1,10 +1,10 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const PORT: u16 = 17890;
 pub const MAX_TEXT_BYTES: usize = 65_536;
 pub const UPLOAD_CHUNK_BYTES: usize = 65_536;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientMessage {
     Hello {
