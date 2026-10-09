@@ -24,7 +24,7 @@ pub const PORT: u16 = 17890;
 
 fn message(status: StatusCode, text: &str) -> Response<Body> {
     let body = format!(
-        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>LanDesk</title><p>{text}</p>"
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>LanDesk</title><p>{text}</p><p><a href=''>重新连接</a></p>"
     );
     Response::builder()
         .status(status)
@@ -103,7 +103,7 @@ async fn serve(socket: tokio::net::TcpStream, routes: Routes) -> Result<()> {
             let Some((id, path)) = route_path(request.uri().path()) else {
                 return Ok(message(
                     StatusCode::NOT_FOUND,
-                    "请在 LanDeskClient 中选择服务器并打开远程桌面。",
+                    "请先在 LanDeskClient 中连接服务器。",
                 ));
             };
             let target = routes
@@ -134,7 +134,7 @@ async fn serve(socket: tokio::net::TcpStream, routes: Routes) -> Result<()> {
             if target.try_send(remote).is_err() {
                 return Ok(message(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "连接暂不可用，请在客户端检查状态后重试。",
+                    "连接暂不可用，请稍后重新连接。",
                 ));
             }
             let (mut sender, connection) =
@@ -146,9 +146,16 @@ async fn serve(socket: tokio::net::TcpStream, routes: Routes) -> Result<()> {
                 while jobs.try_join_next().is_some() {}
                 jobs.spawn(connection.with_upgrades());
             }
-            let mut response = timeout(Duration::from_secs(12), sender.send_request(request))
-                .await
-                .context("服务器网页响应超时")??;
+            let mut response =
+                match timeout(Duration::from_secs(45), sender.send_request(request)).await {
+                    Ok(Ok(response)) => response,
+                    _ => {
+                        return Ok(message(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "远程服务器暂不可达，请确认网络及服务端运行状态后重新连接。",
+                        ));
+                    }
+                };
             if response.status() == StatusCode::SWITCHING_PROTOCOLS {
                 *pending
                     .lock()
@@ -194,7 +201,13 @@ impl Registration {
             registered: false,
         }
     }
+    pub fn is_active(&self) -> bool {
+        self.registered
+    }
     pub fn activate(&mut self) -> Result<()> {
+        if self.registered {
+            return Ok(());
+        }
         let mut routes = self
             .routes
             .write()

@@ -193,7 +193,7 @@ fn protocol_config(settings: &access::Settings) -> Result<Arc<server::Config>> {
         methods: (&[MethodKind::Password][..]).into(),
         max_auth_attempts: 3,
         auth_rejection_time: Duration::from_secs(2),
-        inactivity_timeout: Some(Duration::from_secs(60)),
+        inactivity_timeout: None,
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 2,
         nodelay: true,
