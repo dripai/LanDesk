@@ -32,6 +32,15 @@ struct State {
     status: HWND,
     pending: Option<mpsc::Receiver<Result<u16>>>,
 }
+fn port_form(current: Result<u16>) -> (String, String) {
+    match current {
+        Ok(port) => (
+            port.to_string(),
+            "修改端口会重启 SSH；客户端需填写新端口。".into(),
+        ),
+        Err(error) => (super::ssh::DEFAULT_PORT.to_string(), error.to_string()),
+    }
+}
 unsafe extern "system" fn procedure(window: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
         if message == WM_NCCREATE {
@@ -76,7 +85,7 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, w: WPARAM, l: LP
                             };
                             let (tx, rx) = mpsc::channel();
                             state.pending = Some(rx);
-                            text(state.status, "等待管理员授权并重启 SSH…");
+                            text(state.status, "正在检查并应用 SSH 端口…");
                             std::thread::spawn(move || {
                                 let _maintenance = guard;
                                 let _ = tx.send(ssh_config::request_change(port).map(|_| port));
@@ -167,11 +176,11 @@ pub fn run(control_state: DesktopControl, commands: mpsc::Receiver<Command>) -> 
             0,
         );
         control(window, "STATIC", "SSH 端口", 0, [22, 70, 90, 25], 0);
-        let current = ssh_config::current_port();
+        let (port, port_status) = port_form(ssh_config::current_port());
         state.field = control(
             window,
             "EDIT",
-            &current.as_ref().map(u16::to_string).unwrap_or_default(),
+            &port,
             100,
             [112, 66, 100, 28],
             WS_BORDER | WS_TABSTOP,
@@ -184,17 +193,7 @@ pub fn run(control_state: DesktopControl, commands: mpsc::Receiver<Command>) -> 
             [230, 65, 235, 32],
             WS_TABSTOP,
         );
-        state.status = control(
-            window,
-            "STATIC",
-            &current
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "应用会重启 SSH；客户端需填写新端口。".into()),
-            0,
-            [22, 115, 540, 66],
-            0,
-        );
+        state.status = control(window, "STATIC", &port_status, 0, [22, 115, 540, 66], 0);
         control(
             window,
             "STATIC",
@@ -224,7 +223,10 @@ pub fn run(control_state: DesktopControl, commands: mpsc::Receiver<Command>) -> 
                 text(
                     state.status,
                     &match result {
-                        Ok(port) => format!("SSH 已监听 {port}；请确认防火墙允许此端口。"),
+                        Ok(port) => {
+                            text(state.field, &port.to_string());
+                            format!("SSH 已监听 {port}；请确认防火墙允许此端口。")
+                        }
                         Err(error) => format!("{error:#}"),
                     },
                 );
@@ -246,4 +248,16 @@ pub fn run(control_state: DesktopControl, commands: mpsc::Receiver<Command>) -> 
         control_state.shared.cancel.store(true, Ordering::Release);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn default_port_does_not_hide_configuration_errors_or_replace_custom_port() {
+        let (port, status) = port_form(Err(anyhow::anyhow!("未找到 SSH 配置")));
+        assert_eq!(port, "22");
+        assert_eq!(status, "未找到 SSH 配置");
+        assert_eq!(port_form(Ok(2222)).0, "2222");
+    }
 }

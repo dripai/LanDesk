@@ -21,11 +21,18 @@
 服务端窗口可以输入 SSH 端口，点击“应用（管理员授权）”后实际修改系统配置并重启 SSH。仅在本机、无远控会话时允许操作；配置期间拒绝新远控。客户端按服务端显示的端口填写，首次连接前无法通过尚未建立的 SSH 自动发现端口。
 
 - Mac：核对系统 launchd 使用 `SockServiceName=ssh` 后，修改 `/etc/services` 的 SSH 服务记录，使用 `systemsetup` 重启远程登录。管理员授权由系统弹窗处理；当前 macOS 的 `systemsetup` 另外要求完全磁盘访问权限，LanDesk 不自动授予。非标准 launchd 配置明确报错。
-- Windows：修改系统 ProgramData 下的 `ssh/sshd_config` 并重启 `sshd` 服务，使用 UAC 授权。多 Port 或 Include 配置不自动修改。用户需要确保防火墙允许新 SSH 端口；不自动扩大防火墙规则。
+- Windows：修改系统 ProgramData 下的 `ssh/sshd_config` 并重启 `sshd` 服务，使用 UAC 授权。端口初始填 22；已有自定义配置显示其端口。配置缺失时保留默认输入值并提示缺失路径，不代表 SSH 已启动；应用前检查配置和 PowerShell 路径，端口未变时只验证监听，不重复请求 UAC。多 Port 或 Include 配置不自动修改。用户需要确保防火墙允许新 SSH 端口；不自动扩大防火墙规则。
 - 变更前保存同目录 `.landesk-backup` 备份，原子写入配置，再检查新端口是否返回 SSH 握手。失败恢复原配置并重启；回滚失败保留备份并明确显示路径。已有备份时拒绝继续覆盖。
 - 修改会影响这台电脑的系统 SSH 服务和其他 SSH 连接。公网路由器端口映射需另行配置；界面填写的是系统监听端口。
 
 Mac 权限依据：本机 `man systemsetup`；管理员弹窗机制见 [Apple TN2065](https://developer.apple.com/library/archive/technotes/tn2065/_index.html)。监听方式根据本机 macOS 26.5.1 的 `/System/Library/LaunchDaemons/ssh.plist` 与 `launchd.plist(5)` 核对。Windows 配置位置和重启要求见 [Microsoft OpenSSH 文档](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)。实际修改端口及重启后的持续可达性尚未实机验收。
+
+Windows 10 首次使用需要安装 **OpenSSH Server**，仅有 OpenSSH Client 不够。若尚未安装，在管理员 PowerShell 中执行以下命令；启动 `sshd` 后系统会生成默认配置，重新打开 LanDesk 即可读取。安装会开放默认 SSH 端口 22；已有服务和配置时不要重复安装。[微软安装步骤](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse)
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Start-Service sshd
+```
 
 ## 公共接口与系统实现
 
