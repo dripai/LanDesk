@@ -1,7 +1,4 @@
-use crate::{
-    files::{FileSession, HomeFiles},
-    protocol::ClientMessage,
-};
+use crate::{files::FileSession, platform::FileSystem, protocol::ClientMessage};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::{
@@ -18,12 +15,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct FileService {
-    home: Arc<HomeFiles>,
+    home: Arc<dyn FileSystem>,
     slots: Arc<Semaphore>,
 }
 
 impl FileService {
-    pub fn new(home: HomeFiles) -> Self {
+    pub fn new(home: impl FileSystem + 'static) -> Self {
         Self {
             home: Arc::new(home),
             slots: Arc::new(Semaphore::new(1)),
@@ -222,9 +219,10 @@ impl FileChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::filesystem::HomeFiles;
 
     fn service() -> FileService {
-        FileService::new(HomeFiles::open(std::path::Path::new("/private/tmp")).unwrap())
+        FileService::new(HomeFiles::open(&std::env::temp_dir()).unwrap())
     }
     fn list(id: u32) -> FileRequest {
         FileRequest::Message(ClientMessage::ListDirectory {
@@ -296,8 +294,8 @@ mod tests {
 
     #[tokio::test]
     async fn disconnect_cleans_partial_upload_before_next_file_session() {
-        let root = std::path::PathBuf::from(format!(
-            "/private/tmp/landesk-worker-test-{:016x}",
+        let root = std::env::temp_dir().join(format!(
+            "landesk-worker-test-{:016x}",
             getrandom::u64().unwrap()
         ));
         std::fs::create_dir(&root).unwrap();
@@ -319,6 +317,7 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         drop(permit);
+        drop(service); // Windows directory handles deny deletion while open.
         std::fs::remove_dir(&root).unwrap();
     }
 }

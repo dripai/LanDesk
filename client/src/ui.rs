@@ -160,9 +160,9 @@ impl Client {
             }
         };
         Self {
-            name: input(&initial.name, "例如：开发 Mac", false, window, cx),
+            name: input(&initial.name, "例如：开发电脑", false, window, cx),
             host: input(&initial.host, "IP 或主机名", false, window, cx),
-            user: input(&initial.user, "Mac 用户名", false, window, cx),
+            user: input(&initial.user, "远程用户名", false, window, cx),
             port: input(&initial.ssh_port.to_string(), "22", false, window, cx),
             password: input("", "已记住的密码可留空", true, window, cx),
             editing: selected.is_none(),
@@ -251,7 +251,7 @@ impl Client {
         {
             return Ok(saved.password());
         }
-        anyhow::bail!("请输入当前 Mac 用户的 SSH 密码")
+        anyhow::bail!("请输入远程用户的 SSH 密码")
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let value = self.read_settings(cx)?;
@@ -549,7 +549,7 @@ impl Render for Client {
         let mut detail = div().v_flex().w_full().p_6().gap_4();
         for (label, state) in [
             ("名称", &self.name),
-            ("Mac 地址", &self.host),
+            ("服务器地址", &self.host),
             ("用户名", &self.user),
             ("SSH 端口", &self.port),
             ("SSH 密码", &self.password),

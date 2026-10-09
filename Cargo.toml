@@ -3,7 +3,7 @@ name = "landesk"
 version = "0.1.1"
 edition = "2024"
 rust-version = "1.87"
-description = "Mac 局域网远程桌面，通过 SSH 隧道和浏览器连接"
+description = "Mac / Windows 远程桌面，通过 SSH 隧道和浏览器连接"
 license = "MIT"
 
 [dependencies]
@@ -15,6 +15,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 base64 = "=0.22.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "=3.27.0"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -25,6 +26,14 @@ objc2 = "=0.6.3"
 objc2-app-kit = "=0.3.2"
 objc2-foundation = "=0.3.2"
 screencapturekit = { version = "=11.0.0", features = ["macos_14_2"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+enigo = { version = "=0.6.1", default-features = false }
+xcap = "=0.8.3"
+arboard = "=3.6.1"
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading", "Win32_System_Power", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_Com", "Win32_System_StationsAndDesktops", "Win32_UI_HiDpi", "Win32_System_Registry"] }
 
 [dev-dependencies]
 tokio-tungstenite = "=0.29.0"

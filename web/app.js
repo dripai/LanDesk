@@ -1,4 +1,5 @@
 'use strict';
+import {serverInfo, PROTOCOL_VERSION} from './platform.js';
 import {createKeyboard} from './keyboard.js';
 import {createFiles} from './files.js';
 import {createImagePaste} from './clipboard.js';
@@ -51,7 +52,7 @@ $('clipboard-copy').addEventListener('click', () => {
   if (clipboardRequest) return;
   const id = ++clipboardSequence;
   const timer = setTimeout(() => {
-    clipboardRequest = null; $('clipboard-copy').disabled = false; notify('读取 Mac 剪贴板超时');
+    clipboardRequest = null; $('clipboard-copy').disabled = false; notify('读取 远程剪贴板超时');
   }, 5000);
   clipboardRequest = {id, timer}; $('clipboard-copy').disabled = true;
   send({type:'read_clipboard',id});
@@ -127,7 +128,7 @@ function connect() {
   $('connect').disabled=true; $('login-status').textContent='正在连接…';
   const wsURL = new URL('./ws', location.href); wsURL.protocol = 'ws:'; wsURL.hash = ''; wsURL.search = '';
   socket=new WebSocket(wsURL); socket.binaryType='blob';
-  socket.onopen=()=>send({type:'hello'});
+  socket.onopen=()=>send({type:'hello',protocol_version:PROTOCOL_VERSION});
   socket.onmessage=event=>{
     if(event.data instanceof Blob) {
       if(drawing) return;
@@ -143,7 +144,7 @@ function connect() {
       if(clipboardRequest?.id !== message.id) return;
       clearTimeout(clipboardRequest.timer); clipboardRequest = null; $('clipboard-copy').disabled = false;
       if(message.type === 'clipboard_error') { notify(message.message); return; }
-      navigator.clipboard.writeText(message.text).then(() => notify('Mac 文字已复制到本机剪贴板')).catch(error => notify(`无法写入本机剪贴板：${error.message}`));
+      navigator.clipboard.writeText(message.text).then(() => notify('远程文字已复制到本机剪贴板')).catch(error => notify(`无法写入本机剪贴板：${error.message}`));
       return;
     }
     if(message.type === 'resolution' || message.type === 'resolution_error') {
@@ -156,6 +157,15 @@ function connect() {
     }
     if(message.type==='error') { end(message.message); return; }
     if(message.type==='ready') {
+      let info;
+      try { info = serverInfo(message.server); } catch(error) { end(error.message); return; }
+      const caps=info.capabilities;
+      $('files-button').disabled=!caps.files;
+      $('display-button').disabled=!caps.capture_resize;
+      $('clipboard-copy').disabled=!caps.clipboard_text;
+      $('clipboard-paste').disabled=!(caps.clipboard_text || caps.clipboard_image);
+      $('screen').alt=`${info.label} 远程桌面`;
+      $('session').dataset.os=info.os;
       $('login').hidden=true; $('session').hidden=false;
       $('status').textContent='已连接'; drawing=false;
       send({type:'heartbeat'}); heartbeat=setInterval(()=>send({type:'heartbeat'}),3000);
@@ -163,11 +173,11 @@ function connect() {
       nativeWidth = message.width; nativeHeight = message.height; resolutionWidth = null;
       $('resolution-width').max = nativeWidth;
       for (const option of $('resolution-mode').options) if (/^\d+$/.test(option.value)) option.disabled = Number(option.value) > nativeWidth;
-      files.connect(message.width / message.height);
+      if (caps.files) files.connect(message.width / message.height);
     }
 
   };
-  socket.onerror=()=>end('无法连接，请确认 Mac 应用和 LanDeskClient 或 SSH 隧道都在运行');
+  socket.onerror=()=>end('无法连接，请确认 远程 LanDesk 应用和 LanDeskClient 或 SSH 隧道都在运行');
   socket.onclose=()=>{ if(socket) end('连接已断开'); };
 }
 $('connect-form').addEventListener('submit', event => { event.preventDefault(); connect(); });
@@ -198,7 +208,7 @@ $('display-button').addEventListener('click', () => {
   $('resolution-width').value = resolutionWidth ?? nativeWidth;
   $('resolution-width').hidden = $('resolution-mode').value !== 'custom';
   const width = resolutionWidth ?? nativeWidth, height = Math.round(nativeHeight * width / nativeWidth);
-  $('resolution-status').textContent = `当前采集 ${width} × ${height}，等比例显示；Mac 系统分辨率不变。`;
+  $('resolution-status').textContent = `当前采集 ${width} × ${height}，等比例显示；远程系统分辨率不变。`;
   $('display-dialog').showModal();
 });
 $('resolution-mode').addEventListener('change', () => { $('resolution-width').hidden = $('resolution-mode').value !== 'custom'; });

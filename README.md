@@ -1,74 +1,64 @@
 # LanDesk
 
-Mac 运行 Rust 远控服务，Windows 通过 SSH 加密隧道和浏览器操作桌面。Windows 多服务器客户端为 [LanDeskClient](client/README.md)，使用 GPUI / gpui-component；原有 `scripts/LanDesk.cmd` 仍可单独使用，两者不能同时占用本机 17890 端口。
+通过 SSH 加密隧道和浏览器远程操作电脑。Mac 与 Windows 服务端共用协议、网页和会话核心；Windows 连接管理客户端为 [LanDeskClient](client/README.md)。
 
 ## 使用
 
-1. Mac 打开 `LanDesk.app`，在系统设置中授予屏幕录制和辅助功能权限，然后重新打开应用。若系统另行请求远程桌面权限，需要允许。启动不会自动申请权限。
-2. Mac 系统设置中开启“远程登录”。Windows 在 LanDeskClient 填写 Mac 地址、用户名、SSH 端口和密码，首次连接自动记录主机密钥，之后密钥变化会拒绝连接。
-3. 客户端为每台服务器打开 `http://127.0.0.1:17890/s/<地址哈希>/`，浏览器自动连接桌面；使用独立连接脚本时仍打开根地址，无需六位连接码。断开或失败后，可点击“重新连接”。
-4. 点击远程画面操作键鼠。Windows Ctrl 映射为 Mac Command；普通文字、中文和全角标点通过本地输入法提交。四个方向键支持长按连续移动，也保留 Shift 等组合键状态；松开或失焦时释放。
-5. 工具条可拖动、收起，提供文字输入、文字复制和粘贴、文件面板、采集分辨率、全屏和断开。浏览器地址栏通过全屏隐藏。
-6. 右侧文件面板顶部仅保留路径及右侧的上级目录、刷新按钮；目录和文件使用 26 像素紧凑行高。上半部显示当前目录的子目录，下半部显示文件。点击目录或路径导航切换；拖动画面与面板之间的分隔条调整宽度，也可聚焦分隔条后用左右方向键调整。右侧空白足够时自动显示，工具条按钮可手动展开和收起。
-7. 拖普通文件到下半部或点“上传”，文件写入当前目录。同名拒绝覆盖；不支持整目录上传、删除或下载。
-8. Ctrl+V 或粘贴按钮将 Windows 的文字或单张图片粘贴到 Mac 当前焦点。图片分块传输，写入 Mac 系统剪贴板后发送 Command+V，目标应用需支持图片粘贴；浏览器提供的非 PNG 图片会先转换为 PNG。Mac 到 Windows 仍只支持文字：先在远程 Mac 复制，再点击“复制 Mac 文字”。不自动同步，不支持文件剪贴板。
-9. 分辨率可选原始像素、宽 1280/1920/2560 或自定义宽度（640 到屏幕原始宽度）。高度按比例计算，每次重连恢复原始像素；不会改变 Mac 系统分辨率，也不会拉伸画面。
-10. Mac 最小化或隐藏窗口不停止服务，关闭主窗口才退出。Windows 客户端默认关闭或最小化后留在托盘；最后一个远控连接结束后连续 30 秒无连接，会自动关闭 SSH，需回客户端重新连接。首次连接后未打开远控同样计时；HTTP 保活不延长倒计时。右键托盘可立即断开或退出。
+1. 被控 Mac 打开 `LanDesk.app`，自行授予屏幕录制、辅助功能权限并重开；在系统设置启用“远程登录”。Windows 服务端在已登录的普通桌面中启动 `landesk.exe`，需另行安装并启用 Windows OpenSSH Server。
+2. Windows 打开 [LanDeskClient](client/README.md)，添加目标电脑的 IP/域名、SSH 端口、用户名和密码。首次连接记录主机密钥，密钥变化拒绝连接。
+3. 每台电脑使用 `http://127.0.0.1:17890/s/<地址哈希>/` 独立标签。网页自动读取服务端系统与能力，不需要选择 Mac/Windows，也不使用六位连接码。更新后刷新网页。
+4. 点击画面操作。连接 Mac 时 Ctrl 快捷键映射 Command；连接 Windows 时保留 Ctrl。支持方向键长按、中文与全角标点，松开或失焦释放按键。
+5. 浮动工具条可拖动、收起，提供文字输入、剪贴板、文件面板、采集分辨率、全屏和断开。目录面板可调整宽度，目录与文件使用紧凑行高。
+6. 文件范围限运行服务端的当前用户目录。拖拽普通文件或点上传，同名拒绝覆盖；单文件最多 512 MiB，64 KiB 分块。暂不支持目录上传、删除、下载和断点续传。
+7. Ctrl+V 或粘贴按钮发送文字或单张图片。图片在目标系统剪贴板写入后，使用目标系统的粘贴快捷键；目标应用需要支持图片。取回剪贴板仍只支持文字，不自动同步。
+8. 默认按屏幕实际像素采集、等比例显示；可选择采集宽度，不修改系统显示分辨率。当前仅支持一个显示器。
+9. 关闭服务端窗口停止服务，最小化保留连接。同一台服务端仅允许一个控制会话；不同电脑可同时连接。最后一个网页关闭后，客户端保留 30 秒重连宽限，随后关闭对应 SSH 隧道。
 
-## 显示器与电源
+当前服务端内部监听与客户端网页入口均使用本机 17890，因此同一台 Windows 暂不能同时运行服务端与 LanDeskClient；不同电脑之间连接不受影响。内部端口分离方案待确认。
 
-已移除物理屏幕上的黑色遮罩及其采集排除逻辑，远端可以看到 LanDesk 窗口。建立的远控会话持有 IOKit `PreventUserIdleSystemSleep` 断言，结束时释放；它允许显示器休眠，同时阻止系统因空闲自动睡眠。合盖、主动睡眠和低电量不在此保证范围内。
+## SSH 端口
 
-macOS 提供 `pmset displaysleepnow`，用于立即关闭显示器而非让整机睡眠。Apple 也提供“显示器关闭时防止自动睡眠”设置。可通过 `pmset -g cap` 查询当前设备是否支持 `displaysleep`。熄屏后 ScreenCaptureKit 是否持续输出、远程操作是否唤醒屏幕仍待实测，因此目前未提供“一直熄屏远控”开关。
+服务端窗口可以输入 SSH 端口，点击“应用（管理员授权）”后实际修改系统配置并重启 SSH。仅在本机、无远控会话时允许操作；配置期间拒绝新远控。客户端按服务端显示的端口填写，首次连接前无法通过尚未建立的 SSH 自动发现端口。
 
-官方依据：[Apple 显示器与睡眠设置](https://support.apple.com/en-nz/guide/mac-help/-mchle41a6ccd/mac)、[IOPMAssertionCreateWithName](https://developer.apple.com/documentation/iokit/1557134-iopmassertioncreatewithname)、[CGDisplayIsAsleep](https://developer.apple.com/documentation/coregraphics/cgdisplayisasleep(_:))。命令与断言行为同时核对了本机 SDK 的 `pmset(1)` 和 `IOPMLib.h`。
+- Mac：核对系统 launchd 使用 `SockServiceName=ssh` 后，修改 `/etc/services` 的 SSH 服务记录，使用 `systemsetup` 重启远程登录。管理员授权由系统弹窗处理；当前 macOS 的 `systemsetup` 另外要求完全磁盘访问权限，LanDesk 不自动授予。非标准 launchd 配置明确报错。
+- Windows：修改系统 ProgramData 下的 `ssh/sshd_config` 并重启 `sshd` 服务，使用 UAC 授权。多 Port 或 Include 配置不自动修改。用户需要确保防火墙允许新 SSH 端口；不自动扩大防火墙规则。
+- 变更前保存同目录 `.landesk-backup` 备份，原子写入配置，再检查新端口是否返回 SSH 握手。失败恢复原配置并重启；回滚失败保留备份并明确显示路径。已有备份时拒绝继续覆盖。
+- 修改会影响这台电脑的系统 SSH 服务和其他 SSH 连接。公网路由器端口映射需另行配置；界面填写的是系统监听端口。
 
-## 边界
+Mac 权限依据：本机 `man systemsetup`；管理员弹窗机制见 [Apple TN2065](https://developer.apple.com/library/archive/technotes/tn2065/_index.html)。监听方式根据本机 macOS 26.5.1 的 `/System/Library/LaunchDaemons/ssh.plist` 与 `launchd.plist(5)` 核对。Windows 配置位置和重启要求见 [Microsoft OpenSSH 文档](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)。实际修改端口及重启后的持续可达性尚未实机验收。
 
-- Mac 服务端要求 macOS 14.2 或更高。单显示器、单控制会话；显示器布局变化时断开。
-- ScreenCaptureKit 按 Retina 实际像素采集，JPEG 质量 92，目标 15 帧/秒，最多 1600 万像素。帧率和带宽取决于分辨率、设备和网络，慢连接只保留最新画面。
-- 只监听 `127.0.0.1:17890`；SSH 认证并加密远程链路，浏览器连接仍严格校验 Host 和 Origin，不再要求应用连接码。服务本身不识别 SSH 用户：能访问 Mac 本机端口的程序或 SSH 隧道均可发起远控。心跳丢失最长 15 秒结束会话。
-- 文件范围限当前 Mac 用户目录。通过目录句柄与 `O_NOFOLLOW` 防止路径及符号链接穿越；单文件最多 512 MiB，64 KiB 分块，完成并保存后用 `RENAME_EXCL` 原子发布。同名竞态也不覆盖，中断清理临时文件。每个目录最多 5000 条目，不支持非 UTF-8 文件名。上传权限 0600，不保留 Windows 元数据和可执行位。系统受保护目录可能另需文件访问授权。
-- 文件访问使用独立工作线程，不阻塞画面、心跳和断开处理。单次请求等待 10 秒后报错并取消文件会话；系统调用返回后清理未完成上传。系统授权弹窗仍需用户处理，旧访问未返回时文件面板会提示等待，远控可以继续或重连。全局最多一个文件工作线程，防止重连积累阻塞任务。若完成上传时恰逢超时，请刷新目录确认最终结果。
-- 纯文字单次最多 64 KiB UTF-8，不含空字符。剪贴板图片最多 10 MiB PNG、1600 万像素、边长 8192；Mac 完整解码校验后才修改剪贴板。图片只在内存中传输，30 秒无后续分块丢弃，断开清理；图片分块与文件上传分别处理。浏览器剪贴板拒绝授权时显示错误；Ctrl+V 可使用浏览器原生粘贴事件。
-- 已移除 Mac 连接码设置。旧的 `~/Library/Application Support/LanDesk/settings.json` 不再读取或写入；升级不会删除该文件。
-- 统一端口下的服务器标签共享浏览器同源；哈希路径用于连接去重和请求分流，不提供网页脚本之间的安全隔离。此模式用于自己信任的 Mac。参见 [URL Origin 标准](https://url.spec.whatwg.org/#concept-url-origin)。
-- Windows 客户端使用 SSH 密码认证。可勾选“记住密码”，密码存入 Windows 凭据管理器，不写入配置文件；取消勾选并保存或连接后删除。首次自动记录主机密钥，变化时拒绝；首次使用信任无法验证第一次连接的主机身份。其他限制及配置路径见 [客户端说明](client/README.md)。
-- 尚未提供 Mac 到 Windows 的图片复制、音频、驱动级隐私屏、合盖远控或系统登录界面控制保证。
+## 公共接口与系统实现
+
+公共 Rust 库入口为 `src/lib.rs`，平台接口在 `src/platform/mod.rs`：
+
+| 接口/模块 | 职责 |
+|---|---|
+| `HostPlatform` | 系统信息、权限、当前用户目录、原生界面与资源工厂 |
+| `CaptureSession` | 画面流、像素和输入坐标尺寸、采集分辨率 |
+| `InputController` / `SessionPower` | 键鼠操作与会话期间防止自动休眠 |
+| `FileSystem` / `FileTransfer` | 受限目录访问与上传原子发布 |
+| `desktop::ControlSession` | UI 线程命令、剪贴板、输入与电源资源统一释放 |
+| `server` / `file_worker` | WebSocket、心跳、会话归属、文件超时和阻塞隔离 |
+
+按 Rust `target_os` 编译对应平台实现。连接握手使用协议版本 1，服务端返回 `os` 与 `capabilities`；网页校验版本并启用支持的控件，缺少能力或版本不匹配明确报错。
+
+Mac 保留 ScreenCaptureKit 11.0.0、Enigo 0.6.1、AppKit 剪贴板和 IOKit 电源断言。Windows 使用 XCap 0.8.3 的 GDI 截屏路径、Enigo 0.6.1、Arboard 3.6.1、Win32 原生窗口和电源 API；XCap 版本选取与现有 Mac 依赖兼容的版本。Windows 目录使用 cap-std/cap-fs-ext 4.0.3 固定目录句柄，拒绝路径穿越与跟随目录链接，上传通过 `SetFileInformationByHandle` 且 `ReplaceIfExists=false` 发布。Mac 保留 `openat/O_NOFOLLOW` 与 `renameatx_np(RENAME_EXCL)`。
+
+文件访问使用独立工作线程，单次请求 10 秒超时，阻塞时画面和心跳继续。超时/断开仅取消请求及后续操作，不能强制中断系统调用；调用返回后清理未完成上传。全局最多一个文件线程，反复重连不会累积阻塞任务。完成上传恰逢超时时，需刷新目录确认是否已发布。[Tokio 官方限制](https://docs.rs/tokio/1.53.2/tokio/task/fn.spawn_blocking.html)
+
+Windows 当前实现面向已登录、单显示器普通桌面，不支持登录前控制、锁屏和 UAC 安全桌面；普通权限不能保证控制管理员窗口，Windows 的 [SendInput/UIPI 限制](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)仍适用。熄屏控制未提供，能力明确返回 false。Linux 后端尚未实现。
 
 ## 构建与验证
 
-Mac 构建需要 Rust 与 Apple Command Line Tools：
-
 ```sh
+cargo fmt --all -- --check
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
-node --check web/app.js
-node --check web/files.js
 node --test web/*.test.mjs
-python3 scripts/bundle.py
 ```
 
-应用输出在 Cargo target 目录的 `release/bundle/macos/LanDesk.app`。`build.rs` 从 `xcrun` 获取实际 Swift 链接路径以支持 Command Line Tools。开发包使用临时签名，更新后可能需要重新授权；只重新添加 LanDesk，不重置其他应用权限。
+Mac 打包：`python3 scripts/bundle.py`，输出位于 Cargo target 的 `release/bundle/macos/LanDesk.app`。开发包使用临时签名，更新后可能需要自行恢复权限；不重置其他应用权限。
 
-Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.yml) 执行。多服务器客户端此前已通过 [Windows 格式、14 项核心测试、Clippy 及 Release 构建](https://github.com/dripai/LanDesk/actions/runs/37833212339)，但该包随后实机发现右侧表单空白，不再推荐使用。已在 `0b54c8a` 修正左侧滚动容器占满窗口的问题；修复提交已触发新构建，本轮按要求不等待结果。请在 [Windows client 构建列表](https://github.com/dripai/LanDesk/actions/workflows/windows-client.yml) 选择包含该修复的成功构建，下载 `LanDeskClient-windows-x64` 后解压运行 `target/release/LanDeskClient.exe`。
+Windows 服务端：`cargo build --locked --release`，输出 `target/release/landesk.exe`。[服务端工作流](.github/workflows/server.yml)在 Mac/Windows 分别执行测试、Clippy 和构建，Windows artifact 为 `LanDeskServer-windows-x64`。客户端继续使用 [Windows client 工作流](.github/workflows/windows-client.yml)与 `LanDeskClient-windows-x64` artifact。
 
-本轮文件权限阻塞修复已验证：31 项 Mac Rust 测试、12 项网页测试，格式及 Clippy 检查通过。通过真实本地 WebSocket 配合模拟阻塞文件操作，验证画面继续发送、主动断开、浏览器关闭、15 秒心跳超时均释放会话；覆盖 10 秒文件超时、重连线程数量限制、迟到结果丢弃和未完成上传清理。真实 macOS 文件授权弹窗场景仍待实机复验。项目锁定 Tokio 1.53.2；其[官方文档](https://docs.rs/tokio/1.53.2/tokio/task/fn.spawn_blocking.html)说明已开始的阻塞任务不能强制取消，长期工作循环应使用独立线程，因此超时只取消请求及后续操作，不伪称中止系统调用。
-
-此前已验证：12 项本机客户端核心测试；Windows 的 14 项测试包含凭据隔离、账户绑定、删除及配置失败回滚，全部通过。双服务器集成测试通过真实本地 SSH 会话验证同端口路径分流、64 KiB WebSocket 往返、单台断开不影响其他服务器、30 秒无远控自动关闭及刷新宽限期。
-
-独立浏览器模拟会话已验证 `/s/<哈希>/` 下资源加载、自动连接、断开和手动重连，以及服务器标签标题。Mac 服务测试确认来源缺失、跨站来源、Host 不匹配被拒绝，第二个控制会话不能接管已有会话。
-
-Mac 应用已安装并启动，本机 HTTP 已核对网页、样式和键盘脚本与源码一致。临时签名更新后，屏幕录制和辅助功能显示待授权；新增方向键长按仍待恢复权限后真实远控复验。独立浏览器模拟会话已验证紧凑行高、子目录、上级目录和刷新；网页回归测试覆盖四方向重复、Shift 组合及失焦后停止。长按采用浏览器的 [KeyboardEvent.repeat](https://www.w3.org/TR/uievents/#dom-keyboardevent-repeat)，沿用已锁定 Enigo 0.6.1 的按下/释放接口；仅重按方向键，不重复累积原生按键状态。Windows 右侧表单空白已根据 GPUI Component 0.7.1 实际滚动容器源码修正：在外层明确设置 220 像素宽度，避免默认全宽将详情区挤成零宽；修复后的 Windows 界面仍待实机复验。托盘、多台真实 Mac 远控以及熄屏持续采集仍未验收。编译和核心测试不代替这些实机验证。
-
-此前版本已实测 Mac 画面、键鼠、中文、目录导航和面板调宽；Mac 窗口最小化后仍可连接，电源防睡眠断言随会话建立和释放。图片粘贴按钮已在本机真实会话使测试图片进入目标应用输入框，Windows Ctrl+V 到 Mac 的完整图片链路尚未实测。
-
-核心依赖：`screencapturekit 11.0.0`、`enigo 0.6.1`、`axum 0.8.9`；客户端为 `gpui-kit 0.7.1`、`russh 0.64.1`、`tray-icon 0.21.2`，分别锁定在两份 Cargo.lock。
-
-实现依据：[Apple 屏幕采集](https://developer.apple.com/documentation/screencapturekit/capturing-screen-content-in-macos)、[动态采集配置](https://developer.apple.com/documentation/screencapturekit/scstream/updateconfiguration(_:completionhandler:))、[AppKit 剪贴板](https://developer.apple.com/documentation/appkit/nspasteboard/string(fortype:))、[GPUI Kit 平台要求](https://gpui-kit.com/docs/installation/)。文件面板参考常见远程文件管理器的路径导航和紧凑列表，保留上下分区；参考：[AnyDesk 文件管理](https://support.anydesk.com/file-manager-and-file-transfer)。
-
-## 文件上传的后续评估
-
-当前开发小文件交互可继续使用现有的 512 MiB 单文件上限与分块传输。断点续传适合频繁传大文件或网络不稳定的情况，尚未实现；实现前需确定部分文件的保留期限、磁盘配额和重连认证，并校验源文件与目标目录身份，不能只保存一个偏移量。当前断开仍清理未完成上传。
-
-可配置上传上限有价值，建议由 Mac 服务端配置并告知客户端，客户端只做提前提示；尚未提供此设置，不允许浏览器自行提高服务端限制。
+本轮本机通过服务端 38 项、网页 14 项、客户端连接核心 12 项测试；Mac 与 Windows GNU 目标的全目标 Clippy 通过，Mac 应用打包与签名检查通过。Windows 桌面采集、键鼠、剪贴板、文件 ACL、UAC 和系统 SSH 端口变更仍需实机验收；交叉编译检查不代表这些功能已经验证。用户已确认重构前 Mac 远控及文件阻塞修复使用正常；重构版本尚未安装，需更新后复验。

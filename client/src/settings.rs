@@ -81,7 +81,7 @@ impl Settings {
         );
         ensure!(
             !self.host.is_empty() && self.host.len() <= 253,
-            "请填写 Mac 的 IP 或主机名"
+            "请填写 远程电脑的 IP 或主机名"
         );
         ensure!(
             self.host.parse::<std::net::IpAddr>().is_ok()
@@ -89,7 +89,7 @@ impl Settings {
                     .host
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || b"-._".contains(&c)),
-            "Mac 地址应为 IP 或主机名，不含协议、端口或空格"
+            "服务器地址应为 IP 或主机名，不含协议、端口或空格"
         );
         ensure!(
             !self.user.is_empty()
