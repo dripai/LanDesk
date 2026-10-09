@@ -3,8 +3,12 @@ name = "landesk"
 version = "0.1.1"
 edition = "2024"
 rust-version = "1.87"
-description = "Mac / Windows 远程桌面，通过 SSH 隧道和浏览器连接"
+description = "LanDeskServer：内置加密连接的 Mac / Windows 远程桌面服务端"
 license = "MIT"
+
+[[bin]]
+name = "LanDeskServer"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -16,6 +20,12 @@ base64 = "=0.22.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "=3.27.0"
+russh = "=0.64.1"
+rand = "0.10"
+argon2 = "=0.5.3"
+dirs = "6"
+zeroize = "1"
+socket2 = "=0.6.5"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

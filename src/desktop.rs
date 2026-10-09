@@ -98,6 +98,7 @@ impl Drop for ControlSession<'_> {
 
 #[derive(Default)]
 pub struct Shared {
+    pub connection: std::sync::OnceLock<crate::transport::Control>,
     pub active: AtomicBool,
     pub cancel: AtomicBool,
     pub shutdown: AtomicBool,
@@ -109,11 +110,11 @@ impl Shared {
     pub fn begin_maintenance(self: &Arc<Self>) -> Result<Maintenance> {
         self.maintenance
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .map_err(|_| anyhow::anyhow!("SSH 配置正在修改"))?;
+            .map_err(|_| anyhow::anyhow!("连接设置正在保存"))?;
         let guard = Maintenance(self.clone());
         ensure!(
             !self.active.load(Ordering::SeqCst),
-            "请先断开远控，再在本机修改 SSH 端口"
+            "请先断开远控，再修改连接设置"
         );
         Ok(guard)
     }
@@ -306,7 +307,7 @@ mod tests {
         assert_eq!(*events.lock().unwrap(), ["power_on", "power_off"]);
     }
     #[test]
-    fn ssh_maintenance_cannot_overlap_a_session_and_releases_on_error() {
+    fn connection_maintenance_cannot_overlap_a_session_and_releases_on_error() {
         let shared = Arc::new(Shared::default());
         shared.active.store(true, Ordering::Release);
         assert!(shared.begin_maintenance().is_err());

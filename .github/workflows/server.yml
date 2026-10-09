@@ -45,12 +45,12 @@ jobs:
         with:
           name: LanDeskServer-windows-x64
           path: |
-            target/release/landesk.exe
+            target/release/LanDeskServer.exe
             README.md
           if-no-files-found: error
       - name: Archive Mac bundle
         if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent target/release/bundle/macos/LanDesk.app LanDeskServer-macos.zip
+        run: ditto -c -k --sequesterRsrc --keepParent target/release/bundle/macos/LanDeskServer.app LanDeskServer-macos.zip
       - uses: actions/upload-artifact@v7
         if: runner.os == 'macOS'
         with:

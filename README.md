@@ -1,38 +1,34 @@
 # LanDesk
 
-通过 SSH 加密隧道和浏览器远程操作电脑。Mac 与 Windows 服务端共用协议、网页和会话核心；Windows 连接管理客户端为 [LanDeskClient](client/README.md)。
+- **LanDeskServer**：被控端，运行在 Mac 或 Windows 的已登录桌面。
+- **LanDeskClient**：Windows 控制端，管理多个服务器，各自使用浏览器标签操作。
+
+两端内置加密连接与认证，无需安装 OpenSSH、开启系统远程登录或使用系统账号密码。当前是 IP/主机名直连，尚未实现设备 ID 发现、NAT 穿透和中继。
 
 ## 使用
 
-1. 被控 Mac 打开 `LanDesk.app`，自行授予屏幕录制、辅助功能权限并重开；在系统设置启用“远程登录”。Windows 服务端在已登录的普通桌面中启动 `landesk.exe`，需另行安装并启用 Windows OpenSSH Server。
-2. Windows 打开 [LanDeskClient](client/README.md)，添加目标电脑的 IP/域名、SSH 端口、用户名和密码。首次连接记录主机密钥，密钥变化拒绝连接。
-3. 每台电脑使用 `http://127.0.0.1:17890/s/<地址哈希>/` 独立标签。网页自动读取服务端系统与能力，不需要选择 Mac/Windows，也不使用六位连接码。更新后刷新网页。
-4. 点击画面操作。连接 Mac 时 Ctrl 快捷键映射 Command；连接 Windows 时保留 Ctrl。支持方向键长按、中文与全角标点，松开或失焦释放按键。
-5. 浮动工具条可拖动、收起，提供文字输入、剪贴板、文件面板、采集分辨率、全屏和断开。目录面板可调整宽度，目录与文件使用紧凑行高。
-6. 文件范围限运行服务端的当前用户目录。拖拽普通文件或点上传，同名拒绝覆盖；单文件最多 512 MiB，64 KiB 分块。暂不支持目录上传、删除、下载和断点续传。
-7. Ctrl+V 或粘贴按钮发送文字或单张图片。图片在目标系统剪贴板写入后，使用目标系统的粘贴快捷键；目标应用需要支持图片。取回剪贴板仍只支持文字，不自动同步。
-8. 默认按屏幕实际像素采集、等比例显示；可选择采集宽度，不修改系统显示分辨率。当前仅支持一个显示器。
-9. 关闭服务端窗口停止服务，最小化保留连接。同一台服务端仅允许一个控制会话；不同电脑可同时连接。最后一个网页关闭后，客户端保留 30 秒重连宽限，随后关闭对应 SSH 隧道。
+1. 被控电脑运行 `LanDeskServer.app`（Mac）或 `LanDeskServer.exe`（Windows），设置访问密码（至少 10 个字符），点击“保存并启动”。默认连接端口 **17891**。首次未设密码时不监听网络；之后启动自动加载配置并监听。
+2. Mac 自行授予屏幕录制、辅助功能权限并重开。Windows 如显示防火墙提示，允许预期网络访问；LanDesk 不修改系统 SSH 配置或防火墙规则。
+3. Windows 打开 [LanDeskClient](client/README.md)，添加服务器的 IP/主机名、连接端口和 **LanDesk 访问密码**。不填写系统用户名或密码。两端需要一起更新；旧版本不能连接新版服务端。
+4. 每台服务器使用 `http://127.0.0.1:17890/s/<地址哈希>/` 独立标签。网页自动识别 Mac/Windows 能力，没有六位连接码。首次自动记录设备密钥，后续密钥变化拒绝连接。
+5. 点击画面操作。连接 Mac 时 Ctrl 快捷键映射 Command；连接 Windows 时保留 Ctrl。支持方向键长按、中文与全角标点，松开或失焦释放按键。
+6. 浮动工具条可拖动、收起，提供文字输入、剪贴板、文件面板、采集分辨率、全屏和断开。目录面板可调整宽度。
+7. 文件范围限运行服务端的当前用户目录。上传普通文件，同名拒绝覆盖；单文件最多 512 MiB，64 KiB 分块。暂不支持目录上传、删除、下载和断点续传。
+8. Ctrl+V 或粘贴按钮发送文字或单张图片；目标应用需要支持图片。取回剪贴板仍只支持文字，不自动同步。
+9. 默认按屏幕实际像素采集、等比例显示；可选择采集宽度，不修改系统显示分辨率。当前仅支持一个显示器。
+10. 关闭服务端窗口停止服务，最小化保留连接。同一服务端仅允许一个控制会话；不同电脑可同时连接。最后一个远控网页关闭后，客户端保留 30 秒重连宽限，随后关闭对应加密连接。
 
-当前服务端内部监听与客户端网页入口均使用本机 17890，因此同一台 Windows 暂不能同时运行服务端与 LanDeskClient；不同电脑之间连接不受影响。内部端口分离方案待确认。
+## 连接与配置
 
-## SSH 端口
+服务端监听 IPv4/IPv6，端口可设为 1024–65535，保留客户端网页入口 17890，默认 17891。两端可在同机运行。跨公网直连要求服务器地址、端口可达；路由器映射和网络防火墙仍由用户配置。
 
-服务端窗口可以输入 SSH 端口，点击“应用（管理员授权）”后实际修改系统配置并重启 SSH。仅在本机、无远控会话时允许操作；配置期间拒绝新远控。客户端按服务端显示的端口填写，首次连接前无法通过尚未建立的 SSH 自动发现端口。
+密码留空保存表示保留原密码。修改端口或密码需要先断开远控；保存成功关闭旧加密连接。新端口占用或保存失败时保留正在运行的配置。损坏配置明确报错，不生成替代身份。已存在的系统 SSH 服务和配置不会被改动。
 
-- Mac：核对系统 launchd 使用 `SockServiceName=ssh` 后，修改 `/etc/services` 的 SSH 服务记录，使用 `systemsetup` 重启远程登录。管理员授权由系统弹窗处理；当前 macOS 的 `systemsetup` 另外要求完全磁盘访问权限，LanDesk 不自动授予。非标准 launchd 配置明确报错。
-- Windows：修改系统 ProgramData 下的 `ssh/sshd_config` 并重启 `sshd` 服务，使用 UAC 授权。端口初始填 22；已有自定义配置显示其端口。配置缺失时保留默认输入值并提示缺失路径，不代表 SSH 已启动；应用前检查配置和 PowerShell 路径，端口未变时只验证监听，不重复请求 UAC。多 Port 或 Include 配置不自动修改。用户需要确保防火墙允许新 SSH 端口；不自动扩大防火墙规则。
-- 变更前保存同目录 `.landesk-backup` 备份，原子写入配置，再检查新端口是否返回 SSH 握手。失败恢复原配置并重启；回滚失败保留备份并明确显示路径。已有备份时拒绝继续覆盖。
-- 修改会影响这台电脑的系统 SSH 服务和其他 SSH 连接。公网路由器端口映射需另行配置；界面填写的是系统监听端口。
+服务端配置位于当前用户配置目录 `LanDeskServer/server.json`：Mac 为 `~/Library/Application Support/LanDeskServer/server.json`，Windows 为 `%APPDATA%\LanDeskServer\server.json`。包含 Ed25519 私钥与带随机盐的 Argon2id 密码校验值，不保存明文访问密码。Mac 文件权限为 0600；Windows 使用当前用户配置目录的访问权限。请勿公开此文件；删除它会重置身份，已有客户端将拒绝变化后的设备密钥。
 
-Mac 权限依据：本机 `man systemsetup`；管理员弹窗机制见 [Apple TN2065](https://developer.apple.com/library/archive/technotes/tn2065/_index.html)。监听方式根据本机 macOS 26.5.1 的 `/System/Library/LaunchDaemons/ssh.plist` 与 `launchd.plist(5)` 核对。Windows 配置位置和重启要求见 [Microsoft OpenSSH 文档](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)。实际修改端口及重启后的持续可达性尚未实机验收。
+采用项目锁定的 [russh 0.64.1](https://docs.rs/russh/0.64.1/russh/server/index.html) 内嵌服务端，复用 SSH 协议的加密和密码认证。应用不开放命令行、SFTP、系统账号登录或通用 TCP 转发；只允许认证后的 LanDesk HTTP/WebSocket 通道，服务端不另开明文 HTTP 监听。认证限制为每连接最多 3 次，失败延迟 2 秒，同时最多 2 个密码校验任务、32 条传输连接；未认证连接有超时。密码校验使用 [Argon2id 0.5.3](https://docs.rs/argon2/0.5.3/argon2/)。
 
-Windows 10 首次使用需要安装 **OpenSSH Server**，仅有 OpenSSH Client 不够。若尚未安装，在管理员 PowerShell 中执行以下命令；启动 `sshd` 后系统会生成默认配置，重新打开 LanDesk 即可读取。安装会开放默认 SSH 端口 22；已有服务和配置时不要重复安装。[微软安装步骤](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse)
-
-```powershell
-Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-Start-Service sshd
-```
+客户端首次自动信任设备密钥，不能验证首次连接时是否连接到了预期设备；后续检查记录，不自动覆盖变化的密钥。配置删除或重装后的密钥变化需要用户核实并清理对应信任记录。
 
 ## 公共接口与系统实现
 
@@ -64,8 +60,8 @@ cargo clippy --all-targets --locked -- -D warnings
 node --test web/*.test.mjs
 ```
 
-Mac 打包：`python3 scripts/bundle.py`，输出位于 Cargo target 的 `release/bundle/macos/LanDesk.app`。开发包使用临时签名，更新后可能需要自行恢复权限；不重置其他应用权限。
+Mac 打包：`python3 scripts/bundle.py`，输出位于 Cargo target 的 `release/bundle/macos/LanDeskServer.app`。开发包使用临时签名，更新后可能需要自行恢复权限；不重置其他应用权限。
 
-Windows 服务端：`cargo build --locked --release`，输出 `target/release/landesk.exe`。[服务端工作流](.github/workflows/server.yml)在 Mac/Windows 分别执行测试、Clippy 和构建，Windows artifact 为 `LanDeskServer-windows-x64`。客户端继续使用 [Windows client 工作流](.github/workflows/windows-client.yml)与 `LanDeskClient-windows-x64` artifact。
+Windows 服务端：`cargo build --locked --release`，输出 `target/release/LanDeskServer.exe`。[服务端工作流](.github/workflows/server.yml)在 Mac/Windows 分别执行测试、Clippy 和构建，artifact 为 `LanDeskServer-windows-x64` / `LanDeskServer-macos`。客户端使用 [Windows client 工作流](.github/workflows/windows-client.yml)，artifact 为 `LanDeskClient-windows-x64`。Windows 构建使用 MSVC、Windows SDK 和 CMake；最终用户不需要构建工具。
 
-本轮本机通过服务端 39 项、网页 14 项、客户端连接核心 12 项测试；Mac 与 Windows GNU 目标的全目标 Clippy 通过，Mac 应用打包与签名检查通过。Windows 桌面采集、键鼠、剪贴板、文件 ACL、UAC 和系统 SSH 端口变更仍需实机验收；交叉编译检查不代表这些功能已经验证。用户已确认重构前 Mac 远控及文件阻塞修复使用正常；重构版本尚未安装，需更新后复验。
+自动化测试覆盖密码校验与设备身份保持、实际 TCP 加密通道中的 HTTP/WebSocket 收发、拒绝命令行及任意转发、密码轮换断连、配置失败保留旧服务，以及原有网页和远控会话回归。测试通过不代表 Windows/Mac 桌面采集、权限、键鼠或防火墙已完成实机验收。系统服务、登录前控制、Linux 服务端、设备发现及中继尚未实现。

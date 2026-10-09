@@ -17,9 +17,9 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "macos")]
-pub use macos::{MacPlatform as CurrentPlatform, files as filesystem, ssh};
+pub use macos::{MacPlatform as CurrentPlatform, files as filesystem};
 #[cfg(target_os = "windows")]
-pub use windows::{WindowsPlatform as CurrentPlatform, files as filesystem, ssh};
+pub use windows::{WindowsPlatform as CurrentPlatform, files as filesystem};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 

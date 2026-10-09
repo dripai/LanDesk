@@ -35,7 +35,6 @@ enum Update {
 struct Client {
     name: Entity<InputState>,
     host: Entity<InputState>,
-    user: Entity<InputState>,
     port: Entity<InputState>,
     password: Entity<InputState>,
     config: Connections,
@@ -74,11 +73,8 @@ fn input(
 impl Client {
     fn new(runtime: Arc<Runtime>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let loaded = Settings::directory().and_then(|dir| {
-            let path = dir.join("settings.json");
-            let (config, migrate) = Connections::load(&path)?;
-            if migrate {
-                credentials::migrate(&config, &path)?;
-            }
+            let path = dir.join("connections.json");
+            let config = Connections::load(&path)?;
             Ok((config, path))
         });
         let (config, settings_path, mut startup_error) = match loaded {
@@ -162,8 +158,7 @@ impl Client {
         Self {
             name: input(&initial.name, "例如：开发电脑", false, window, cx),
             host: input(&initial.host, "IP 或主机名", false, window, cx),
-            user: input(&initial.user, "远程用户名", false, window, cx),
-            port: input(&initial.ssh_port.to_string(), "22", false, window, cx),
+            port: input(&initial.port.to_string(), "17891", false, window, cx),
             password: input("", "已记住的密码可留空", true, window, cx),
             editing: selected.is_none(),
             selected,
@@ -208,8 +203,7 @@ impl Client {
         for (state, value) in [
             (&self.name, profile.name),
             (&self.host, profile.host),
-            (&self.user, profile.user),
-            (&self.port, profile.ssh_port.to_string()),
+            (&self.port, profile.port.to_string()),
             (&self.password, String::new()),
         ] {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
@@ -226,14 +220,13 @@ impl Client {
         let value = Settings {
             name: self.name.read(cx).value().trim().to_string(),
             host: self.host.read(cx).value().trim().to_string(),
-            user: self.user.read(cx).value().trim().to_string(),
-            ssh_port: self
+            port: self
                 .port
                 .read(cx)
                 .value()
                 .trim()
                 .parse()
-                .map_err(|_| anyhow::anyhow!("SSH 端口必须为 1–65535"))?,
+                .map_err(|_| anyhow::anyhow!("连接端口必须为 1–65535"))?,
             open_browser: self.open_browser,
             minimize_to_tray: self.config.minimize_to_tray,
         };
@@ -251,7 +244,7 @@ impl Client {
         {
             return Ok(saved.password());
         }
-        anyhow::bail!("请输入远程用户的 SSH 密码")
+        anyhow::bail!("请输入 LanDeskServer 设置的访问密码")
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let value = self.read_settings(cx)?;
@@ -339,7 +332,7 @@ impl Client {
             .settings_path
             .as_ref()
             .unwrap()
-            .with_file_name("known_hosts");
+            .with_file_name("known_devices");
         // Bridge per-session events without allowing one session to overwrite another.
         self.runtime.spawn(async move {
             let (tx, rx) = mpsc::channel();
@@ -439,7 +432,7 @@ impl Client {
                                 session.status = match result {
                                     Ok(tunnel::StopReason::Disconnected) => "已断开".into(),
                                     Ok(tunnel::StopReason::IdleTimeout) => {
-                                        "空闲 30 秒，SSH 已关闭，请重新连接".into()
+                                        "空闲 30 秒，连接已关闭，请重新连接".into()
                                     }
                                     Err(error) => format!("{error:#}"),
                                 };
@@ -550,11 +543,10 @@ impl Render for Client {
         for (label, state) in [
             ("名称", &self.name),
             ("服务器地址", &self.host),
-            ("用户名", &self.user),
-            ("SSH 端口", &self.port),
-            ("SSH 密码", &self.password),
+            ("连接端口", &self.port),
+            ("访问密码", &self.password),
         ] {
-            let disabled = blocked || busy || (!self.editing && label != "SSH 密码");
+            let disabled = blocked || busy || (!self.editing && label != "访问密码");
             detail = detail.child(
                 div()
                     .h_flex()

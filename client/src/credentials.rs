@@ -5,14 +5,12 @@ use std::path::Path;
 use windows_sys::Win32::{Foundation::ERROR_NOT_FOUND, Security::Credentials::*};
 use zeroize::{Zeroize, Zeroizing};
 
-const TARGET: &str = "LanDeskClient/SSH";
 static ACCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SavedPassword {
     host: String,
-    user: String,
     port: u16,
     password: String,
 }
@@ -25,8 +23,7 @@ impl SavedPassword {
     pub fn new(settings: &Settings, password: &str) -> Self {
         Self {
             host: settings.normalized_host(),
-            user: settings.user.clone(),
-            port: settings.ssh_port,
+            port: settings.port,
             password: password.into(),
         }
     }
@@ -37,8 +34,7 @@ impl SavedPassword {
         }
         .normalized_host()
             == settings.normalized_host()
-            && self.user == settings.user
-            && self.port == settings.ssh_port
+            && self.port == settings.port
     }
     pub fn password(&self) -> Zeroizing<String> {
         Zeroizing::new(self.password.clone())
@@ -81,13 +77,13 @@ fn read_at(target: &str) -> Result<Option<SavedPassword>> {
     let record = unsafe { &*credential.0 };
     ensure!(
         record.CredentialBlobSize != 0 && !record.CredentialBlob.is_null(),
-        "保存的 SSH 凭据为空"
+        "保存的 访问凭据为空"
     );
     let bytes = unsafe {
         std::slice::from_raw_parts(record.CredentialBlob, record.CredentialBlobSize as usize)
     };
     Ok(Some(
-        serde_json::from_slice(bytes).context("保存的 SSH 凭据损坏")?,
+        serde_json::from_slice(bytes).context("保存的 访问凭据损坏")?,
     ))
 }
 
@@ -97,21 +93,21 @@ fn write_at(target: &str, saved: Option<&SavedPassword>) -> Result<()> {
         if unsafe { CredDeleteW(target_wide.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
-                return Err(error).context("无法删除保存的 SSH 密码");
+                return Err(error).context("无法删除保存的 访问密码");
             }
         }
         ensure!(
             read_at(target)?.is_none(),
-            "Windows SSH 凭据删除后状态核验失败"
+            "Windows 访问凭据删除后状态核验失败"
         );
         return Ok(());
     };
     let mut bytes = Zeroizing::new(serde_json::to_vec(saved)?);
     ensure!(
         bytes.len() <= CRED_MAX_CREDENTIAL_BLOB_SIZE as usize,
-        "SSH 凭据超过 Windows 保存上限"
+        "访问凭据超过 Windows 保存上限"
     );
-    let mut username = wide(&saved.user);
+    let mut username = wide("LanDesk");
     let record = CREDENTIALW {
         Type: CRED_TYPE_GENERIC,
         TargetName: target_wide.as_mut_ptr(),
@@ -123,12 +119,12 @@ fn write_at(target: &str, saved: Option<&SavedPassword>) -> Result<()> {
     };
     ensure!(
         unsafe { CredWriteW(&record, 0) } != 0,
-        "无法保存 Windows SSH 凭据：{}",
+        "无法保存 Windows 访问凭据：{}",
         std::io::Error::last_os_error()
     );
     ensure!(
         read_at(target)?.as_ref() == Some(saved),
-        "Windows SSH 凭据保存后状态核验失败"
+        "Windows 访问凭据保存后状态核验失败"
     );
     Ok(())
 }
@@ -138,7 +134,7 @@ fn target(id: &str) -> Result<String> {
         id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()),
         "连接标识无效"
     );
-    Ok(format!("LanDeskClient/SSH/{id}"))
+    Ok(format!("LanDeskClient/Access/{id}"))
 }
 pub fn read(id: &str) -> Result<Option<SavedPassword>> {
     let _lock = ACCESS
@@ -196,32 +192,6 @@ fn transaction(
     }
     Ok(())
 }
-pub fn migrate(config: &Connections, path: &Path) -> Result<()> {
-    let _lock = ACCESS
-        .lock()
-        .map_err(|_| anyhow::anyhow!("凭据操作状态不可用"))?;
-    ensure!(config.profiles.len() == 1, "旧配置迁移缺少唯一连接");
-    let profile = &config.profiles[0];
-    let old = read_at(TARGET)?;
-    let destination = target(&profile.id())?;
-    ensure!(
-        read_at(&destination)?.is_none(),
-        "迁移目标凭据已存在，请先检查凭据管理器"
-    );
-    // Preserve an existing password only when it belongs to the imported account.
-    if let Some(saved) = &old {
-        ensure!(
-            saved.matches(profile),
-            "旧密码与当前连接不匹配，请先检查凭据管理器"
-        );
-    }
-    transaction(
-        config,
-        path,
-        vec![(destination, old), (TARGET.into(), None)],
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,11 +213,10 @@ mod tests {
         let _cleanup = Cleanup(target.clone());
         let mut settings = Settings {
             host: "example.test".into(),
-            user: "developer".into(),
             ..Settings::default()
         };
         let saved = SavedPassword::new(&settings, "测试-password");
-        let path = temp.path().join("settings.json");
+        let path = temp.path().join("connections.json");
         let config = Connections {
             profiles: vec![settings.clone()],
             ..Connections::default()
@@ -291,7 +260,6 @@ mod tests {
         let _cleanup = Cleanup(vec![a.clone(), b.clone(), c.clone()]);
         let first = Settings {
             host: "192.0.2.1".into(),
-            user: "dev".into(),
             ..Settings::default()
         };
         let second = Settings {
@@ -302,7 +270,7 @@ mod tests {
             profiles: vec![first.clone(), second.clone()],
             ..Connections::default()
         };
-        let path = temp.path().join("settings.json");
+        let path = temp.path().join("connections.json");
         transaction(
             &config,
             &path,

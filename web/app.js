@@ -177,7 +177,7 @@ function connect() {
     }
 
   };
-  socket.onerror=()=>end('无法连接，请确认 远程 LanDesk 应用和 LanDeskClient 或 SSH 隧道都在运行');
+  socket.onerror=()=>end('无法连接，请确认 LanDeskServer 和 LanDeskClient 都在运行');
   socket.onclose=()=>{ if(socket) end('连接已断开'); };
 }
 $('connect-form').addEventListener('submit', event => { event.preventDefault(); connect(); });
