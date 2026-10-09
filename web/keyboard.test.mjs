@@ -76,6 +76,38 @@ test('focus loss releases held keys and prevents stray text commits', () => {
   assert.deepEqual(f.messages, [{type:'key',key:'Shift',down:true},{type:'release_all'}]);
 });
 
+test('holding each arrow repeats movement and releases it on keyup', () => {
+  for (const key of ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown']) {
+    const f = fixture();
+    f.event('keydown', {key,code:key});
+    for (let i = 0; i < 3; i++) f.event('keydown', {key,code:key,repeat:true});
+    f.event('keyup', {key,code:key});
+    assert.deepEqual(f.messages, Array.from({length:4}, () => [
+      {type:'key',key,down:true}, {type:'key',key,down:false},
+    ]).flat());
+  }
+});
+
+test('arrow repeat preserves modifiers and stops after focus loss', () => {
+  const f = fixture();
+  f.event('keydown', {key:'Shift',code:'ShiftLeft'});
+  f.event('keydown', {key:'Shift',code:'ShiftLeft',repeat:true});
+  f.event('keydown', {key:'ArrowRight',code:'ArrowRight',shiftKey:true});
+  f.event('keydown', {key:'ArrowRight',code:'ArrowRight',shiftKey:true,repeat:true});
+  assert.deepEqual(f.messages, [
+    {type:'key',key:'Shift',down:true},
+    {type:'key',key:'ArrowRight',down:true},
+    {type:'key',key:'ArrowRight',down:false},
+    {type:'key',key:'ArrowRight',down:true},
+  ]);
+  f.event('blur');
+  const before = [...f.messages];
+  f.event('keydown', {key:'ArrowRight',code:'ArrowRight',repeat:true});
+  f.event('keyup', {key:'ArrowRight',code:'ArrowRight'});
+  assert.equal(before.at(-1).type, 'release_all');
+  assert.deepEqual(f.messages, before);
+});
+
 test('text limits count UTF-8 bytes and reject null characters', () => {
   const f = fixture();
   f.keyboard.text('汉'.repeat(22000)); f.keyboard.text('a\0b');

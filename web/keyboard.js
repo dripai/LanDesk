@@ -1,5 +1,6 @@
 const MAX_TEXT_BYTES = 65536;
 const special = new Set(['Control','Meta','Alt','Shift','Enter','Escape','Tab','Backspace','Delete','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown','F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12']);
+const repeatable = new Set(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown']);
 
 export function createKeyboard(input, send, notify, pasteImage) {
   const held = new Map();
@@ -44,7 +45,15 @@ export function createKeyboard(input, send, notify, pasteImage) {
     const shortcut = (event.ctrlKey || event.metaKey || event.altKey) && !event.getModifierState('AltGraph');
     if (!special.has(event.key) && (!shortcut || [...event.key].length !== 1)) return;
     event.preventDefault();
-    if (event.repeat) return;
+    if (event.repeat) {
+      const key = held.get(event.code);
+      if (!repeatable.has(key)) return;
+      // Re-press only this arrow; preserve held modifiers and keep native key
+      // bookkeeping bounded. Ignore late repeats after blur/release_all.
+      send({type:'key',key,down:false});
+      send({type:'key',key,down:true});
+      return;
+    }
     held.set(event.code, event.key); send({type:'key',key:event.key,down:true});
   });
   input.addEventListener('keyup', event => {
