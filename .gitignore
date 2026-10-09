@@ -5,3 +5,4 @@
 *.log
 .DS_Store
 __pycache__/
+/vendor/virtual-display/

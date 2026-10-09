@@ -50,6 +50,9 @@ pub fn run() -> Result<()> {
     let mut requested = 0;
     let mut original = None;
     let mut transition_started = None;
+    // Keep the device alive across lock/UAC desktop changes; dropping the worker
+    // removes only LanDesk's software display, never another application's device.
+    let mut virtual_display = None;
     while !stopped.load(Ordering::Acquire) {
         let requests = requests.clone();
         let stopped = stopped.clone();
@@ -76,10 +79,30 @@ pub fn run() -> Result<()> {
         if produced_frame {
             transition_started = None;
         }
-        if let Err(error) = result {
-            let recoverable = transient(&error);
+        if let Err(mut error) = result {
+            let missing_display = error.is::<dxgi::NoOutput>();
+            if missing_display && virtual_display.is_none() {
+                match super::virtual_display::Device::create() {
+                    Ok(device) => {
+                        virtual_display = Some(device);
+                        transition_started = Some(std::time::Instant::now());
+                        continue;
+                    }
+                    Err(creation_error) => {
+                        error = creation_error.context("无显示输出，自动创建虚拟显示器失败");
+                    }
+                }
+            }
+            let waiting_display = error.is::<dxgi::NoOutput>() && virtual_display.is_some();
+            let recoverable = transient(&error) || waiting_display;
             let since = transition_started.get_or_insert_with(std::time::Instant::now);
-            if !recoverable || since.elapsed() > Duration::from_secs(10) {
+            if !recoverable || since.elapsed() > Duration::from_secs(15) {
+                if let Some(device) = virtual_display.as_ref() {
+                    error = error.context(format!(
+                        "虚拟显示器未能完成桌面采集：{}",
+                        device.diagnostic()
+                    ));
+                }
                 wire::event(
                     &mut *output.lock().unwrap(),
                     Event::Error {

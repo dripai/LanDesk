@@ -3,9 +3,9 @@ name: LanDesk server
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["src/**", "tests/**", "web/**", "Cargo.toml", "Cargo.lock", "build.rs", "scripts/bundle.py", ".github/workflows/server.yml"]
+    paths: ["src/**", "tests/**", "web/**", "Cargo.toml", "Cargo.lock", "build.rs", "scripts/**", "third_party/**", ".github/workflows/server.yml"]
   pull_request:
-    paths: ["src/**", "tests/**", "web/**", "Cargo.toml", "Cargo.lock", "build.rs", "scripts/bundle.py", ".github/workflows/server.yml"]
+    paths: ["src/**", "tests/**", "web/**", "Cargo.toml", "Cargo.lock", "build.rs", "scripts/**", "third_party/**", ".github/workflows/server.yml"]
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,24 @@ jobs:
         run: rustup update stable
       - name: Format
         run: cargo +stable fmt --all -- --check
+      - name: Driver packaging tests
+        run: python -m unittest discover -s scripts -p "test_*.py"
+      - name: Prepare signed virtual display driver
+        if: runner.os == 'Windows'
+        run: python scripts/prepare_virtual_display.py
+      - name: Verify driver catalog and members
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $catalog = Get-AuthenticodeSignature vendor/virtual-display/mttvdd.cat
+          if ($catalog.Status -ne 'Valid') { throw "Driver catalog signature: $($catalog.Status) $($catalog.StatusMessage)" }
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $signtool = Get-ChildItem "$kits\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (!$signtool) { throw 'Windows SDK signtool not found' }
+          foreach ($file in @('MttVDD.inf', 'MttVDD.dll')) {
+            & $signtool.FullName verify /pa /v /c vendor/virtual-display/mttvdd.cat "vendor/virtual-display/$file"
+            if ($LASTEXITCODE -ne 0) { throw "Catalog membership verification failed: $file" }
+          }
       - name: Test
         run: cargo +stable test --locked
       - name: Clippy
@@ -47,6 +65,7 @@ jobs:
           path: |
             target/release/LanDeskServer.exe
             README.md
+            third_party/virtual-display/LICENSE
           if-no-files-found: error
       - name: Archive Mac bundle
         if: runner.os == 'macOS'
