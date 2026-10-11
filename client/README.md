@@ -5,7 +5,7 @@ Windows 10 / 11 x64 客户端，使用 GPUI Kit 0.7.1（GPUI / gpui-component）
 ## 使用
 
 1. 从本仓库 Actions 的 **Windows client** 成功构建下载 `LanDeskClient-windows-x64`，解压运行 `LanDeskClient.exe`。Mac 端也需更新到支持相对网页路径、取消连接码的版本，并自行恢复屏幕录制和辅助功能权限。
-2. 左侧点 `+` 添加服务器，填写名称、IP/主机名、SSH 端口和用户名，保存后点击“连接”。Mac 应先开启“远程登录”并运行 LanDesk。
+2. 左侧点 `+` 添加服务器，填写名称、IP/主机名、SSH 端口和用户名，保存后点击“连接”，SSH 就绪后自动打开对应网页，不再提供“打开桌面”按钮或自动打开开关。保持 SSH 已连接时，在网页点击“重新连接”即可重试。Mac 应先开启“远程登录”并运行 LanDesk。
 3. 单击左侧条目查看连接信息；“编辑”后可保存或取消。编辑期间先完成或取消编辑，再切换条目。连接中禁止编辑或删除该条目；断开后可删除，删除同时移除它保存的密码。
 4. SSH 密码下方可勾选“记住密码”，保存或连接时生效。密码保存到 Windows 凭据管理器，不写入 JSON。未记住密码时，每次连接需要输入；取消勾选并连接或保存会删除此条目的已存密码。
 5. 每台服务器使用独立 SSH 会话、浏览器标签、连接状态和 30 秒无远控连接计时。切换列表不会断开连接；右侧“断开”只影响当前服务器。托盘菜单可“断开全部连接”或“退出”。
@@ -41,6 +41,6 @@ cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warn
 cargo build --manifest-path client/Cargo.toml --locked --release
 ```
 
-本机连接核心测试覆盖：地址规范化/去重，配置迁移及增删改，真实双 SSH 服务的同端口路由隔离，WebSocket 64 KiB 往返，单台断开不影响另一台，HTTP 保活不续命，30 秒无远控关闭，重连宽限期及端口释放。Windows 凭据隔离和回滚测试由 Windows 工作流执行。Windows 实际 UI、托盘和到 Mac 的完整远控仍需实机验收；编译成功不等于实机验证。
+本机连接核心测试覆盖：地址规范化/去重，配置迁移及增删改，真实双 SSH 服务的同端口路由隔离，WebSocket 64 KiB 往返，单台断开不影响另一台，HTTP 保活不续命，30 秒无远控关闭，重连宽限期及端口释放。Windows 凭据隔离和回滚测试由 Windows 工作流执行。Windows 实际 UI、托盘和到 Mac 的完整远控仍需实机验收；编译成功不等于实机验证。自动打开网页与按钮移除已通过 12 项本机核心测试；完整 Windows 检查和 EXE 打包使用本仓库 Windows client 工作流。
 
 官方依据：[GPUI Kit](https://gpui-kit.com/docs/installation/)、[russh](https://docs.rs/russh/0.64.1/russh/)、[Hyper HTTP Upgrade](https://docs.rs/hyper/latest/hyper/upgrade/index.html)、[Windows 凭据](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew)。实现核对了锁定的 GPUI Kit 0.7.1、Hyper 1.12.0、russh 0.64.1 源码。

@@ -42,7 +42,6 @@ struct Client {
     selected: Option<String>,
     editing: bool,
     delete_pending: bool,
-    open_browser: bool,
     remember_password: bool,
     settings_path: Option<PathBuf>,
     startup_error: Option<String>,
@@ -168,7 +167,6 @@ impl Client {
             editing: selected.is_none(),
             selected,
             delete_pending: false,
-            open_browser: initial.open_browser,
             remember_password,
             status: startup_error.clone().unwrap_or_else(|| "".into()),
             config,
@@ -214,7 +212,6 @@ impl Client {
         ] {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
         }
-        self.open_browser = profile.open_browser;
         self.remember_password = remember;
         self.editing = id.is_none();
         self.selected = id;
@@ -234,7 +231,7 @@ impl Client {
                 .trim()
                 .parse()
                 .map_err(|_| anyhow::anyhow!("SSH 端口必须为 1–65535"))?,
-            open_browser: self.open_browser,
+            open_browser: true,
             minimize_to_tray: self.config.minimize_to_tray,
         };
         value.validate()?;
@@ -427,7 +424,6 @@ impl Client {
                                 session.status = "已连接 · 无远控连接 30 秒后断开".into();
                                 if let Some(profile) =
                                     self.config.profiles.iter().find(|p| p.id() == id)
-                                    && profile.open_browser
                                 {
                                     cx.open_url(&profile.viewer_url());
                                 }
@@ -489,11 +485,7 @@ impl Render for Client {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.current_busy();
         let blocked = self.startup_error.is_some() || self.quitting;
-        let ready = self
-            .selected
-            .as_ref()
-            .and_then(|id| self.sessions.get(id))
-            .is_some_and(|s| s.ready);
+
         let mut sidebar = div()
             .v_flex()
             .w(px(220.))
@@ -581,16 +573,6 @@ impl Render for Client {
                     })),
             ),
         );
-        detail = detail.child(
-            Checkbox::new("auto-browser")
-                .label("连接后打开浏览器")
-                .checked(self.open_browser)
-                .disabled(blocked || !self.editing)
-                .on_click(cx.listener(|this, checked, _, cx| {
-                    this.open_browser = *checked;
-                    cx.notify();
-                })),
-        );
         let mut buttons = div().h_flex().gap_2();
         if self.editing {
             buttons = buttons
@@ -637,19 +619,6 @@ impl Render for Client {
                                 this.disconnect_id(&id);
                             }
                             cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("open")
-                        .label("打开桌面")
-                        .disabled(!ready)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(id) = &this.selected
-                                && let Some(profile) =
-                                    this.config.profiles.iter().find(|p| p.id() == *id)
-                            {
-                                cx.open_url(&profile.viewer_url());
-                            }
                         })),
                 )
                 .child(
