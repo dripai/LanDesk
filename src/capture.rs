@@ -7,6 +7,16 @@ use std::{
 };
 use tokio::sync::watch;
 
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayBounds(display: u32) -> screencapturekit::cg::CGRect;
+}
+
+pub fn display_bounds(display: u32) -> screencapturekit::cg::CGRect {
+    unsafe { CGDisplayBounds(display) }
+}
+
 const JPEG_QUALITY: u8 = 92;
 const MAX_RGB_BYTES: usize = 48_000_000;
 
@@ -47,10 +57,10 @@ pub struct Capture {
     pub frames: watch::Receiver<Option<FrameEvent>>,
     pub width: u32,
     pub height: u32,
-    pub point_width: i32,
-    pub point_height: i32,
     native_width: u32,
     native_height: u32,
+    pub display_id: u32,
+    pub displays: Vec<serde_json::Value>,
 }
 
 fn resolution_dimensions(
@@ -144,25 +154,26 @@ impl SCStreamOutputTrait for Handler {
             },
             Err(e) => FrameEvent::Error(e.to_string()),
         };
-        self.tx.send_replace(Some(event));
+        self.tx.send_if_modified(|current| {
+            if matches!(current, Some(FrameEvent::Error(_))) {
+                return false;
+            }
+            *current = Some(event);
+            true
+        });
     }
 }
 
 impl Capture {
-    pub fn start() -> Result<Self> {
+    pub fn start(display_id: Option<u32>) -> Result<Self> {
         let content = SCShareableContent::get()
             .context("无法采集屏幕，请授予 LanDesk 屏幕录制权限并重启应用")?;
         let displays = content.displays();
-        ensure!(
-            displays.len() == 1,
-            "第一版仅支持一个显示器，请断开其他显示器后重连"
-        );
-        let display = &displays[0];
-        let bounds = display.frame();
-        ensure!(
-            bounds.origin.x == 0.0 && bounds.origin.y == 0.0,
-            "当前显示器坐标原点不受支持"
-        );
+        let display_id = display_id.unwrap_or_else(|| unsafe { CGMainDisplayID() });
+        let display = displays
+            .iter()
+            .find(|display| display.display_id() == display_id)
+            .context("选定显示器已不可用，请重新连接或选择其他显示器")?;
         let filter = SCContentFilter::create()
             .with_display(display)
             .with_excluding_windows(&[])
@@ -177,7 +188,12 @@ impl Capture {
         )?;
         let config = configuration(width, height);
         let (tx, frames) = watch::channel(None);
-        let mut stream = SCStream::new(&filter, &config)?;
+        let errors = tx.clone();
+        let delegate = screencapturekit::stream::ErrorHandler::new(move |error| {
+            eprintln!("LanDesk capture stopped: {error}");
+            errors.send_replace(Some(FrameEvent::Error(error.to_string())));
+        });
+        let mut stream = SCStream::new_with_delegate(&filter, &config, delegate)?;
         stream.add_output_handler(
             Handler {
                 tx,
@@ -191,10 +207,13 @@ impl Capture {
             frames,
             width,
             height,
-            point_width: bounds.size.width.round() as i32,
-            point_height: bounds.size.height.round() as i32,
             native_width: width,
             native_height: height,
+            display_id,
+            displays: displays.iter().map(|display| serde_json::json!({
+                "id":display.display_id(), "width":display.width(), "height":display.height(),
+                "main":display.display_id() == unsafe { CGMainDisplayID() },
+            })).collect(),
         })
     }
     pub fn set_resolution(&mut self, requested_width: Option<u32>) -> Result<()> {
@@ -206,6 +225,176 @@ impl Capture {
         self.width = width;
         self.height = height;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Change {
+    Resolution(Option<u32>),
+    Display(u32),
+}
+
+impl Capture {
+    fn info(&self, requested: Option<u32>) -> serde_json::Value {
+        serde_json::json!({"type":"display_state", "width":self.width,"height":self.height,
+            "native_width":self.native_width,"native_height":self.native_height,
+            "requested_width":requested,"display_id":self.display_id,"displays":self.displays})
+    }
+}
+
+type Configuration = (
+    Change,
+    tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
+);
+
+pub struct CaptureHandle {
+    pub frames: watch::Receiver<Option<FrameEvent>>,
+    pub info: watch::Receiver<serde_json::Value>,
+    commands: std::sync::mpsc::Sender<Configuration>,
+}
+impl CaptureHandle {
+    pub fn configure(
+        &self,
+        change: Change,
+    ) -> futures_util::future::BoxFuture<'static, Result<serde_json::Value>> {
+        let commands = self.commands.clone();
+        Box::pin(async move {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            commands
+                .send((change, reply))
+                .context("采集工作线程已关闭")?;
+            response.await.context("采集配置响应中断")?
+        })
+    }
+}
+
+// Exactly one thread owns all SCStreams. A disconnected session only drops
+// its command sender; synchronous ScreenCaptureKit cleanup never blocks Tokio.
+#[derive(Clone)]
+pub struct CaptureService(
+    tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<Result<CaptureHandle>>>,
+);
+impl CaptureService {
+    pub fn new() -> Result<Self> {
+        let (requests, mut receiver) =
+            tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Result<CaptureHandle>>>(1);
+        std::thread::Builder::new()
+            .name("landesk-capture".into())
+            .spawn(move || {
+                while let Some(reply) = receiver.blocking_recv() {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    let mut capture = match Capture::start(None) {
+                        Ok(capture) => capture,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
+                    };
+                    let (commands, operations) = std::sync::mpsc::channel();
+                    let (frames, images) = watch::channel(None);
+                    let (metadata, info) = watch::channel(capture.info(None));
+                    if reply
+                        .send(Ok(CaptureHandle {
+                            frames: images,
+                            info,
+                            commands,
+                        }))
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let mut requested = None;
+                    let mut sequence = 0;
+                    let mut geometry = display_bounds(capture.display_id);
+                    let mut checked = std::time::Instant::now();
+                    loop {
+                        match operations.recv_timeout(std::time::Duration::from_millis(10)) {
+                            Ok((change, reply)) => {
+                                if reply.is_closed() {
+                                    continue;
+                                }
+                                let result = (|| -> Result<_> {
+                                    match change {
+                                        Change::Resolution(width) => {
+                                            capture.set_resolution(width)?;
+                                            requested = width;
+                                        }
+                                        Change::Display(id) => {
+                                            let replacement = Capture::start(Some(id))?;
+                                            capture = replacement;
+                                            requested = None;
+                                        }
+                                    }
+                                    geometry = display_bounds(capture.display_id);
+                                    let info = capture.info(requested);
+                                    metadata.send_replace(info.clone());
+                                    Ok(info)
+                                })();
+                                let _ = reply.send(result);
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        }
+                        if checked.elapsed() >= std::time::Duration::from_millis(250) {
+                            checked = std::time::Instant::now();
+                            let current = display_bounds(capture.display_id);
+                            if current != geometry {
+                                // Re-enumerate the same selected display after a mode change.
+                                // Do not silently switch to an unrelated monitor.
+                                let result = Capture::start(Some(capture.display_id)).and_then(
+                                    |mut next| {
+                                        let width = requested
+                                            .map(|width: u32| width.min(next.native_width));
+                                        next.set_resolution(width)?;
+                                        requested = width;
+                                        Ok(next)
+                                    },
+                                );
+                                match result {
+                                    Ok(next) => {
+                                        capture = next;
+                                        geometry = current;
+                                        metadata.send_replace(capture.info(requested));
+                                    }
+                                    Err(error) => {
+                                        frames.send_replace(Some(FrameEvent::Error(format!(
+                                            "更新显示器失败: {error:#}"
+                                        ))));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if capture.frames.has_changed().unwrap_or(false) {
+                            let event = capture.frames.borrow_and_update().clone();
+                            let failed = matches!(event, Some(FrameEvent::Error(_)));
+                            let event = event.map(|event| match event {
+                                FrameEvent::Frame { jpeg, .. } => {
+                                    sequence += 1;
+                                    FrameEvent::Frame { jpeg, sequence }
+                                }
+                                error => error,
+                            });
+                            frames.send_replace(event);
+                            if failed {
+                                break;
+                            }
+                        }
+                    }
+                    eprintln!("LanDesk capture cleanup started");
+                    drop(capture);
+                    eprintln!("LanDesk capture cleanup finished");
+                }
+            })
+            .context("无法启动采集工作线程")?;
+        Ok(Self(requests))
+    }
+    pub async fn start(&self) -> Result<CaptureHandle> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.0.send(reply).await.context("采集服务已关闭")?;
+        response.await.context("采集启动响应中断")?
     }
 }
 

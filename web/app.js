@@ -1,11 +1,13 @@
 'use strict';
+import {createFrames} from './frames.js';
 import {createKeyboard} from './keyboard.js';
 import {createFiles} from './files.js';
 import {createImagePaste} from './clipboard.js';
 const $ = id => document.getElementById(id);
 const serverName = new URLSearchParams(location.hash.slice(1)).get('name');
 if (serverName) document.title = `${serverName} · LanDesk`;
-let socket = null, heartbeat = null, imageURL = null, drawing = false, lastMove = 0;
+let socket = null, heartbeat = null, lastMove = 0;
+const frames = createFrames($('screen'), end);
 const send = value => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
 function notify(message) {
   $('notice').textContent = message; $('notice').hidden = false;
@@ -15,7 +17,7 @@ const imagePaste = createImagePaste(value => {
   if (socket?.readyState !== WebSocket.OPEN) throw new Error('连接已断开');
   send(value);
 }, notify);
-const keyboard = createKeyboard($('keyboard-input'), send, notify, imagePaste.paste);
+const keyboard = createKeyboard($('keyboard-input'), send, notify, imagePaste.paste, () => copyClipboard(true));
 const files = createFiles($('files-panel'), value => {
   if (socket?.readyState !== WebSocket.OPEN) throw new Error('连接已断开');
   send(value);
@@ -43,19 +45,20 @@ $('clipboard-paste').addEventListener('click', async () => {
       if (!item) throw new Error('剪贴板没有文字或图片；文件请通过右侧面板上传');
       const text = await (await item.getType('text/plain')).text();
       if (socket !== connection) throw new Error('连接已断开');
-      keyboard.text(text); keyboard.focus();
+      keyboard.pasteText(text); keyboard.focus();
     }
   } catch (error) { notify(`无法粘贴：${error.message}`); }
 });
-$('clipboard-copy').addEventListener('click', () => {
-  if (clipboardRequest) return;
+function copyClipboard(shortcut = false) {
+  if (clipboardRequest || socket?.readyState !== WebSocket.OPEN) return;
   const id = ++clipboardSequence;
   const timer = setTimeout(() => {
     clipboardRequest = null; $('clipboard-copy').disabled = false; notify('读取 Mac 剪贴板超时');
   }, 5000);
   clipboardRequest = {id, timer}; $('clipboard-copy').disabled = true;
-  send({type:'read_clipboard',id});
-});
+  send({type:shortcut ? 'copy_clipboard' : 'read_clipboard',id});
+}
+$('clipboard-copy').addEventListener('click', () => copyClipboard());
 const toolbar = $('toolbar'), toolbarHandle = $('toolbar-handle');
 let toolbarPosition = null, toolbarDrag = null;
 function positionToolbar(x, y) {
@@ -118,49 +121,70 @@ function end(message) {
   $('display-apply').disabled = false; $('display-dialog').close(); $('text-dialog').close();
   $('session').hidden=true; $('login').hidden=false;
   $('connect').disabled=false; $('login-status').textContent=message;
-  if(imageURL) { URL.revokeObjectURL(imageURL); imageURL=null; }
-  $('screen').removeAttribute('src');
+  frames.reset();
   if(document.fullscreenElement) document.exitFullscreen().catch(()=>{});
 }
+function updateDisplay(message) {
+  nativeWidth = message.native_width; nativeHeight = message.native_height;
+  resolutionWidth = message.requested_width;
+  const select = $('display-select'); select.replaceChildren();
+  for (const [index, display] of message.displays.entries()) {
+    const option = document.createElement('option'); option.value = display.id;
+    option.textContent = `${display.main ? '主屏' : `显示器 ${index + 1}`} · ${display.width} × ${display.height}`;
+    select.append(option);
+  }
+  select.value = message.display_id;
+  $('resolution-width').max = nativeWidth;
+  for (const option of $('resolution-mode').options) if (/^\d+$/.test(option.value)) option.disabled = Number(option.value) > nativeWidth;
+  files.resize(message.width / message.height);
+}
+$('display-select').addEventListener('change', () => {
+  releaseAll(); send({type:'set_display', display_id:Number($('display-select').value)});
+});
 function connect() {
   if (socket) return;
   $('connect').disabled=true; $('login-status').textContent='正在连接…';
   const wsURL = new URL('./ws', location.href); wsURL.protocol = 'ws:'; wsURL.hash = ''; wsURL.search = '';
   socket=new WebSocket(wsURL); socket.binaryType='blob';
+  const connection = socket;
   socket.onopen=()=>send({type:'hello'});
   socket.onmessage=event=>{
+    if (socket !== connection) return;
     if(event.data instanceof Blob) {
-      if(drawing) return;
-      drawing=true; const next=URL.createObjectURL(event.data);
-      $('screen').onload=()=>{ if(imageURL) URL.revokeObjectURL(imageURL); imageURL=next; drawing=false; };
-      $('screen').onerror=()=>{ URL.revokeObjectURL(next); drawing=false; end('画面解码失败，请重新连接'); };
-      $('screen').src=next; return;
+      frames.draw(event.data); return;
     }
     const message=JSON.parse(event.data);
+    if (message.type === 'notice') { notify(message.message); return; }
     if(imagePaste.handle(message)) return;
     if(files.handle(message)) return;
     if(message.type === 'clipboard_text' || message.type === 'clipboard_error') {
       if(clipboardRequest?.id !== message.id) return;
-      clearTimeout(clipboardRequest.timer); clipboardRequest = null; $('clipboard-copy').disabled = false;
-      if(message.type === 'clipboard_error') { notify(message.message); return; }
-      navigator.clipboard.writeText(message.text).then(() => notify('Mac 文字已复制到本机剪贴板')).catch(error => notify(`无法写入本机剪贴板：${error.message}`));
+      const request = clipboardRequest;
+      clearTimeout(request.timer);
+      const finish = text => {
+        if (socket !== connection || clipboardRequest !== request) return;
+        clipboardRequest = null; $('clipboard-copy').disabled = false; notify(text);
+      };
+      if(message.type === 'clipboard_error') { finish(message.message); return; }
+      navigator.clipboard.writeText(message.text).then(() => finish('Mac 文字已复制到本机剪贴板')).catch(error => finish(`无法写入本机剪贴板：${error.message}`));
       return;
     }
-    if(message.type === 'resolution' || message.type === 'resolution_error') {
+    if(message.type === 'display_state' || message.type === 'resolution_error') {
       clearTimeout(resolutionTimer); resolutionTimer = null; $('display-apply').disabled = false;
       if(message.type === 'resolution_error') { notify(message.message); return; }
-      resolutionWidth = message.requested_width;
+      updateDisplay(message);
       $('resolution-status').textContent = `当前采集 ${message.width} × ${message.height}，等比例显示`;
       $('display-dialog').close(); notify(`采集分辨率：${message.width} × ${message.height}`);
       return;
     }
     if(message.type==='error') { end(message.message); return; }
     if(message.type==='ready') {
+      updateDisplay(message);
       $('login').hidden=true; $('session').hidden=false;
-      $('status').textContent='已连接'; drawing=false;
+      $('status').textContent='已连接';
       send({type:'heartbeat'}); heartbeat=setInterval(()=>send({type:'heartbeat'}),3000);
       keyboard.focus();
-      nativeWidth = message.width; nativeHeight = message.height; resolutionWidth = null;
+
       $('resolution-width').max = nativeWidth;
       for (const option of $('resolution-mode').options) if (/^\d+$/.test(option.value)) option.disabled = Number(option.value) > nativeWidth;
       files.connect(message.width / message.height);

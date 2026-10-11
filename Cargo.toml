@@ -29,6 +29,10 @@ screencapturekit = { version = "=11.0.0", features = ["macos_14_2"] }
 [dev-dependencies]
 tokio-tungstenite = "=0.29.0"
 
+[[test]]
+name = "native_run_loop"
+harness = false
+
 [profile.dev]
 opt-level = 1
 

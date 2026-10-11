@@ -7,8 +7,7 @@ pub struct Input {
     enigo: Enigo,
     keys: HashSet<Key>,
     buttons: HashSet<Button>,
-    width: i32,
-    height: i32,
+    display: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 fn map_key(key: &str) -> Result<Key> {
@@ -48,16 +47,22 @@ fn map_key(key: &str) -> Result<Key> {
 }
 
 impl Input {
+    pub fn copy(&mut self) -> Result<()> {
+        self.shortcut('c')
+    }
     pub fn paste(&mut self) -> Result<()> {
+        self.shortcut('v')
+    }
+    fn shortcut(&mut self, key: char) -> Result<()> {
         self.release_all()?;
         self.enigo.key(Key::Meta, Direction::Press)?;
-        let paste = self.enigo.key(Key::Unicode('v'), Direction::Click);
+        let paste = self.enigo.key(Key::Unicode(key), Direction::Click);
         let release = self.enigo.key(Key::Meta, Direction::Release);
         paste?;
         release?;
         Ok(())
     }
-    pub fn new(width: i32, height: i32) -> Result<Self> {
+    pub fn new(display: std::sync::Arc<std::sync::atomic::AtomicU32>) -> Result<Self> {
         ensure!(
             objc2::MainThreadMarker::new().is_some(),
             "键鼠控制必须在主线程启动"
@@ -74,8 +79,7 @@ impl Input {
             enigo,
             keys: HashSet::new(),
             buttons: HashSet::new(),
-            width,
-            height,
+            display,
         })
     }
     pub fn handle(&mut self, message: ClientMessage) -> Result<()> {
@@ -85,8 +89,20 @@ impl Input {
         );
         match message {
             ClientMessage::Pointer { x, y } => {
-                let (x, y) = pointer_position(x, y, self.width, self.height)?;
-                self.enigo.move_mouse(x, y, Coordinate::Abs)?;
+                let bounds = crate::capture::display_bounds(
+                    self.display.load(std::sync::atomic::Ordering::Acquire),
+                );
+                let (x, y) = pointer_position(
+                    x,
+                    y,
+                    bounds.size.width.round() as i32,
+                    bounds.size.height.round() as i32,
+                )?;
+                self.enigo.move_mouse(
+                    x + bounds.origin.x.round() as i32,
+                    y + bounds.origin.y.round() as i32,
+                    Coordinate::Abs,
+                )?;
             }
             ClientMessage::Button { button, down } => {
                 let button = match button {
@@ -178,7 +194,7 @@ mod tests {
     use super::*;
     #[test]
     fn worker_thread_is_rejected_before_native_input_apis() {
-        let error = match Input::new(100, 100) {
+        let error = match Input::new(std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1))) {
             Ok(_) => panic!("worker thread must not create native input"),
             Err(error) => error,
         };

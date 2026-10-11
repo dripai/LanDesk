@@ -11,7 +11,7 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEventMask,
-    NSFont, NSPasteboard, NSPasteboardItem, NSPasteboardTypePNG, NSPasteboardTypeString, NSScreen,
+    NSFont, NSPasteboard, NSPasteboardItem, NSPasteboardTypePNG, NSPasteboardTypeString,
     NSTextField, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
@@ -19,7 +19,7 @@ use objc2_foundation::{
     NSPoint, NSRect, NSSize, NSString,
 };
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     sync::{Arc, mpsc},
     time::Instant,
 };
@@ -56,8 +56,8 @@ define_class!(
 #[derive(Default)]
 pub struct Shared {
     pub active: AtomicBool,
-    pub cancel: AtomicBool,
     pub shutdown: AtomicBool,
+    pub display: Arc<AtomicU32>,
 }
 
 define_class!(
@@ -75,6 +75,13 @@ define_class!(
 );
 
 pub enum Command {
+    PasteText {
+        text: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    CopyText {
+        reply: oneshot::Sender<Result<String>>,
+    },
     PasteImage {
         png: Vec<u8>,
         reply: oneshot::Sender<Result<()>>,
@@ -83,8 +90,6 @@ pub enum Command {
         reply: oneshot::Sender<Result<String>>,
     },
     BeginInput {
-        width: i32,
-        height: i32,
         reply: oneshot::Sender<Result<()>>,
     },
     Input {
@@ -103,41 +108,66 @@ pub struct Native {
 }
 
 impl Native {
+    pub async fn paste_text(&self, text: String) -> Result<()> {
+        ensure!(
+            text.len() <= MAX_TEXT_BYTES && !text.contains('\0'),
+            "粘贴文字超过 64 KiB 或包含空字符"
+        );
+        let (reply, response) = oneshot::channel();
+        self.tx.send(Command::PasteText { text, reply })?;
+        response.await?
+    }
+    pub async fn copy_text(&self) -> Result<String> {
+        let (reply, response) = oneshot::channel();
+        self.tx.send(Command::CopyText { reply })?;
+        response.await?
+    }
+
     pub async fn paste_image(&self, png: Vec<u8>) -> Result<()> {
         let (reply, result) = oneshot::channel();
         self.tx.send(Command::PasteImage { png, reply })?;
-        tokio::time::timeout(std::time::Duration::from_secs(3), result).await??
+        result.await?
     }
     pub async fn read_clipboard(&self) -> Result<String> {
         let (reply, result) = oneshot::channel();
         self.tx.send(Command::ReadClipboard { reply })?;
-        tokio::time::timeout(std::time::Duration::from_secs(3), result).await??
+        result.await?
     }
-    pub async fn begin_input(&self, width: i32, height: i32) -> Result<()> {
+    pub async fn begin_input(&self, display_id: u32) -> Result<()> {
+        self.shared.display.store(display_id, Ordering::Release);
         let (reply, result) = oneshot::channel();
-        self.tx.send(Command::BeginInput {
-            width,
-            height,
-            reply,
-        })?;
-        tokio::time::timeout(std::time::Duration::from_secs(3), result).await??
+        self.tx.send(Command::BeginInput { reply })?;
+        result.await?
     }
     pub async fn input(&self, message: ClientMessage) -> Result<()> {
         let (reply, result) = oneshot::channel();
         self.tx.send(Command::Input { message, reply })?;
-        tokio::time::timeout(std::time::Duration::from_secs(3), result).await??
+        result.await?
     }
     pub async fn end_session(&self) -> Result<()> {
         let (reply, result) = oneshot::channel();
         self.tx
             .send(Command::RestoreSession { reply: Some(reply) })?;
-        tokio::time::timeout(std::time::Duration::from_secs(3), result).await??
+        result.await?
     }
     pub fn restore(&self) {
         if let Err(e) = self.tx.send(Command::RestoreSession { reply: None }) {
             eprintln!("结束远控命令失败: {e}");
         }
     }
+}
+
+fn clipboard_text() -> Result<String> {
+    let text = NSPasteboard::generalPasteboard()
+        .stringForType(unsafe { NSPasteboardTypeString })
+        .ok_or_else(|| anyhow::anyhow!("Mac 剪贴板没有文字"))?
+        .to_string();
+    ensure!(!text.is_empty(), "Mac 剪贴板文字为空");
+    ensure!(
+        text.len() <= MAX_TEXT_BYTES && !text.contains('\0'),
+        "剪贴板文字超过 64 KiB 或包含空字符"
+    );
+    Ok(text)
 }
 
 pub fn permissions() -> (bool, bool) {
@@ -163,14 +193,144 @@ fn label(
     field
 }
 
+struct NativeCommands {
+    input: Option<Input>,
+    awake: Option<crate::power::KeepAwake>,
+    copying: Option<(oneshot::Sender<Result<String>>, isize, Instant)>,
+}
+impl NativeCommands {
+    fn tick(&mut self, native: &Native, rx: &mpsc::Receiver<Command>) {
+        while let Ok(command) = rx.try_recv() {
+            match command {
+                Command::PasteText { text, reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    let result = (|| {
+                        let input = self
+                            .input
+                            .as_mut()
+                            .ok_or_else(|| anyhow::anyhow!("键鼠控制尚未启动"))?;
+                        let pasteboard = NSPasteboard::generalPasteboard();
+                        pasteboard.clearContents();
+                        ensure!(
+                            pasteboard.setString_forType(&NSString::from_str(&text), unsafe {
+                                NSPasteboardTypeString
+                            }),
+                            "无法写入 Mac 文字剪贴板"
+                        );
+                        input.paste()
+                    })();
+                    let _ = reply.send(result);
+                }
+                Command::CopyText { reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    let count = NSPasteboard::generalPasteboard().changeCount();
+                    let result = self
+                        .input
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("键鼠控制尚未启动"))
+                        .and_then(Input::copy);
+                    match result {
+                        Ok(()) => self.copying = Some((reply, count, Instant::now())),
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
+                Command::PasteImage { png, reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    let result = (|| {
+                        let input = self
+                            .input
+                            .as_mut()
+                            .ok_or_else(|| anyhow::anyhow!("键鼠控制尚未启动"))?;
+                        let item = NSPasteboardItem::new();
+                        ensure!(
+                            item.setData_forType(&NSData::with_bytes(&png), unsafe {
+                                NSPasteboardTypePNG
+                            }),
+                            "无法准备剪贴板图片"
+                        );
+                        let objects = NSArray::from_slice(&[ProtocolObject::from_ref(&*item)]);
+                        let pasteboard = NSPasteboard::generalPasteboard();
+                        pasteboard.clearContents();
+                        ensure!(pasteboard.writeObjects(&objects), "无法写入 Mac 图片剪贴板");
+                        input.paste()?;
+                        Ok(())
+                    })();
+                    let _ = reply.send(result);
+                }
+                Command::ReadClipboard { reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    let result = clipboard_text();
+                    let _ = reply.send(result);
+                }
+                Command::BeginInput { reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    let result = (|| {
+                        ensure!(self.input.is_none(), "键鼠控制尚未结束");
+                        let guard = crate::power::KeepAwake::new()?;
+                        self.input = Some(Input::new(native.shared.display.clone())?);
+                        self.awake = Some(guard);
+                        Ok(())
+                    })();
+                    let _ = reply.send(result);
+                }
+                Command::Input { message, reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    let result = self
+                        .input
+                        .as_mut()
+                        .ok_or_else(|| anyhow::anyhow!("键鼠控制尚未启动"))
+                        .and_then(|input| input.handle(message));
+                    let _ = reply.send(result);
+                }
+                Command::RestoreSession { reply } => {
+                    self.copying = None;
+                    let release = self
+                        .input
+                        .take()
+                        .map(|mut input| input.release_all())
+                        .unwrap_or(Ok(()));
+                    drop(self.awake.take());
+                    if let Some(reply) = reply {
+                        let _ = reply.send(release);
+                    }
+                }
+            }
+        }
+        if let Some((reply, baseline, started)) = &self.copying {
+            if reply.is_closed() {
+                self.copying = None;
+            } else if NSPasteboard::generalPasteboard().changeCount() != *baseline {
+                let (reply, _, _) = self.copying.take().unwrap();
+                let _ = reply.send(clipboard_text());
+            } else if started.elapsed() >= std::time::Duration::from_secs(2) {
+                let (reply, _, _) = self.copying.take().unwrap();
+                let _ = reply.send(Err(anyhow::anyhow!(
+                    "远程应用未更新剪贴板，请先选中文字后复制"
+                )));
+            }
+        }
+    }
+}
+
 pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
     let mtm = MainThreadMarker::new().expect("native UI runs on main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     app.finishLaunching();
-    let frame = NSScreen::mainScreen(mtm)
-        .ok_or_else(|| anyhow::anyhow!("没有显示器"))?
-        .frame();
     // These retained windows never release themselves when closed.
     let panel = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -232,92 +392,17 @@ pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
     );
     panel.makeKeyAndOrderFront(None);
     // Permission requests are explicit button actions, so configuration needs no consent prompt.
-    let mut last_update = Instant::now() - std::time::Duration::from_secs(2);
-    // macOS input-source APIs used by Enigo require the main thread.
-    let mut input: Option<Input> = None;
-    let mut awake: Option<crate::power::KeepAwake> = None;
-    while !native.shared.shutdown.load(Ordering::Acquire) {
+    let last_update = std::cell::Cell::new(Instant::now() - std::time::Duration::from_secs(2));
+    let commands = std::cell::RefCell::new(NativeCommands {
+        input: None,
+        awake: None,
+        copying: None,
+    });
+    let timer_native = native.clone();
+    let timer = crate::run_loop::RunLoopTimer::new(mtm, move || {
         objc2::rc::autoreleasepool(|_| {
-            while let Ok(command) = rx.try_recv() {
-                match command {
-                    Command::PasteImage { png, reply } => {
-                        let result = (|| {
-                            let input = input
-                                .as_mut()
-                                .ok_or_else(|| anyhow::anyhow!("键鼠控制尚未启动"))?;
-                            let item = NSPasteboardItem::new();
-                            ensure!(
-                                item.setData_forType(&NSData::with_bytes(&png), unsafe {
-                                    NSPasteboardTypePNG
-                                }),
-                                "无法准备剪贴板图片"
-                            );
-                            let objects = NSArray::from_slice(&[ProtocolObject::from_ref(&*item)]);
-                            let pasteboard = NSPasteboard::generalPasteboard();
-                            pasteboard.clearContents();
-                            ensure!(pasteboard.writeObjects(&objects), "无法写入 Mac 图片剪贴板");
-                            input.paste()?;
-                            Ok(())
-                        })();
-                        let _ = reply.send(result);
-                    }
-                    Command::ReadClipboard { reply } => {
-                        let result = (|| {
-                            let text = NSPasteboard::generalPasteboard()
-                                .stringForType(unsafe { NSPasteboardTypeString })
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("Mac 剪贴板没有文字；不支持图片或文件")
-                                })?
-                                .to_string();
-                            ensure!(!text.is_empty(), "Mac 剪贴板文字为空");
-                            ensure!(
-                                text.len() <= MAX_TEXT_BYTES && !text.contains('\0'),
-                                "剪贴板文字超过 64 KiB 或包含空字符"
-                            );
-                            Ok(text)
-                        })();
-                        let _ = reply.send(result);
-                    }
-                    Command::BeginInput {
-                        width,
-                        height,
-                        reply,
-                    } => {
-                        let result = (|| {
-                            ensure!(input.is_none(), "键鼠控制尚未结束");
-                            let guard = crate::power::KeepAwake::new()?;
-                            input = Some(Input::new(width, height)?);
-                            awake = Some(guard);
-                            Ok(())
-                        })();
-                        let _ = reply.send(result);
-                    }
-                    Command::Input { message, reply } => {
-                        let result = input
-                            .as_mut()
-                            .ok_or_else(|| anyhow::anyhow!("键鼠控制尚未启动"))
-                            .and_then(|input| input.handle(message));
-                        let _ = reply.send(result);
-                    }
-                    Command::RestoreSession { reply } => {
-                        let release = input
-                            .take()
-                            .map(|mut input| input.release_all())
-                            .unwrap_or(Ok(()));
-                        drop(awake.take());
-                        if let Some(reply) = reply {
-                            let _ = reply.send(release);
-                        }
-                    }
-                }
-            }
-            if native.shared.active.load(Ordering::Acquire) {
-                let screens = NSScreen::screens(mtm);
-                if screens.len() != 1 || screens.objectAtIndex(0).frame() != frame {
-                    native.shared.cancel.store(true, Ordering::Release);
-                }
-            }
-            if last_update.elapsed().as_secs_f32() >= 1.0 {
+            commands.borrow_mut().tick(&timer_native, &rx);
+            if last_update.get().elapsed().as_secs_f32() >= 1.0 {
                 let (capture, input) = permissions();
                 permission_label.setStringValue(&NSString::from_str(&format!(
                     "屏幕录制：{}    辅助功能：{}",
@@ -328,14 +413,18 @@ pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
                     },
                     if input { "已授权" } else { "待授权" }
                 )));
-                let text = if native.shared.active.load(Ordering::Acquire) {
+                let text = if timer_native.shared.active.load(Ordering::Acquire) {
                     "远程连接中 · 本机显示画面"
                 } else {
                     "等待连接 · 仅监听本机，通过 SSH 加密连接"
                 };
                 status.setStringValue(&NSString::from_str(text));
-                last_update = Instant::now();
+                last_update.set(Instant::now());
             }
+        });
+    });
+    while !native.shared.shutdown.load(Ordering::Acquire) {
+        objc2::rc::autoreleasepool(|_| {
             let deadline = NSDate::dateWithTimeIntervalSinceNow(0.025);
             if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
                 NSEventMask::Any,
@@ -348,9 +437,7 @@ pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
             app.updateWindows();
         });
     }
-    drop(input);
-    drop(awake);
-    native.shared.cancel.store(true, Ordering::Release);
+    drop(timer);
     native.shared.shutdown.store(true, Ordering::Release);
     Ok(())
 }

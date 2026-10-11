@@ -15,7 +15,7 @@ use std::{
 
 pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const TEMP_PREFIX: &str = ".landesk-upload-";
-const MAX_ENTRIES: usize = 5000;
+const PAGE_SIZE: usize = 500;
 
 pub struct HomeFiles {
     root: File,
@@ -84,7 +84,7 @@ impl HomeFiles {
         Ok(directory)
     }
 
-    fn list(&self, id: u32, path: &str) -> Result<Value> {
+    fn list(&self, id: u32, path: &str, cursor: &str) -> Result<Value> {
         let directory = self.directory(path)?;
         // fdopendir owns this descriptor; reopen '.' so concurrent listings do not share offsets.
         let scan = open_directory(&directory, c".")?;
@@ -105,7 +105,7 @@ impl HomeFiles {
             }
         }
         let stream = DirectoryStream(pointer);
-        let mut entries = Vec::new();
+        let mut entries = std::collections::BTreeMap::new();
         loop {
             unsafe {
                 *libc::__error() = 0;
@@ -124,37 +124,53 @@ impl HomeFiles {
             if filename == "." || filename == ".." || filename.starts_with(TEMP_PREFIX) {
                 continue;
             }
-            ensure!(
-                entries.len() < MAX_ENTRIES,
-                "目录条目超过 5000 个，请使用更具体的目录"
-            );
             let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-            ensure!(
-                unsafe {
-                    libc::fstatat(
-                        directory.as_raw_fd(),
-                        raw_name.as_ptr(),
-                        &mut stat,
-                        libc::AT_SYMLINK_NOFOLLOW,
-                    )
-                } == 0,
-                "无法读取文件信息 {filename}: {}",
-                std::io::Error::last_os_error()
-            );
+            let status = unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    raw_name.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if status != 0 {
+                let error = std::io::Error::last_os_error();
+                // Build tools may delete/rename an entry after readdir.
+                if error.raw_os_error() == Some(libc::ENOENT) {
+                    continue;
+                }
+                bail!("无法读取文件信息 {filename}: {error}");
+            }
             let kind = match stat.st_mode & libc::S_IFMT {
                 libc::S_IFDIR => "directory",
                 libc::S_IFREG => "file",
                 libc::S_IFLNK => "symlink",
                 _ => "other",
             };
-            entries.push(json!({"name":filename,"kind":kind,"size":stat.st_size.max(0)}));
+            let key = format!("{}/{}", if kind == "directory" { 0 } else { 1 }, filename);
+            if key.as_str() <= cursor {
+                continue;
+            }
+            entries.insert(
+                key,
+                json!({"name":filename,"kind":kind,"size":stat.st_size.max(0)}),
+            );
+            if entries.len() > PAGE_SIZE + 1 {
+                entries.pop_last();
+            }
         }
-        entries.sort_by(|a, b| {
-            (a["kind"] != "directory")
-                .cmp(&(b["kind"] != "directory"))
-                .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
-        });
-        Ok(json!({"type":"directory","id":id,"root":self.label,"path":path,"entries":entries}))
+        let more = entries.len() > PAGE_SIZE;
+        if more {
+            entries.pop_last();
+        }
+        let next_cursor = if more {
+            entries.last_key_value().map(|(key, _)| key.clone())
+        } else {
+            None
+        };
+        Ok(
+            json!({"type":"directory","id":id,"root":self.label,"path":path,"entries":entries.into_values().collect::<Vec<_>>(),"next_cursor":next_cursor}),
+        )
     }
 }
 
@@ -313,7 +329,9 @@ impl FileSession {
     }
     pub fn message(&mut self, message: ClientMessage) -> Value {
         let (id, result, abort) = match message {
-            ClientMessage::ListDirectory { id, path } => (id, self.home.list(id, &path), false),
+            ClientMessage::ListDirectory { id, path, cursor } => {
+                (id, self.home.list(id, &path, &cursor), false)
+            }
             ClientMessage::UploadStart {
                 id,
                 path,
@@ -425,8 +443,8 @@ mod tests {
         fs::create_dir(f.path.join("工程")).unwrap();
         fs::write(f.path.join("hello.rs"), "你好").unwrap();
         symlink("/", f.path.join("outside")).unwrap();
-        let a = f.home.list(1, "").unwrap();
-        let b = f.home.list(1, "").unwrap();
+        let a = f.home.list(1, "", "").unwrap();
+        let b = f.home.list(1, "", "").unwrap();
         assert_eq!(a, b);
         assert_eq!(a["entries"][0]["kind"], "directory");
         assert!(
@@ -437,6 +455,32 @@ mod tests {
                 .any(|entry| entry["name"] == "outside" && entry["kind"] == "symlink")
         );
         assert!(f.home.directory("outside").is_err());
+    }
+
+    #[test]
+    fn large_directory_pages_have_no_duplicates_or_missing_entries() {
+        let f = Fixture::new();
+        for index in 0..5011 {
+            File::create(f.path.join(format!("file-{index:05}"))).unwrap();
+        }
+        let mut cursor = String::new();
+        let mut names = std::collections::BTreeSet::new();
+        loop {
+            let page = f.home.list(1, "", &cursor).unwrap();
+            let entries = page["entries"].as_array().unwrap();
+            assert!(entries.len() <= PAGE_SIZE);
+            for entry in entries {
+                assert!(names.insert(entry["name"].as_str().unwrap().to_owned()));
+            }
+            match page["next_cursor"].as_str() {
+                Some(next) => {
+                    assert!(next > cursor.as_str());
+                    cursor = next.to_owned();
+                }
+                None => break,
+            }
+        }
+        assert_eq!(names.len(), 5011);
     }
 
     #[test]
@@ -463,7 +507,7 @@ mod tests {
         assert_eq!(session.chunk(&bytes)["type"], "upload_progress");
         assert!(!f.path.join("内容.bin").exists());
         assert!(
-            f.home.list(1, "").unwrap()["entries"]
+            f.home.list(1, "", "").unwrap()["entries"]
                 .as_array()
                 .unwrap()
                 .is_empty()

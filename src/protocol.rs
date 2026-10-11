@@ -28,6 +28,12 @@ pub enum ClientMessage {
     Text {
         text: String,
     },
+    PasteText {
+        text: String,
+    },
+    CopyClipboard {
+        id: u32,
+    },
     ReadClipboard {
         id: u32,
     },
@@ -43,9 +49,14 @@ pub enum ClientMessage {
     SetResolution {
         width: Option<u32>,
     },
+    SetDisplay {
+        display_id: u32,
+    },
     ListDirectory {
         id: u32,
         path: String,
+        #[serde(default)]
+        cursor: String,
     },
     UploadStart {
         id: u32,

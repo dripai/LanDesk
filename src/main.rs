@@ -9,6 +9,7 @@ mod input;
 mod native;
 mod power;
 mod protocol;
+mod run_loop;
 mod server;
 
 use anyhow::Result;
@@ -28,6 +29,7 @@ fn main() -> Result<()> {
     };
     let state = server::AppState {
         native: native.clone(),
+        capture: capture::CaptureService::new()?,
         files: file_worker::FileService::new(files::HomeFiles::open(std::path::Path::new(
             &objc2_foundation::NSHomeDirectory().to_string(),
         ))?),

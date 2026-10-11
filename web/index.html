@@ -31,10 +31,11 @@
       <header class="files-header"><div id="file-path" title="当前目录"></div><div class="files-actions"><button id="file-up" type="button" title="上级目录" aria-label="上级目录">↑</button><button id="file-refresh" type="button" title="刷新目录" aria-label="刷新目录">↻</button></div></header>
       <section class="directory-section"><h2>目录 <span id="directory-count"></span></h2><div id="directories"></div></section>
       <section id="file-drop"><div class="files-heading"><h2>文件 <span id="file-count"></span></h2><button id="upload-files" type="button">上传</button><input id="file-picker" type="file" multiple hidden></div><div id="file-items"></div><div class="drop-hint">拖入文件，上传到当前目录</div><progress id="upload-progress" max="100" value="0" aria-label="上传进度" hidden></progress><div id="upload-status" role="status"></div></section>
+      <button id="file-more" type="button" hidden>加载更多</button>
     </aside>
     <div id="notice" role="status" hidden></div>
   </section>
   <dialog id="text-dialog"><form id="text-form"><label for="text">输入到 Mac</label><textarea id="text" rows="4" maxlength="1000" placeholder="输入中文或其他文本"></textarea><div class="actions"><button type="button" id="text-cancel">取消</button><button>发送</button></div></form></dialog>
-  <dialog id="display-dialog"><form id="display-form"><label for="resolution-mode">采集分辨率</label><select id="resolution-mode"><option value="native">原始像素（默认）</option><option value="1280">宽 1280 像素</option><option value="1920">宽 1920 像素</option><option value="2560">宽 2560 像素</option><option value="custom">自定义宽度</option></select><input id="resolution-width" type="number" min="640" step="1" aria-label="自定义采集宽度" hidden><p id="resolution-status">始终等比例显示，不改变 Mac 系统分辨率。</p><div class="actions"><button type="button" id="display-cancel">取消</button><button id="display-apply">应用</button></div></form></dialog>
+  <dialog id="display-dialog"><form id="display-form"><label for="display-select">显示器</label><select id="display-select"></select><label for="resolution-mode">采集分辨率</label><select id="resolution-mode"><option value="native">原始像素（默认）</option><option value="1280">宽 1280 像素</option><option value="1920">宽 1920 像素</option><option value="2560">宽 2560 像素</option><option value="custom">自定义宽度</option></select><input id="resolution-width" type="number" min="640" step="1" aria-label="自定义采集宽度" hidden><p id="resolution-status">始终等比例显示，不改变 Mac 系统分辨率。</p><div class="actions"><button type="button" id="display-cancel">取消</button><button id="display-apply">应用</button></div></form></dialog>
 </body>
 </html>

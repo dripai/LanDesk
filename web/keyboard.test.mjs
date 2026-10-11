@@ -60,7 +60,8 @@ test('shortcuts are key pairs, Ctrl+V uses only plain clipboard text', () => {
   let format;
   f.event('paste', {clipboardData:{getData(type) { format = type; return 'text\nonly'; }}});
   assert.equal(format, 'text/plain');
-  assert.deepEqual(f.messages.filter(m => m.type === 'text'), [{type:'text',text:'text\nonly'}]);
+  assert.deepEqual(f.messages.filter(m => m.type === 'paste_text'), [{type:'paste_text',text:'text\nonly'}]);
+  assert.equal(f.messages.at(-2).type, 'release_all');
   assert.equal(f.messages.some(m => m.key === 'v'), false);
   assert.deepEqual(f.messages.filter(m => m.key === 'c'), [{type:'key',key:'c',down:true},{type:'key',key:'c',down:false}]);
   f.event('paste', {clipboardData:{getData() { return ''; }}});
@@ -113,4 +114,33 @@ test('text limits count UTF-8 bytes and reject null characters', () => {
   f.keyboard.text('汉'.repeat(22000)); f.keyboard.text('a\0b');
   assert.equal(f.messages.length, 0); assert.equal(f.notices.length, 2);
   f.keyboard.text('a'.repeat(65536)); assert.equal(f.messages[0].text.length, 65536);
+});
+
+test('editing keys repeat while modifiers do not', () => {
+  for (const key of ['Backspace','Delete','Enter','Tab','Home','End','PageUp','PageDown']) {
+    const f = fixture();
+    f.event('keydown', {key,code:key});
+    f.event('keydown', {key,code:key,repeat:true});
+    f.event('keyup', {key,code:key});
+    assert.deepEqual(f.messages.map(m => m.down), [true,false,true,false], key);
+  }
+  const f = fixture();
+  f.event('keydown', {key:'Control',code:'ControlLeft'});
+  f.event('keydown', {key:'Control',code:'ControlLeft',repeat:true});
+  assert.equal(f.messages.length, 1);
+});
+
+test('Ctrl+C requests a remote copy once and Ctrl+V remains a local paste event', () => {
+  const field = new EventTarget(); field.value=''; field.style={}; field.focus=()=>{};
+  const messages=[], copies=[];
+  createKeyboard(field, m=>messages.push(m), ()=>{}, ()=>{}, ()=>copies.push('copy'));
+  function key(code, repeat = false) {
+    const event = new Event('keydown',{cancelable:true});
+    Object.assign(event,{code,key:code.slice(-1).toLowerCase(),ctrlKey:true,repeat,getModifierState:()=>false});
+    field.dispatchEvent(event); return event;
+  }
+  assert.equal(key('KeyC').defaultPrevented, true);
+  key('KeyC', true); assert.equal(copies.length, 1);
+  assert.deepEqual(messages, [{type:'release_all'}]);
+  assert.equal(key('KeyV').defaultPrevented, false);
 });

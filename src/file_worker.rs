@@ -228,6 +228,7 @@ mod tests {
     }
     fn list(id: u32) -> FileRequest {
         FileRequest::Message(ClientMessage::ListDirectory {
+            cursor: String::new(),
             id,
             path: String::new(),
         })
@@ -286,6 +287,7 @@ mod tests {
     async fn file_error_does_not_poison_following_requests() {
         let mut files = service().connect();
         files.submit(FileRequest::Message(ClientMessage::ListDirectory {
+            cursor: String::new(),
             id: 1,
             path: "..".into(),
         }));

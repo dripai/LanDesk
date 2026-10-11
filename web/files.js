@@ -18,7 +18,7 @@ export function createFiles(panel, send, sendBinary, notify) {
   const $ = id => panel.querySelector(`#${id}`);
   const pending = new Map();
   let sequence = 0, latestList = 0, path = '', connected = false, uploading = false, generation = 0, choice = null;
-  let imageAspect = 1.6, chosenWidth = null, drag = null;
+  let imageAspect = 1.6, chosenWidth = null, drag = null, nextCursor = null, directoryCount = 0, fileCount = 0;
   const resizer = document.getElementById('files-resizer');
   function wait(id, expected, action) {
     return new Promise((resolve, reject) => {
@@ -42,7 +42,7 @@ export function createFiles(panel, send, sendBinary, notify) {
   function reset() {
     connected = false; generation++; latestList++; uploading = false; path = ''; choice = null;
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error('连接已断开')); }
-    pending.clear(); $('directories').replaceChildren(); $('file-items').replaceChildren(); $('upload-status').textContent = '';
+    pending.clear(); nextCursor = null; $('file-more').hidden = true; $('directories').replaceChildren(); $('file-items').replaceChildren(); $('upload-status').textContent = '';
     $('upload-files').disabled = false; $('file-picker').value = ''; panel.hidden = true; resizer.hidden = true;
     $('upload-progress').hidden = true; drag = null; resizer.classList.remove('dragging');
     panel.parentElement.style.removeProperty('--remote-width');
@@ -52,12 +52,12 @@ export function createFiles(panel, send, sendBinary, notify) {
     if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
     return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
   }
-  async function list(next = path) {
+  async function list(next = path, append = false) {
     if (!connected) return;
     const id = ++sequence; latestList = id;
-    $('file-refresh').disabled = true;
+    $('file-refresh').disabled = true; $('file-more').disabled = true;
     try {
-      const result = await wait(id, 'directory', () => send({type:'list_directory',id,path:next}));
+      const result = await wait(id, 'directory', () => send({type:'list_directory',id,path:next,cursor:append ? nextCursor : ''}));
       if (id !== latestList) return;
       path = result.path;
       $('file-path').replaceChildren();
@@ -72,7 +72,8 @@ export function createFiles(panel, send, sendBinary, notify) {
         $('file-path').append(crumb);
       });
       $('file-up').disabled = !path;
-      $('directories').replaceChildren(); $('file-items').replaceChildren();
+      if (!append) { $('directories').replaceChildren(); $('file-items').replaceChildren(); directoryCount = 0; fileCount = 0; }
+      for (const empty of panel.querySelectorAll('.files-empty')) empty.remove();
       for (const entry of result.entries) {
         if (entry.kind === 'directory') {
           const button = document.createElement('button'); button.type = 'button'; button.className = 'directory-item';
@@ -80,21 +81,22 @@ export function createFiles(panel, send, sendBinary, notify) {
           const arrow = document.createElement('span'); arrow.className = 'directory-arrow'; arrow.textContent = '›';
           button.append(icon('directory'), name, arrow); button.title = entry.name;
           button.addEventListener('click', () => list(path ? path + '/' + entry.name : entry.name));
-          $('directories').append(button);
+          $('directories').append(button); directoryCount++;
         } else {
           const row = document.createElement('div'); row.className = 'file-item';
           const label = document.createElement('span'); label.textContent = entry.name; label.title = entry.name;
           const detail = document.createElement('small'); detail.textContent = entry.kind === 'file' ? formatSize(entry.size) : entry.kind === 'symlink' ? '链接' : '特殊文件';
-          row.append(icon(entry.kind), label, detail); $('file-items').append(row);
+          row.append(icon(entry.kind), label, detail); $('file-items').append(row); fileCount++;
         }
       }
-      $('directory-count').textContent = $('directories').childElementCount;
-      $('file-count').textContent = $('file-items').childElementCount;
+      $('directory-count').textContent = directoryCount;
+      $('file-count').textContent = fileCount;
+      nextCursor = result.next_cursor; $('file-more').hidden = !nextCursor;
       for (const [id, message] of [['directories', '此目录没有子目录'], ['file-items', '此目录没有文件']]) {
         if (!$(id).childElementCount) { const empty = document.createElement('div'); empty.className = 'files-empty'; empty.textContent = message; $(id).append(empty); }
       }
     } catch (error) { if (connected && id === latestList) notify(error.message); }
-    finally { if (id === latestList) $('file-refresh').disabled = false; }
+    finally { if (id === latestList) { $('file-refresh').disabled = false; $('file-more').disabled = false; } }
   }
   async function upload(files) {
     if (!connected || !files.length) return;
@@ -172,6 +174,7 @@ export function createFiles(panel, send, sendBinary, notify) {
     chosenWidth = panelWidth(event.key === 'Home' ? 0 : event.key === 'End' ? Infinity : width + (event.key === 'ArrowLeft' ? 20 : -20), panel.parentElement.clientWidth);
     resize();
   });
+  $('file-more').addEventListener('click', () => list(path, true));
   $('file-up').addEventListener('click', () => list(path.split('/').slice(0,-1).join('/')));
   $('file-refresh').addEventListener('click', () => list());
   $('upload-files').addEventListener('click', () => $('file-picker').click());
