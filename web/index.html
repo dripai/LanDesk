@@ -7,7 +7,10 @@
 <body>
   <main id="login">
     <div class="mark">L</div><h1>LanDesk</h1>
-    <form id="connect-form"><button id="connect">重新连接</button></form>
+    <form id="connect-form">
+      <label for="connect-display">屏幕</label><select id="connect-display"><option value="current">当前屏幕</option><option value="existing">主屏幕</option><option value="virtual">虚拟屏幕（实验）</option></select>
+      <div id="connect-virtual-size" class="display-size" hidden><input id="connect-virtual-width" type="number" min="1" step="1" value="1920" aria-label="虚拟屏幕宽度"><span>×</span><input id="connect-virtual-height" type="number" min="1" step="1" value="1080" aria-label="虚拟屏幕高度"></div>
+      <button id="connect">重新连接</button></form>
     <p id="login-status" role="status"></p>
   </main>
   <section id="session" hidden>
@@ -36,6 +39,6 @@
     <div id="notice" role="status" hidden></div>
   </section>
   <dialog id="text-dialog"><form id="text-form"><label for="text">输入到 Mac</label><textarea id="text" rows="4" maxlength="1000" placeholder="输入中文或其他文本"></textarea><div class="actions"><button type="button" id="text-cancel">取消</button><button>发送</button></div></form></dialog>
-  <dialog id="display-dialog"><form id="display-form"><label for="display-select">显示器</label><select id="display-select"></select><label for="resolution-mode">采集分辨率</label><select id="resolution-mode"><option value="native">原始像素（默认）</option><option value="1280">宽 1280 像素</option><option value="1920">宽 1920 像素</option><option value="2560">宽 2560 像素</option><option value="custom">自定义宽度</option></select><input id="resolution-width" type="number" min="640" step="1" aria-label="自定义采集宽度" hidden><p id="resolution-status">始终等比例显示，不改变 Mac 系统分辨率。</p><div class="actions"><button type="button" id="display-cancel">取消</button><button id="display-apply">应用</button></div></form></dialog>
+  <dialog id="display-dialog"><form id="display-form"><label for="display-select">显示器</label><select id="display-select"></select><details id="virtual-display-options"><summary>虚拟屏幕（实验）</summary><div class="display-size"><input id="virtual-width" type="number" min="1" step="1" value="1920" aria-label="虚拟屏幕宽度"><span>×</span><input id="virtual-height" type="number" min="1" step="1" value="1080" aria-label="虚拟屏幕高度"></div><button type="button" id="virtual-apply">使用虚拟屏幕</button></details><label for="resolution-mode">采集分辨率</label><select id="resolution-mode"><option value="native">原始像素（默认）</option><option value="1280">宽 1280 像素</option><option value="1920">宽 1920 像素</option><option value="2560">宽 2560 像素</option><option value="custom">自定义宽度</option></select><input id="resolution-width" type="number" min="640" step="1" aria-label="自定义采集宽度" hidden><p id="resolution-status">始终等比例显示，不改变 Mac 系统分辨率。</p><div class="actions"><button type="button" id="display-cancel">取消</button><button id="display-apply">应用</button></div></form></dialog>
 </body>
 </html>

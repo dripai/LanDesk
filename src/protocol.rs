@@ -7,7 +7,10 @@ pub const UPLOAD_CHUNK_BYTES: usize = 65_536;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientMessage {
-    Hello {},
+    Hello {
+        #[serde(default)]
+        display: Option<crate::platform::DisplayTarget>,
+    },
     Heartbeat,
     Pointer {
         x: f64,
@@ -51,6 +54,9 @@ pub enum ClientMessage {
     },
     SetDisplay {
         display_id: u32,
+    },
+    SetDisplaySource {
+        display: crate::platform::DisplayTarget,
     },
     ListDirectory {
         id: u32,

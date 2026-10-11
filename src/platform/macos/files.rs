@@ -382,6 +382,23 @@ impl FileSession {
     }
 }
 
+impl crate::platform::FileBackend for HomeFiles {
+    fn open_session(
+        self: Arc<Self>,
+        cancelled: Arc<AtomicBool>,
+    ) -> Box<dyn crate::platform::FileSession> {
+        Box::new(FileSession::with_cancellation(self, cancelled))
+    }
+}
+impl crate::platform::FileSession for FileSession {
+    fn message(&mut self, message: ClientMessage) -> Value {
+        FileSession::message(self, message)
+    }
+    fn chunk(&mut self, bytes: &[u8]) -> Value {
+        FileSession::chunk(self, bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

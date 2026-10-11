@@ -92,3 +92,31 @@ test('denied local clipboard permission reports the error without disconnecting'
   assert.equal(f.node('clipboard-copy').disabled,false);
   assert.equal(socket.readyState,1);
 });
+
+test('headless reconnect can request a virtual display before receiving any frame', () => {
+  const f=fixture();
+  f.sockets[0].onopen();
+  assert.deepEqual(f.sockets[0].sent[0],{type:'hello'});
+  f.sockets[0].receive({type:'error',message:'没有可采集的显示器'});
+  f.node('connect-display').value='virtual';
+  f.node('connect-virtual-width').value='1920';
+  f.node('connect-virtual-height').value='1080';
+  f.event('connect-display','change');
+  assert.equal(f.node('connect-virtual-size').hidden,false);
+  f.event('connect-form','submit');
+  f.sockets[1].onopen();
+  assert.deepEqual(f.sockets[1].sent[0],{type:'hello',display:{kind:'virtual',width:1920,height:1080}});
+});
+
+test('virtual display failures preserve the current remote session', () => {
+  const f=fixture(), socket=f.sockets[0];
+  f.node('virtual-width').value='2560'; f.node('virtual-height').value='1440';
+  f.event('virtual-apply','click');
+  assert.deepEqual(socket.sent.at(-1),{type:'set_display_source',display:{kind:'virtual',width:2560,height:1440}});
+  socket.receive({type:'resolution_error',message:'系统拒绝创建'});
+  assert.equal(socket.readyState,1);
+  assert.equal(f.node('notice').textContent,'系统拒绝创建');
+  const count=socket.sent.length;
+  f.node('virtual-width').value='0'; f.event('virtual-apply','click');
+  assert.equal(socket.sent.length,count);
+});

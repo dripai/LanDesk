@@ -1,5 +1,5 @@
 use crate::{
-    input::Input,
+    platform::macos::input::Input,
     protocol::{ClientMessage, MAX_TEXT_BYTES},
 };
 use anyhow::{Result, ensure};
@@ -19,7 +19,7 @@ use objc2_foundation::{
     NSPoint, NSRect, NSSize, NSString,
 };
 use std::{
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::Ordering,
     sync::{Arc, mpsc},
     time::Instant,
 };
@@ -53,12 +53,8 @@ define_class!(
     }
 );
 
-#[derive(Default)]
-pub struct Shared {
-    pub active: AtomicBool,
-    pub shutdown: AtomicBool,
-    pub display: Arc<AtomicU32>,
-}
+use crate::platform::{DesktopControl, Shared};
+use futures_util::future::BoxFuture;
 
 define_class!(
     #[unsafe(super = NSObject)]
@@ -195,7 +191,7 @@ fn label(
 
 struct NativeCommands {
     input: Option<Input>,
-    awake: Option<crate::power::KeepAwake>,
+    awake: Option<crate::platform::macos::power::KeepAwake>,
     copying: Option<(oneshot::Sender<Result<String>>, isize, Instant)>,
 }
 impl NativeCommands {
@@ -278,7 +274,7 @@ impl NativeCommands {
                     }
                     let result = (|| {
                         ensure!(self.input.is_none(), "键鼠控制尚未结束");
-                        let guard = crate::power::KeepAwake::new()?;
+                        let guard = crate::platform::macos::power::KeepAwake::new()?;
                         self.input = Some(Input::new(native.shared.display.clone())?);
                         self.awake = Some(guard);
                         Ok(())
@@ -399,7 +395,7 @@ pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
         copying: None,
     });
     let timer_native = native.clone();
-    let timer = crate::run_loop::RunLoopTimer::new(mtm, move || {
+    let timer = crate::platform::macos::run_loop::RunLoopTimer::new(mtm, move || {
         objc2::rc::autoreleasepool(|_| {
             commands.borrow_mut().tick(&timer_native, &rx);
             if last_update.get().elapsed().as_secs_f32() >= 1.0 {
@@ -440,4 +436,49 @@ pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
     drop(timer);
     native.shared.shutdown.store(true, Ordering::Release);
     Ok(())
+}
+
+impl DesktopControl for Native {
+    fn capabilities(&self) -> crate::platform::Capabilities {
+        crate::platform::Capabilities {
+            os: "macos",
+            virtual_display: true,
+        }
+    }
+    fn check_permissions(&self) -> Result<()> {
+        let (capture, input) = permissions();
+        ensure!(
+            capture,
+            "请在 Mac 系统设置中授予 LanDesk 屏幕录制权限，然后关闭并重新打开应用"
+        );
+        ensure!(
+            input,
+            "请在 Mac 系统设置中授予 LanDesk 辅助功能权限，然后关闭并重新打开应用"
+        );
+        Ok(())
+    }
+    fn begin_input(&self, display_id: u32) -> BoxFuture<'_, Result<()>> {
+        Box::pin(Native::begin_input(self, display_id))
+    }
+    fn input(&self, message: ClientMessage) -> BoxFuture<'_, Result<()>> {
+        Box::pin(Native::input(self, message))
+    }
+    fn paste_text(&self, text: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(Native::paste_text(self, text))
+    }
+    fn paste_image(&self, png: Vec<u8>) -> BoxFuture<'_, Result<()>> {
+        Box::pin(Native::paste_image(self, png))
+    }
+    fn copy_text(&self) -> BoxFuture<'_, Result<String>> {
+        Box::pin(Native::copy_text(self))
+    }
+    fn read_clipboard(&self) -> BoxFuture<'_, Result<String>> {
+        Box::pin(Native::read_clipboard(self))
+    }
+    fn end_session(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(Native::end_session(self))
+    }
+    fn restore(&self) {
+        Native::restore(self);
+    }
 }

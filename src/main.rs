@@ -1,16 +1,8 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("LanDesk 服务端目前仅支持 macOS，Windows 请使用浏览器连接。");
 
-mod capture;
-mod clipboard_image;
-mod file_worker;
-mod files;
-mod input;
-mod native;
-mod power;
-mod protocol;
-mod run_loop;
-mod server;
+use landesk::{capture, file_worker, platform, protocol, server};
+use platform::macos::{capture as mac_capture, files, native};
 
 use anyhow::Result;
 use std::sync::{Arc, mpsc};
@@ -25,11 +17,14 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let native = native::Native {
         tx,
-        shared: Arc::new(native::Shared::default()),
+        shared: Arc::new(platform::Shared::default()),
     };
     let state = server::AppState {
-        native: native.clone(),
-        capture: capture::CaptureService::new()?,
+        shared: native.shared.clone(),
+        native: Arc::new(native.clone()),
+        capture: capture::CaptureService::new(|| {
+            Box::new(mac_capture::MacCaptureBackend::default())
+        })?,
         files: file_worker::FileService::new(files::HomeFiles::open(std::path::Path::new(
             &objc2_foundation::NSHomeDirectory().to_string(),
         ))?),

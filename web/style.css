@@ -28,3 +28,5 @@
 #files-panel button:focus-visible{outline:2px solid #80b5ff;outline-offset:-2px}
 
 #display-form{display:grid;gap:14px}#display-form select{font:inherit;border:1px solid #c6ced9;border-radius:8px;padding:10px;background:white;color:#182230}#display-form p{font-size:12px;margin:0;line-height:1.6}#display-form .actions{display:flex;gap:8px;justify-content:flex-end}
+
+.display-size{display:flex;align-items:center;gap:8px;margin:8px 0}.display-size input{width:0;min-width:0;flex:1;padding:8px}#connect-display{font:inherit;padding:8px;border:1px solid #c6ced9;border-radius:8px;background:white}#virtual-display-options{border-top:1px solid #e1e6ed;padding-top:12px}#virtual-display-options summary{cursor:pointer;font-size:14px}

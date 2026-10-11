@@ -130,7 +130,7 @@ function updateDisplay(message) {
   const select = $('display-select'); select.replaceChildren();
   for (const [index, display] of message.displays.entries()) {
     const option = document.createElement('option'); option.value = display.id;
-    option.textContent = `${display.main ? '主屏' : `显示器 ${index + 1}`} · ${display.width} × ${display.height}`;
+    option.textContent = `${display.virtual ? '虚拟屏幕' : display.main ? '主屏' : `显示器 ${index + 1}`} · ${display.width} × ${display.height}`;
     select.append(option);
   }
   select.value = message.display_id;
@@ -141,13 +141,30 @@ function updateDisplay(message) {
 $('display-select').addEventListener('change', () => {
   releaseAll(); send({type:'set_display', display_id:Number($('display-select').value)});
 });
+function virtualTarget(prefix) {
+  const width = Number($(prefix + 'width').value), height = Number($(prefix + 'height').value);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 || width * height > 16000000) throw new Error('虚拟屏幕宽高需为正整数，且不超过当前采集支持的 1600 万像素');
+  return {kind:'virtual',width,height};
+}
+$('connect-display').addEventListener('change', () => {
+  $('connect-virtual-size').hidden = $('connect-display').value !== 'virtual';
+});
+$('virtual-apply').addEventListener('click', () => {
+  try { const display = virtualTarget('virtual-'); releaseAll(); send({type:'set_display_source',display}); }
+  catch (error) { notify(error.message); }
+});
 function connect() {
   if (socket) return;
+  let display;
+  try {
+    if ($('connect-display').value === 'virtual') display = virtualTarget('connect-virtual-');
+    else if ($('connect-display').value === 'existing') display = {kind:'existing',id:null};
+  } catch (error) { $('login-status').textContent = error.message; return; }
   $('connect').disabled=true; $('login-status').textContent='正在连接…';
   const wsURL = new URL('./ws', location.href); wsURL.protocol = 'ws:'; wsURL.hash = ''; wsURL.search = '';
   socket=new WebSocket(wsURL); socket.binaryType='blob';
   const connection = socket;
-  socket.onopen=()=>send({type:'hello'});
+  socket.onopen=()=>send(display ? {type:'hello',display} : {type:'hello'});
   socket.onmessage=event=>{
     if (socket !== connection) return;
     if(event.data instanceof Blob) {
@@ -180,6 +197,8 @@ function connect() {
     if(message.type==='error') { end(message.message); return; }
     if(message.type==='ready') {
       updateDisplay(message);
+      $('virtual-display-options').hidden = !message.capabilities.virtual_display;
+      $('connect-display').value='current'; $('connect-virtual-size').hidden=true;
       $('login').hidden=true; $('session').hidden=false;
       $('status').textContent='已连接';
       send({type:'heartbeat'}); heartbeat=setInterval(()=>send({type:'heartbeat'}),3000);

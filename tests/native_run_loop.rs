@@ -1,6 +1,6 @@
 // A standalone test harness runs on the real process main thread, as required
 // by AppKit. It does not create windows or synthesize keyboard/mouse input.
-#[path = "../src/run_loop.rs"]
+#[path = "../src/platform/macos/run_loop.rs"]
 mod run_loop;
 
 use objc2::MainThreadMarker;

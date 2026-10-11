@@ -89,7 +89,7 @@ impl Input {
         );
         match message {
             ClientMessage::Pointer { x, y } => {
-                let bounds = crate::capture::display_bounds(
+                let bounds = crate::platform::macos::capture::display_bounds(
                     self.display.load(std::sync::atomic::Ordering::Acquire),
                 );
                 let (x, y) = pointer_position(

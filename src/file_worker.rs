@@ -1,7 +1,4 @@
-use crate::{
-    files::{FileSession, HomeFiles},
-    protocol::ClientMessage,
-};
+use crate::{platform::FileBackend, protocol::ClientMessage};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::{
@@ -18,12 +15,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct FileService {
-    home: Arc<HomeFiles>,
+    home: Arc<dyn FileBackend>,
     slots: Arc<Semaphore>,
 }
 
 impl FileService {
-    pub fn new(home: HomeFiles) -> Self {
+    pub fn new(home: impl FileBackend + 'static) -> Self {
         Self {
             home: Arc::new(home),
             slots: Arc::new(Semaphore::new(1)),
@@ -157,7 +154,7 @@ impl FileChannel {
         if self.worker.is_none() {
             let home = self.service.home.clone();
             match Worker::start(self.service.slots.clone(), move |cancelled| {
-                let mut files = FileSession::with_cancellation(home, cancelled);
+                let mut files = home.open_session(cancelled);
                 Box::new(move |request| match request {
                     FileRequest::Message(message) => files.message(message),
                     FileRequest::Chunk(data) => files.chunk(&data),
@@ -219,9 +216,10 @@ impl FileChannel {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use crate::platform::macos::files::HomeFiles;
 
     fn service() -> FileService {
         FileService::new(HomeFiles::open(std::path::Path::new("/private/tmp")).unwrap())

@@ -33,6 +33,10 @@ tokio-tungstenite = "=0.29.0"
 name = "native_run_loop"
 harness = false
 
+[[test]]
+name = "virtual_display"
+harness = false
+
 [profile.dev]
 opt-level = 1
 

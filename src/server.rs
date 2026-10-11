@@ -1,7 +1,7 @@
 use crate::{
     capture::{CaptureService, Change, FrameEvent},
     file_worker::{FileChannel, FileRequest, FileService},
-    native::{Native, permissions},
+    platform::{DesktopControl, Shared},
     protocol::{ClientMessage, PORT, origin_allowed},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -20,17 +20,18 @@ use std::{sync::atomic::Ordering, time::Duration};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub native: Native,
+    pub native: std::sync::Arc<dyn DesktopControl>,
+    pub shared: std::sync::Arc<Shared>,
     pub files: FileService,
     pub capture: CaptureService,
 }
 
-struct SessionGuard(Native);
+struct SessionGuard(std::sync::Arc<dyn DesktopControl>, std::sync::Arc<Shared>);
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         // Queue restoration before allowing a new session to acquire ownership.
         self.0.restore();
-        self.0.shared.active.store(false, Ordering::Release);
+        self.1.active.store(false, Ordering::Release);
     }
 }
 
@@ -125,8 +126,8 @@ fn monitor_connection(socket: WebSocket) -> (SessionSocket, impl Future<Output =
     )
 }
 
-async fn wait_for_shutdown(native: &Native) {
-    while !native.shared.shutdown.load(Ordering::Acquire) {
+async fn wait_for_shutdown(shared: &Shared) {
+    while !shared.shutdown.load(Ordering::Acquire) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -243,11 +244,11 @@ async fn upgrade(
         .on_upgrade(move |socket| async move {
             let (mut socket, closed) = monitor_connection(socket);
             tokio::pin!(closed);
-            let native = state.native.clone();
+            let shared = state.shared.clone();
             let (result, transport_done) = tokio::select! {
                 result = session(&mut socket, state) => (result, false),
                 result = &mut closed => (result, true),
-                _ = wait_for_shutdown(&native) => (Ok(()), false),
+                _ = wait_for_shutdown(&shared) => (Ok(()), false),
             };
             if let Err(e) = result {
                 eprintln!("LanDesk session failed: {e:#}");
@@ -279,27 +280,18 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     let Message::Text(text) = message else {
         bail!("请先建立会话");
     };
-    let ClientMessage::Hello {} = serde_json::from_str(&text)? else {
+    let ClientMessage::Hello { display } = serde_json::from_str(&text)? else {
         bail!("请先建立会话");
     };
     state
-        .native
         .shared
         .active
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .map_err(|_| anyhow::anyhow!("已有一个连接，请先断开"))?;
-    let _guard = SessionGuard(state.native.clone());
-    let (capture_allowed, input_allowed) = permissions();
-    ensure!(
-        capture_allowed,
-        "请在 Mac 系统设置中授予 LanDesk 屏幕录制权限，然后关闭并重新打开应用"
-    );
-    ensure!(
-        input_allowed,
-        "请在 Mac 系统设置中授予 LanDesk 辅助功能权限，然后关闭并重新打开应用"
-    );
+    let _guard = SessionGuard(state.native.clone(), state.shared.clone());
+    state.native.check_permissions()?;
     eprintln!("LanDesk session starting capture");
-    let mut capture = state.capture.start().await?;
+    let mut capture = state.capture.start(display).await?;
     let initial = capture.info.borrow().clone();
     state
         .native
@@ -321,6 +313,7 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     send_json(socket, {
         let mut ready = initial;
         ready["type"] = "ready".into();
+        ready["capabilities"] = serde_json::to_value(state.native.capabilities())?;
         ready
     })
     .await?;
@@ -330,7 +323,7 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     let mut frames = capture.frames.clone();
     let mut metadata = capture.info.clone();
     let updates = socket.outgoing.clone();
-    let display = state.native.shared.display.clone();
+    let display = state.shared.display.clone();
     tokio::select! {
         result = control_loop(socket, &state, state.files.connect(), &mut frames, sequence,
             |change| capture.configure(change)) => result?,
@@ -428,11 +421,12 @@ async fn control_commands(
                                 };
                                 send_json(socket,response).await?;
                             }
-                            message @ (ClientMessage::SetResolution { .. } | ClientMessage::SetDisplay { .. }) => {
+                            message @ (ClientMessage::SetResolution { .. } | ClientMessage::SetDisplay { .. } | ClientMessage::SetDisplaySource { .. }) => {
                                 state.native.input(ClientMessage::ReleaseAll).await?;
                                 let change = match message {
                                     ClientMessage::SetResolution { width } => Change::Resolution(width),
                                     ClientMessage::SetDisplay { display_id } => Change::Display(display_id),
+                                    ClientMessage::SetDisplaySource { display } => Change::Source(display),
                                     _ => unreachable!(),
                                 };
                                 if let Err(error) = configure(change).await {
@@ -460,7 +454,7 @@ async fn control_commands(
             response = files.response() => send_json(socket,response).await?,
             _ = tick.tick() => {
                 images.expire();
-                ensure!(!state.native.shared.shutdown.load(Ordering::Acquire),"Mac 已停止服务");
+                ensure!(!state.shared.shutdown.load(Ordering::Acquire),"Mac 已停止服务");
             }
         }
     }
@@ -468,7 +462,7 @@ async fn control_commands(
 }
 
 pub async fn run(listener: tokio::net::TcpListener, state: AppState) -> Result<()> {
-    let shared = state.native.shared.clone();
+    let shared = state.shared.clone();
     println!("LanDesk 已启动，仅监听 http://127.0.0.1:{PORT}");
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
@@ -480,11 +474,11 @@ pub async fn run(listener: tokio::net::TcpListener, state: AppState) -> Result<(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
-    use crate::files::HomeFiles;
-    use crate::native::{Command, Shared};
+    use crate::platform::macos::files::HomeFiles;
+    use crate::platform::macos::native::{Command, Native};
     use futures_util::StreamExt;
     use std::sync::Arc;
     use std::sync::mpsc;
@@ -495,13 +489,15 @@ mod tests {
 
     fn state() -> (AppState, mpsc::Receiver<Command>) {
         let (tx, rx) = mpsc::channel();
+        let shared = Arc::new(Shared::default());
         (
             AppState {
-                native: Native {
-                    tx,
-                    shared: Arc::new(Shared::default()),
-                },
-                capture: CaptureService::new().unwrap(),
+                shared: shared.clone(),
+                native: Arc::new(Native { tx, shared }),
+                capture: CaptureService::new(|| {
+                    Box::new(crate::platform::macos::capture::MacCaptureBackend::default())
+                })
+                .unwrap(),
                 files: FileService::new(
                     HomeFiles::open(std::path::Path::new("/private/tmp")).unwrap(),
                 ),
@@ -578,8 +574,8 @@ mod tests {
     #[tokio::test]
     async fn hello_without_code_reaches_session_check_and_preserves_existing_controller() {
         let (state, _rx) = state();
-        state.native.shared.active.store(true, Ordering::Release);
-        let shared = state.native.shared.clone();
+        state.shared.active.store(true, Ordering::Release);
+        let shared = state.shared.clone();
         let (addr, handle) = serve(state).await;
         let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
             .await
@@ -602,13 +598,13 @@ mod tests {
     #[test]
     fn session_failure_queues_input_release_and_releases_ownership() {
         let (state, rx) = state();
-        state.native.shared.active.store(true, Ordering::Release);
-        drop(SessionGuard(state.native.clone()));
+        state.shared.active.store(true, Ordering::Release);
+        drop(SessionGuard(state.native.clone(), state.shared.clone()));
         assert!(matches!(
             rx.try_recv().unwrap(),
             Command::RestoreSession { .. }
         ));
-        assert!(!state.native.shared.active.load(Ordering::Acquire));
+        assert!(!state.shared.active.load(Ordering::Acquire));
     }
 
     #[tokio::test]
@@ -634,7 +630,7 @@ mod tests {
 
     async fn blocked_directory_connection(end: EndConnection) {
         let (state, commands) = state();
-        let shared = state.native.shared.clone();
+        let shared = state.shared.clone();
         let (files, started, release) = state.files.blocked_channel();
         let (frames, receiver) = tokio::sync::watch::channel(None);
         let (finished, done) = tokio::sync::oneshot::channel();
@@ -647,8 +643,8 @@ mod tests {
                 async move {
                     upgrade.on_upgrade(move |socket| async move {
                         let (mut socket, closed) = monitor_connection(socket);
-                        state.native.shared.active.store(true, Ordering::Release);
-                        let guard = SessionGuard(state.native.clone());
+                        state.shared.active.store(true, Ordering::Release);
+                        let guard = SessionGuard(state.native.clone(), state.shared.clone());
                         let result = tokio::select! {
                             result = control_loop(&mut socket, &state, files, &mut receiver, 0, |_| {
                                 Box::pin(async { Ok(serde_json::json!({})) })
@@ -761,7 +757,7 @@ mod tests {
     #[tokio::test]
     async fn blocked_native_input_does_not_stop_frames_or_disconnect() {
         let (state, commands) = state();
-        let shared = state.native.shared.clone();
+        let shared = state.shared.clone();
         let (frames, receiver) = tokio::sync::watch::channel(None);
         let (finished, done) = tokio::sync::oneshot::channel();
         let context = Arc::new(std::sync::Mutex::new(Some((receiver, finished))));
@@ -770,8 +766,8 @@ mod tests {
             let (mut receiver, finished) = context.lock().unwrap().take().unwrap();
             async move { upgrade.on_upgrade(move |socket| async move {
                 let (mut socket, closed) = monitor_connection(socket);
-                state.native.shared.active.store(true, Ordering::Release);
-                let guard = SessionGuard(state.native.clone());
+                state.shared.active.store(true, Ordering::Release);
+                let guard = SessionGuard(state.native.clone(), state.shared.clone());
                 let result = tokio::select! {
                     result = control_loop(&mut socket, &state, state.files.connect(), &mut receiver, 0,
                         |_| Box::pin(async { Ok(serde_json::json!({})) })) => result,
@@ -886,7 +882,7 @@ mod tests {
     #[tokio::test]
     async fn handshake_can_arrive_after_eight_seconds() {
         let (state, _commands) = state();
-        state.native.shared.active.store(true, Ordering::Release);
+        state.shared.active.store(true, Ordering::Release);
         let (addr, server) = serve(state).await;
         let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
             .await
@@ -924,7 +920,7 @@ mod tests {
     async fn disconnect_cancels_pending_initialization_and_releases_session() {
         for explicit_disconnect in [false, true] {
             let (state, commands) = state();
-            let shared = state.native.shared.clone();
+            let shared = state.shared.clone();
             let (started, ready) = tokio::sync::oneshot::channel();
             let (finished, done) = tokio::sync::oneshot::channel();
             let context = Arc::new(std::sync::Mutex::new(Some((started, finished))));
@@ -936,8 +932,8 @@ mod tests {
                     async move {
                         upgrade.on_upgrade(move |socket| async move {
                             let (_socket, closed) = monitor_connection(socket);
-                            state.native.shared.active.store(true, Ordering::Release);
-                            let guard = SessionGuard(state.native.clone());
+                            state.shared.active.store(true, Ordering::Release);
+                            let guard = SessionGuard(state.native.clone(), state.shared.clone());
                             let result = tokio::select! {
                                 result = async {
                                     let _ = started.send(());

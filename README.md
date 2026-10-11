@@ -2,6 +2,10 @@
 
 Mac 运行 Rust 远控服务，Windows 通过 SSH 加密隧道和浏览器操作桌面。Windows 多服务器客户端为 [LanDeskClient](client/README.md)，使用 GPUI / gpui-component；原有 `scripts/LanDesk.cmd` 仍可单独使用，两者不能同时占用本机 17890 端口。
 
+## 实验分支
+
+`main` 保留已验证的 Mac 稳定版本；`codex/platform-virtual-display` 开发公共平台接口与 Mac 虚拟显示器。Windows 服务端后续接入。入口、接口、生命周期和实际验证范围见 [平台与虚拟显示器说明](docs/platforms.md)。
+
 ## 使用
 
 1. Mac 打开 `LanDesk.app`，在系统设置中授予屏幕录制和辅助功能权限，然后重新打开应用。若系统另行请求远程桌面权限，需要允许。启动不会自动申请权限。
@@ -63,7 +67,7 @@ Windows 构建由 [Windows client 工作流](.github/workflows/windows-client.ym
 
 独立浏览器模拟会话已验证 `/s/<哈希>/` 下资源加载、自动连接、断开和手动重连，以及服务器标签标题。Mac 服务测试确认来源缺失、跨站来源、Host 不匹配被拒绝，第二个控制会话不能接管已有会话。
 
-本轮本机验证：37 项 Rust 测试、19 项网页测试和 Clippy 通过。覆盖输入等待期间继续传帧与断开、输入队列顺序、5011 项目录分页、最新帧解码、编辑键长按、Ctrl+C/Ctrl+V 协议与浏览器剪贴板调用、重连后的迟到响应和剪贴板拒绝授权。长按使用浏览器的 [KeyboardEvent.repeat](https://www.w3.org/TR/uievents/#dom-keyboardevent-repeat)，沿用 Enigo 0.6.1 的按下/释放接口。以上为本机自动化测试。2026-10-11 已安装新版并恢复两项系统权限，本机浏览器实测最小化后连接、1920×1200 真实画面、主动断开后重连、复制按钮将 Mac 测试文字写入浏览器剪贴板、粘贴按钮将浏览器文字输入 Mac 前台应用。用户已进一步确认远程 Ctrl+C 可将 Mac 文字复制到 Windows。Windows 到 Mac 的 Ctrl+V 完整链路、多显示器切换、采集中更改系统分辨率和真实采集异常恢复仍待实机验收；同机按钮测试不代替跨机快捷键验证。
+稳定基线验证：37 项 Rust 测试、19 项网页测试和 Clippy 通过。覆盖输入等待期间继续传帧与断开、输入队列顺序、5011 项目录分页、最新帧解码、编辑键长按、Ctrl+C/Ctrl+V 协议与浏览器剪贴板调用、重连后的迟到响应和剪贴板拒绝授权。长按使用浏览器的 [KeyboardEvent.repeat](https://www.w3.org/TR/uievents/#dom-keyboardevent-repeat)，沿用 Enigo 0.6.1 的按下/释放接口。以上为本机自动化测试。2026-10-11 已安装新版并恢复两项系统权限，本机浏览器实测最小化后连接、1920×1200 真实画面、主动断开后重连、复制按钮将 Mac 测试文字写入浏览器剪贴板、粘贴按钮将浏览器文字输入 Mac 前台应用。用户已进一步确认远程 Ctrl+C 可将 Mac 文字复制到 Windows。Windows 到 Mac 的 Ctrl+V 完整链路、多显示器切换、采集中更改系统分辨率和真实采集异常恢复仍待实机验收；同机按钮测试不代替跨机快捷键验证。
 
 此前版本已实测 Mac 画面、键鼠、中文、目录导航和面板调宽；Mac 窗口最小化后仍可连接，电源防睡眠断言随会话建立和释放。图片粘贴按钮已在本机真实会话使测试图片进入目标应用输入框，Windows Ctrl+V 到 Mac 的完整图片链路尚未实测。
 
