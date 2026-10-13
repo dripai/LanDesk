@@ -1,7 +1,7 @@
 use crate::{
     gateway::{Registration, Routes},
-    settings::Settings,
-    viewer,
+    settings::{Authentication, ConnectionMode, Settings},
+    terminal, viewer,
 };
 use anyhow::{Context, Result, bail, ensure};
 use russh::{
@@ -35,7 +35,7 @@ pub enum StopReason {
 
 static HOST_KEYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-struct Handler {
+pub(crate) struct Handler {
     host: String,
     port: u16,
     known_hosts: PathBuf,
@@ -52,7 +52,7 @@ impl client::Handler for Handler {
             .map_err(|_| anyhow::anyhow!("SSH 主机信任状态不可用"))?;
         let key = server.public_key();
         if keys::check_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)
-            .context("SSH 主机密钥已变化或信任文件无法读取，请核对 Mac 主机")?
+            .context("SSH 主机密钥已变化或信任文件无法读取，请核对服务器")?
         {
             return Ok(true);
         }
@@ -127,7 +127,9 @@ pub async fn run(
     routes: Routes,
 ) -> Result<StopReason> {
     settings.validate()?;
-    ensure!(!password.is_empty(), "请输入 Mac SSH 密码");
+    if settings.authentication == Authentication::Password {
+        ensure!(!password.is_empty(), "请输入 SSH 密码");
+    }
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
     let registration = Registration::new(settings.id(), routes, sender);
     run_bound(
@@ -171,12 +173,16 @@ async fn run_bound(
     let result = tokio::select! {
         _ = &mut cancel => Ok(StopReason::Disconnected),
         result = async {
-            events.send(Event::Status("正在验证 Mac 用户…".into()))?;
-            let auth = timeout(Duration::from_secs(20), Arc::get_mut(&mut session).context("SSH 认证期间会话已被占用")?.authenticate_password(&settings.user, password.to_string())).await.context("SSH 密码验证超时")??;
-            drop(password);
-            ensure!(auth.success(), "SSH 密码验证失败，请检查用户名、密码及 Mac 远程登录设置");
-            let probe = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("Mac 服务检查超时")?.context("无法访问 Mac LanDesk，请先启动 Mac 应用")?;
-            probe.close().await?;
+            events.send(Event::Status("正在验证 SSH 用户…".into()))?;
+            let handle = Arc::get_mut(&mut session).context("SSH 认证期间会话已被占用")?;
+            timeout(Duration::from_secs(20), authenticate(handle, &settings, password)).await.context("SSH 认证超时")??;
+            if settings.mode == ConnectionMode::Desktop {
+                let probe = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("Mac 服务检查超时")?.context("无法访问 Mac LanDesk，请先启动 Mac 应用")?;
+                probe.close().await?;
+            }
+            let terminal = if settings.mode == ConnectionMode::Terminal {
+                Some(Arc::new(terminal::Page::new()?))
+            } else { None };
             let (activity, mut activity_changes) = viewer::activity();
             incoming.activate()?;
             events.send(Event::Ready)?;
@@ -210,7 +216,11 @@ async fn run_bound(
                         let socket = accepted?;
                         let session = session.clone();
                         let activity = activity.clone();
+                        let terminal = terminal.clone();
                         transfers.spawn(async move {
+                            if let Some(page) = terminal {
+                                return terminal::serve(socket, session, activity, page).await;
+                            }
                             let channel = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("转发通道打开超时")??;
                             viewer::forward(socket, channel.into_stream(), activity).await
                         });
@@ -227,6 +237,44 @@ async fn run_bound(
     )
     .await;
     result
+}
+
+async fn authenticate(
+    session: &mut client::Handle<Handler>,
+    settings: &Settings,
+    secret: Zeroizing<String>,
+) -> Result<()> {
+    let auth = match &settings.authentication {
+        Authentication::Password => {
+            session
+                .authenticate_password(&settings.user, secret.to_string())
+                .await?
+        }
+        Authentication::PrivateKey { path } => {
+            let path = path.clone();
+            let key = tokio::task::spawn_blocking(move || {
+                // Keep both the file contents and passphrase out of logs and config files.
+                let encoded =
+                    Zeroizing::new(std::fs::read_to_string(path).context("无法读取私钥文件")?);
+                keys::decode_secret_key(&encoded, (!secret.is_empty()).then_some(secret.as_str()))
+                    .context("无法解析或解密私钥，请检查文件和私钥口令")
+            })
+            .await
+            .context("私钥加载任务失败")??;
+            let hash = session.best_supported_rsa_hash().await?.flatten();
+            session
+                .authenticate_publickey(
+                    &settings.user,
+                    keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                )
+                .await?
+        }
+    };
+    ensure!(
+        auth.success(),
+        "SSH 认证失败，请检查用户名、认证方式和服务器登录策略"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

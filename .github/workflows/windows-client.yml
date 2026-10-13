@@ -30,7 +30,9 @@ jobs:
       - name: Format
         run: cargo fmt --manifest-path client/Cargo.toml --check
       - name: Test connection core
-        run: cargo test --manifest-path client/Cargo.toml --locked --no-default-features --lib
+        run: cargo test --manifest-path client/Cargo.toml --locked --no-default-features --lib --tests
+      - name: Test terminal input protocol
+        run: node --test client/web/protocol.test.mjs
       - name: Check client
         run: cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
       - name: Build Windows x64
@@ -41,5 +43,7 @@ jobs:
           path: |
             client/target/release/LanDeskClient.exe
             client/README.md
+            client/web/vendor/xterm.LICENSE
+            client/web/vendor/addon-fit.LICENSE
           if-no-files-found: error
           retention-days: 30

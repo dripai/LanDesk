@@ -103,7 +103,7 @@ async fn serve(socket: tokio::net::TcpStream, routes: Routes) -> Result<()> {
             let Some((id, path)) = route_path(request.uri().path()) else {
                 return Ok(message(
                     StatusCode::NOT_FOUND,
-                    "请在 LanDeskClient 中选择服务器并打开远程桌面。",
+                    "请在 LanDeskClient 中选择服务器并连接。",
                 ));
             };
             let target = routes

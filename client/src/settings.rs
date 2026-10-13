@@ -6,6 +6,24 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionMode {
+    #[default]
+    Desktop,
+    Terminal,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Authentication {
+    #[default]
+    Password,
+    PrivateKey {
+        path: PathBuf,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -16,6 +34,10 @@ pub struct Settings {
     pub ssh_port: u16,
     pub open_browser: bool,
     pub minimize_to_tray: bool,
+    #[serde(default)]
+    pub mode: ConnectionMode,
+    #[serde(default)]
+    pub authentication: Authentication,
 }
 
 impl Default for Settings {
@@ -27,6 +49,8 @@ impl Default for Settings {
             ssh_port: 22,
             open_browser: true,
             minimize_to_tray: true,
+            mode: ConnectionMode::Desktop,
+            authentication: Authentication::Password,
         }
     }
 }
@@ -81,7 +105,7 @@ impl Settings {
         );
         ensure!(
             !self.host.is_empty() && self.host.len() <= 253,
-            "请填写 Mac 的 IP 或主机名"
+            "请填写服务器的 IP 或主机名"
         );
         ensure!(
             self.host.parse::<std::net::IpAddr>().is_ok()
@@ -89,7 +113,7 @@ impl Settings {
                     .host
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || b"-._".contains(&c)),
-            "Mac 地址应为 IP 或主机名，不含协议、端口或空格"
+            "服务器地址应为 IP 或主机名，不含协议、端口或空格"
         );
         ensure!(
             !self.user.is_empty()
@@ -98,9 +122,15 @@ impl Settings {
                     .user
                     .chars()
                     .any(|c| c.is_control() || c.is_whitespace()),
-            "请填写有效的 Mac 用户名"
+            "请填写有效的 SSH 用户名"
         );
         ensure!(self.ssh_port != 0, "SSH 端口必须为 1–65535");
+        if let Authentication::PrivateKey { path } = &self.authentication {
+            ensure!(
+                path.is_absolute(),
+                "请选择私钥文件的绝对路径，不支持 ~ 缩写"
+            );
+        }
         Ok(())
     }
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -134,7 +164,9 @@ mod tests {
         value.ssh_port = 2222;
         value.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), value);
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("password"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(json.get("password").is_none());
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
     }
     #[test]
@@ -148,6 +180,27 @@ mod tests {
         assert_eq!(Settings::load(&path).unwrap(), sample());
         std::fs::write(&path, b"{}").unwrap();
         assert!(Settings::load(&path).is_err());
+    }
+    #[test]
+    fn legacy_defaults_and_terminal_key_settings_are_explicit() {
+        let legacy: Settings = serde_json::from_str(
+            r#"{"host":"example.test","user":"alice","ssh_port":22,"open_browser":true,"minimize_to_tray":true}"#,
+        ).unwrap();
+        assert_eq!(legacy.mode, ConnectionMode::Desktop);
+        assert_eq!(legacy.authentication, Authentication::Password);
+        let mut terminal = legacy;
+        terminal.mode = ConnectionMode::Terminal;
+        terminal.authentication = Authentication::PrivateKey {
+            path: PathBuf::from("~/.ssh/id_ed25519"),
+        };
+        assert!(terminal.validate().is_err());
+        let dir = tempfile::tempdir().unwrap();
+        terminal.authentication = Authentication::PrivateKey {
+            path: dir.path().join("id_ed25519"),
+        };
+        let path = dir.path().join("settings.json");
+        terminal.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap(), terminal);
     }
 }
 

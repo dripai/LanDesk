@@ -1,6 +1,6 @@
 # LanDesk
 
-Mac 运行 Rust 远控服务，Windows 通过 SSH 加密隧道和浏览器操作桌面。Windows 多服务器客户端为 [LanDeskClient](client/README.md)，使用 GPUI / gpui-component；原有 `scripts/LanDesk.cmd` 仍可单独使用，两者不能同时占用本机 17890 端口。
+Mac 运行 Rust 远控服务，Windows 通过 SSH 加密隧道和浏览器操作桌面。[LanDeskClient](client/README.md) 还提供 SSH 终端模式，可直接在网页中管理 Linux，无需 Linux 桌面或 LanDesk 服务端。客户端使用 GPUI / gpui-component；原有 `scripts/LanDesk.cmd` 仍可单独使用，两者不能同时占用本机 17890 端口。
 
 ## 实验分支
 
@@ -37,7 +37,7 @@ macOS 提供 `pmset displaysleepnow`，用于立即关闭显示器而非让整�
 - 纯文字单次最多 64 KiB UTF-8，不含空字符。剪贴板图片最多 10 MiB PNG、1600 万像素、边长 8192；Mac 完整解码校验后才修改剪贴板。图片只在内存中传输，30 秒无后续分块丢弃，断开清理；图片分块与文件上传分别处理。浏览器剪贴板拒绝授权时显示错误；Ctrl+V 可使用浏览器原生粘贴事件。
 - 已移除 Mac 连接码设置。旧的 `~/Library/Application Support/LanDesk/settings.json` 不再读取或写入；升级不会删除该文件。
 - 统一端口下的服务器标签共享浏览器同源；哈希路径用于连接去重和请求分流，不提供网页脚本之间的安全隔离。此模式用于自己信任的 Mac。参见 [URL Origin 标准](https://url.spec.whatwg.org/#concept-url-origin)。
-- Windows 客户端使用 SSH 密码认证。可勾选“记住密码”，密码存入 Windows 凭据管理器，不写入配置文件；取消勾选并保存或连接后删除。首次自动记录主机密钥，变化时拒绝；首次使用信任无法验证第一次连接的主机身份。其他限制及配置路径见 [客户端说明](client/README.md)。
+- Windows 客户端支持 SSH 密码或私钥认证。可勾选“记住密码”，密码存入 Windows 凭据管理器，不写入配置文件；取消勾选并保存或连接后删除。私钥只保存文件路径，私钥口令不保存。首次自动记录主机密钥，变化时拒绝；首次使用信任无法验证第一次连接的主机身份。其他限制及配置路径见 [客户端说明](client/README.md)。
 - 尚未提供 Mac 到 Windows 的图片复制、音频、驱动级隐私屏、合盖远控或系统登录界面控制保证。
 
 键鼠队列由注册在 AppKit common run-loop modes 的定时器处理，窗口按钮跟踪、拖动和模态循环期间也会处理鼠标松开及会话清理；不再只依赖外层事件循环。对应真实主线程测试覆盖普通、鼠标跟踪、模态循环及定时器清理；2026-10-11 已安装新版并恢复权限，用户实测远程最小化后仍能操作，断开后网页重连正常。[Apple Run Loops](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/RunLoopManagement/RunLoopManagement.html)。

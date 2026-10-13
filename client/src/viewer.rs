@@ -30,9 +30,9 @@ pub fn activity() -> (watch::Sender<Activity>, watch::Receiver<Activity>) {
     })
 }
 
-struct Viewer(watch::Sender<Activity>);
+pub(crate) struct Viewer(watch::Sender<Activity>);
 impl Viewer {
-    fn new(activity: watch::Sender<Activity>) -> Self {
+    pub(crate) fn new(activity: watch::Sender<Activity>) -> Self {
         activity.send_modify(|state| state.viewers += 1);
         Self(activity)
     }

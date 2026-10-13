@@ -10,7 +10,7 @@ use gpui_kit::*;
 use landesk_client::{
     credentials::{self, SavedPassword},
     gateway,
-    settings::{Connections, Settings},
+    settings::{Authentication, ConnectionMode, Connections, Settings},
     tunnel::{self, Event},
 };
 use std::{
@@ -38,6 +38,9 @@ struct Client {
     user: Entity<InputState>,
     port: Entity<InputState>,
     password: Entity<InputState>,
+    key_path: Entity<InputState>,
+    mode: ConnectionMode,
+    use_key: bool,
     config: Connections,
     selected: Option<String>,
     editing: bool,
@@ -159,11 +162,23 @@ impl Client {
             }
         };
         Self {
-            name: input(&initial.name, "例如：开发 Mac", false, window, cx),
+            name: input(&initial.name, "例如：开发服务器", false, window, cx),
             host: input(&initial.host, "IP 或主机名", false, window, cx),
-            user: input(&initial.user, "Mac 用户名", false, window, cx),
+            user: input(&initial.user, "SSH 用户名", false, window, cx),
             port: input(&initial.ssh_port.to_string(), "22", false, window, cx),
-            password: input("", "已记住的密码可留空", true, window, cx),
+            password: input("", "密码或私钥口令", true, window, cx),
+            key_path: input(
+                match &initial.authentication {
+                    Authentication::PrivateKey { path } => path.to_str().unwrap_or(""),
+                    Authentication::Password => "",
+                },
+                "私钥文件的绝对路径",
+                false,
+                window,
+                cx,
+            ),
+            mode: initial.mode,
+            use_key: matches!(initial.authentication, Authentication::PrivateKey { .. }),
             editing: selected.is_none(),
             selected,
             delete_pending: false,
@@ -203,12 +218,19 @@ impl Client {
                 return;
             }
         };
+        self.mode = profile.mode;
+        self.use_key = matches!(profile.authentication, Authentication::PrivateKey { .. });
+        let key_path = match &profile.authentication {
+            Authentication::PrivateKey { path } => path.to_string_lossy().into_owned(),
+            Authentication::Password => String::new(),
+        };
         for (state, value) in [
             (&self.name, profile.name),
             (&self.host, profile.host),
             (&self.user, profile.user),
             (&self.port, profile.ssh_port.to_string()),
             (&self.password, String::new()),
+            (&self.key_path, key_path),
         ] {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
         }
@@ -233,6 +255,14 @@ impl Client {
                 .map_err(|_| anyhow::anyhow!("SSH 端口必须为 1–65535"))?,
             open_browser: true,
             minimize_to_tray: self.config.minimize_to_tray,
+            mode: self.mode,
+            authentication: if self.use_key {
+                Authentication::PrivateKey {
+                    path: PathBuf::from(self.key_path.read(cx).value().trim()),
+                }
+            } else {
+                Authentication::Password
+            },
         };
         value.validate()?;
         Ok(value)
@@ -242,17 +272,20 @@ impl Client {
         if !typed.is_empty() {
             return Ok(Zeroizing::new(typed.to_string()));
         }
+        if matches!(settings.authentication, Authentication::PrivateKey { .. }) {
+            return Ok(Zeroizing::new(String::new()));
+        }
         if self.remember_password
             && let Some(saved) = credentials::read(&settings.id())?
             && saved.matches(settings)
         {
             return Ok(saved.password());
         }
-        anyhow::bail!("请输入当前 Mac 用户的 SSH 密码")
+        anyhow::bail!("请输入当前 SSH 用户的密码")
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let value = self.read_settings(cx)?;
-        let saved = if self.remember_password {
+        let saved = if self.remember_password && !self.use_key {
             Some(SavedPassword::new(&value, &self.password_for(&value, cx)?))
         } else {
             None
@@ -305,8 +338,7 @@ impl Client {
             }
         };
         // Apply the remember checkbox independently to this profile when connecting.
-        let saved = self
-            .remember_password
+        let saved = (self.remember_password && !self.use_key)
             .then(|| SavedPassword::new(&settings, &password));
         if let Err(error) = credentials::commit(
             &self.config,
@@ -421,7 +453,7 @@ impl Client {
                                     continue;
                                 }
                                 session.ready = true;
-                                session.status = "已连接 · 无远控连接 30 秒后断开".into();
+                                session.status = "已连接 · 无网页会话 30 秒后断开".into();
                                 if let Some(profile) =
                                     self.config.profiles.iter().find(|p| p.id() == id)
                                 {
@@ -539,14 +571,67 @@ impl Render for Client {
             );
         }
         let mut detail = div().v_flex().w_full().p_6().gap_4();
-        for (label, state) in [
+        let mut modes = div()
+            .h_flex()
+            .gap_2()
+            .items_center()
+            .child(div().w(px(80.)).text_sm().child("连接模式"));
+        for (id, label, mode) in [
+            ("desktop-mode", "Mac 桌面", ConnectionMode::Desktop),
+            ("terminal-mode", "SSH 终端", ConnectionMode::Terminal),
+        ] {
+            modes = modes.child(
+                Button::new(id)
+                    .label(label)
+                    .selected(self.mode == mode)
+                    .disabled(blocked || busy || !self.editing)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.mode = mode;
+                        cx.notify();
+                    })),
+            );
+        }
+        detail = detail.child(modes);
+        let mut auth = div()
+            .h_flex()
+            .gap_2()
+            .items_center()
+            .child(div().w(px(80.)).text_sm().child("认证方式"));
+        for (id, label, key) in [("password-auth", "密码", false), ("key-auth", "私钥", true)] {
+            auth = auth.child(
+                Button::new(id)
+                    .label(label)
+                    .selected(self.use_key == key)
+                    .disabled(blocked || busy || !self.editing)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.use_key != key {
+                            this.use_key = key;
+                            this.remember_password = false;
+                            this.password
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        detail = detail.child(auth);
+        let secret_label = if self.use_key {
+            "私钥口令"
+        } else {
+            "SSH 密码"
+        };
+        let mut fields = vec![
             ("名称", &self.name),
-            ("Mac 地址", &self.host),
+            ("服务器地址", &self.host),
             ("用户名", &self.user),
             ("SSH 端口", &self.port),
-            ("SSH 密码", &self.password),
-        ] {
-            let disabled = blocked || busy || (!self.editing && label != "SSH 密码");
+        ];
+        if self.use_key {
+            fields.push(("私钥路径", &self.key_path));
+        }
+        fields.push((secret_label, &self.password));
+        for (label, state) in fields {
+            let disabled = blocked || busy || (!self.editing && label != secret_label);
             detail = detail.child(
                 div()
                     .h_flex()
@@ -561,18 +646,27 @@ impl Render for Client {
                     ),
             );
         }
-        detail = detail.child(
-            div().pl(px(92.)).child(
-                Checkbox::new("remember-password")
-                    .label("记住密码")
-                    .checked(self.remember_password)
-                    .disabled(blocked || busy)
-                    .on_click(cx.listener(|this, checked, _, cx| {
-                        this.remember_password = *checked;
-                        cx.notify();
-                    })),
-            ),
-        );
+        if !self.use_key {
+            detail = detail.child(
+                div().pl(px(92.)).child(
+                    Checkbox::new("remember-password")
+                        .label("记住密码")
+                        .checked(self.remember_password)
+                        .disabled(blocked || busy)
+                        .on_click(cx.listener(|this, checked, _, cx| {
+                            this.remember_password = *checked;
+                            cx.notify();
+                        })),
+                ),
+            );
+        } else {
+            detail = detail.child(
+                div()
+                    .pl(px(92.))
+                    .text_sm()
+                    .child("未加密私钥的口令留空；口令不保存。"),
+            );
+        }
         let mut buttons = div().h_flex().gap_2();
         if self.editing {
             buttons = buttons

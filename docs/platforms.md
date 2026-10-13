@@ -1,6 +1,6 @@
 # 平台接口与虚拟显示器
 
-当前只有 Mac 服务端实现。Windows 客户端继续通过 SSH 和浏览器连接；Windows/Linux 服务端待实现。网络传输不决定目标电脑有没有桌面。
+当前只有 Mac 桌面服务端实现。Windows 客户端通过 SSH 和浏览器连接；新增 SSH 终端模式直接连接 Linux 的 SSH 服务，不要求桌面或 LanDesk 服务端。Windows/Linux 桌面服务端待实现。网络传输不决定目标电脑有没有桌面。
 
 ## 代码边界
 
@@ -11,7 +11,7 @@
 - `src/platform/macos/`：ScreenCaptureKit、CoreGraphics、AppKit、Enigo、IOKit、Mac 文件系统实现。Mac 输入继续在 AppKit 主线程和 common run-loop modes 运行。
 - `src/main.rs`：选择平台适配器并组装服务。新增系统应实现这些接口并添加自己的启动入口，不把系统判断散布到 WebSocket 控制流程。
 
-程序/脚本执行接口和网页终端尚未实现；以后应独立于屏幕采集和屏幕权限。当前可以通过 Mac 已启用的 SSH 执行命令，无需显示器。首轮不添加窗口搬移、镜像、主屏替换或实体屏自动熄灭。
+网页终端已在客户端实现：本地 xterm.js 网页通过 WebSocket 连接客户端，再由 russh 创建 SSH PTY/Shell，独立于屏幕采集和屏幕权限。交互式命令使用 SSH 账户的系统权限；未提供批量脚本执行接口、任务编排或 Linux 图形文件管理。使用与验证范围见 [客户端说明](../client/README.md)。首轮不添加窗口搬移、镜像、主屏替换或实体屏自动熄灭。
 
 ## 虚拟屏幕的使用与生命周期
 

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="session-token" content="__SESSION_TOKEN__">
+  <title>LanDesk · SSH 终端</title>
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <link rel="stylesheet" href="terminal.css">
+  <script src="vendor/xterm.js" defer></script>
+  <script src="vendor/addon-fit.js" defer></script>
+  <script type="module" src="terminal.js"></script>
+</head>
+<body>
+  <header>
+    <strong id="host">SSH 终端</strong>
+    <span id="status" role="status">正在连接…</span>
+    <button id="reconnect" disabled>重新连接</button>
+    <button id="disconnect">断开</button>
+  </header>
+  <main id="terminal" aria-label="远程 SSH 终端"></main>
+</body>
+</html>

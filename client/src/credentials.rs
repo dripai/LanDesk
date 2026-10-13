@@ -1,4 +1,4 @@
-use crate::settings::{Connections, Settings};
+use crate::settings::{Authentication, Connections, Settings};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -39,6 +39,7 @@ impl SavedPassword {
             == settings.normalized_host()
             && self.user == settings.user
             && self.port == settings.ssh_port
+            && settings.authentication == Authentication::Password
     }
     pub fn password(&self) -> Zeroizing<String> {
         Zeroizing::new(self.password.clone())
@@ -256,6 +257,11 @@ mod tests {
         let loaded = read_at(&target).unwrap().unwrap();
         assert!(loaded.matches(&settings));
         assert_eq!(&*loaded.password(), "测试-password");
+        settings.authentication = Authentication::PrivateKey {
+            path: temp.path().join("id_ed25519"),
+        };
+        assert!(!loaded.matches(&settings));
+        settings.authentication = Authentication::Password;
         settings.host = "other.test".into();
         assert!(!loaded.matches(&settings));
         let changed = SavedPassword::new(&settings, "replacement");
@@ -266,7 +272,11 @@ mod tests {
         );
         transaction(&config, &path, vec![(target.clone(), None)]).unwrap();
         assert!(read_at(&target).unwrap().is_none());
-        assert!(!std::fs::read_to_string(path).unwrap().contains("password"));
+        assert!(
+            !std::fs::read_to_string(path)
+                .unwrap()
+                .contains("测试-password")
+        );
     }
     #[test]
     fn independent_credentials_and_multi_record_rollback() {
