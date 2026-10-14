@@ -4,9 +4,9 @@ import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 import {createKeyboard} from './keyboard.js';
 
-const source = (await readFile(new URL('./app.js', import.meta.url), 'utf8')).replace(/^import .*;\n/gm, '');
+const source = await readFile(new URL('./app.js', import.meta.url), 'utf8');
 const toolbarSource = (await readFile(new URL('./toolbar.js', import.meta.url), 'utf8')).replace('export function', 'function');
-function fixture(writeText = async () => {}) {
+function fixture(writeText = async () => {}, script = source) {
   const nodes = new Map(), sockets = [], images = [], timers = new Set(), drawn = [], layoutWidths = [];
   let frameResets = 0;
   const node = id => {
@@ -42,7 +42,7 @@ function fixture(writeText = async () => {}) {
     setInterval:()=>0,clearInterval() {},
   });
   vm.runInContext(toolbarSource,context);
-  vm.runInContext(source,context);
+  vm.runInContext(script.replace(/^import .*;\r?\n/gm, ''),context);
   function event(id,type,fields={}) {
     const event = new Event(type,{cancelable:true});
     Object.assign(event,{getModifierState:()=>false,...fields});
@@ -52,6 +52,13 @@ function fixture(writeText = async () => {}) {
   const copy = () => event('keyboard-input','keydown',{key:'c',code:'KeyC',ctrlKey:true});
   return {node,sockets,images,event,copy,timers,drawn,layoutWidths,get frameResets() { return frameResets; }};
 }
+
+test('desktop fixture loads source checked out with Windows CRLF line endings', () => {
+  const f = fixture(undefined, source.replace(/\r?\n/g, '\r\n'));
+  assert.equal(f.sockets.length,1);
+  f.sockets[0].onopen();
+  assert.deepEqual(f.sockets[0].sent[0],{type:'hello'});
+});
 
 test('Windows initial connection and reconnect measure visible desktop before centering toolbar', () => {
   const f = fixture();
