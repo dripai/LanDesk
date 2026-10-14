@@ -1,6 +1,6 @@
 # 平台接口与虚拟显示器
 
-当前只有 Mac 桌面服务端实现。Windows 客户端通过 SSH 和浏览器连接；新增 SSH 终端模式直接连接 Linux 的 SSH 服务，不要求桌面或 LanDesk 服务端。Windows/Linux 桌面服务端待实现。网络传输不决定目标电脑有没有桌面。
+Mac 桌面服务端已有实机验证。Windows 客户端通过 SSH 和浏览器连接；新增 SSH 终端模式直接连接 Linux 的 SSH 服务，不要求桌面或 LanDesk 服务端。Windows 已添加[控制台桌面服务端及内置虚拟显示器](windows-server.md)，采集、输入和开机服务均已接入，实机验证待完成；Linux 图形桌面服务仍待实现。网络传输不决定目标电脑有没有桌面。
 
 ## 代码边界
 
@@ -9,11 +9,12 @@
 - `src/server.rs`：公共 WebSocket 协议、会话所有权、取消和控制命令。`ready.capabilities` 由实际平台适配器提供。
 - `src/file_worker.rs`：独立文件线程及取消策略，通过文件接口处理请求。
 - `src/platform/macos/`：ScreenCaptureKit、CoreGraphics、AppKit、Enigo、IOKit、Mac 文件系统实现。Mac 输入继续在 AppKit 主线程和 common run-loop modes 运行。
-- `src/main.rs`：选择平台适配器并组装服务。新增系统应实现这些接口并添加自己的启动入口，不把系统判断散布到 WebSocket 控制流程。
+- `src/platform/windows/`：GDI 采集、SendInput、控制台会话服务和内置显示驱动；`src/windows_server_main.rs` 为 Windows 服务入口。
+- `src/main.rs`：组装 Mac 服务。新增系统应实现这些接口并添加自己的启动入口，不把系统判断散布到 WebSocket 控制流程。
 
 网页终端已在客户端实现：本地 xterm.js 网页通过 WebSocket 连接客户端，再由 russh 创建 SSH PTY/Shell，独立于屏幕采集和屏幕权限。交互式命令使用 SSH 账户的系统权限；未提供批量脚本执行接口、任务编排或 Linux 图形文件管理。使用与验证范围见 [客户端说明](../client/README.md)。首轮不添加窗口搬移、镜像、主屏替换或实体屏自动熄灭。
 
-## 虚拟屏幕的使用与生命周期
+## Mac 虚拟屏幕的使用与生命周期
 
 网页连接失败或断开后，选择“虚拟屏幕（实验）”、填写宽高，再点重新连接。已连接时，在工具条的显示设置中展开“虚拟屏幕（实验）”，点击“使用虚拟屏幕”。默认 1920×1080，宽高为实际像素；现有采集缩放和等比例显示继续保留。
 
@@ -41,7 +42,7 @@ LANDESK_TEST_VIRTUAL_DISPLAY=1 LANDESK_TEST_VIRTUAL_CAPTURE=1 cargo test --locke
 
 普通 `cargo test` 不创建系统显示器。首帧测试需要测试进程已有屏幕录制权限；未授权时明确失败，不主动申请权限。测试用 `CGGetOnlineDisplayList` 检查移除；本机 `CGDisplayIsOnline` 对无效编号返回 `UINT32_MAX`，不可按非零视为仍在线。
 
-公共库已通过 `cargo check --locked --lib --target x86_64-pc-windows-gnu`，这只证明公共代码没有 Mac 编译依赖，不代表 Windows 服务端可运行。40 项 Rust 测试、AppKit 主线程测试、21 项网页测试及 Clippy 通过，覆盖失败保留旧会话、显示设备持有、重连和无首帧时选择虚拟屏。
+Windows 服务端已完成 x64 EXE 交叉构建及 Windows 目标 Clippy；这不代表 Windows 实机验证通过。当前 38 项本机 Rust 库测试、3 项平台契约测试、26 项网页测试通过，覆盖失败保留旧会话、显示设备持有、重连、无首帧时选择虚拟屏和访问密钥拒绝路径。Windows 测试包、具体边界及安装步骤见 [Windows 服务端说明](windows-server.md)。
 
 尚未验证：打包 App 下网页切换虚拟屏和真实远程键鼠、没有实体屏的 Mac 启动、合盖/锁屏/FileVault 登录阶段，以及其他 macOS 版本。虚拟屏不是独立用户会话，也不提供这些登录或电源行为的保证。
 

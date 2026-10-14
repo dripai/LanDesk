@@ -1,3 +1,4 @@
+import { createToolbar } from './toolbar.js';
 'use strict';
 import {createFrames} from './frames.js';
 import {createKeyboard} from './keyboard.js';
@@ -28,6 +29,7 @@ const files = createFiles($('files-panel'), value => {
 let clipboardRequest = null, clipboardSequence = 0;
 let nativeWidth = 0, nativeHeight = 0, resolutionWidth = null, resolutionTimer = null;
 $('files-button').addEventListener('click', () => files.toggle());
+$('secure-attention').addEventListener('click', () => { releaseAll(); send({type:'secure_attention'}); });
 $('clipboard-paste').addEventListener('click', async () => {
   const connection = socket;
   try {
@@ -53,62 +55,13 @@ function copyClipboard(shortcut = false) {
   if (clipboardRequest || socket?.readyState !== WebSocket.OPEN) return;
   const id = ++clipboardSequence;
   const timer = setTimeout(() => {
-    clipboardRequest = null; $('clipboard-copy').disabled = false; notify('读取 Mac 剪贴板超时');
+    clipboardRequest = null; $('clipboard-copy').disabled = false; notify('读取 远程剪贴板超时');
   }, 5000);
   clipboardRequest = {id, timer}; $('clipboard-copy').disabled = true;
   send({type:shortcut ? 'copy_clipboard' : 'read_clipboard',id});
 }
 $('clipboard-copy').addEventListener('click', () => copyClipboard());
-const toolbar = $('toolbar'), toolbarHandle = $('toolbar-handle');
-let toolbarPosition = null, toolbarDrag = null;
-function positionToolbar(x, y) {
-  const area = $('session').getBoundingClientRect();
-  const rect = toolbar.getBoundingClientRect();
-  if (area.width === 0 || area.height === 0) return;
-  x = Math.max(0, Math.min(x, Math.max(0, area.width - rect.width)));
-  y = Math.max(0, Math.min(y, Math.max(0, area.height - rect.height)));
-  toolbarPosition = {x, y};
-  toolbar.style.left = `${x}px`; toolbar.style.top = `${y}px`; toolbar.style.transform = 'none';
-}
-toolbarHandle.addEventListener('pointerdown', event => {
-  if (event.button !== 0 || toolbarDrag) return;
-  event.preventDefault(); releaseAll();
-  const rect = toolbar.getBoundingClientRect();
-  toolbarDrag = {id:event.pointerId, dx:event.clientX - rect.left, dy:event.clientY - rect.top};
-  toolbarHandle.setPointerCapture(event.pointerId); toolbar.classList.add('dragging');
-});
-toolbarHandle.addEventListener('pointermove', event => {
-  if (!toolbarDrag || event.pointerId !== toolbarDrag.id) return;
-  const area = $('session').getBoundingClientRect();
-  positionToolbar(event.clientX - area.left - toolbarDrag.dx, event.clientY - area.top - toolbarDrag.dy);
-});
-function stopToolbarDrag(event) {
-  if (!toolbarDrag || event.pointerId !== toolbarDrag.id) return;
-  toolbarDrag = null; toolbar.classList.remove('dragging');
-}
-for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) toolbarHandle.addEventListener(event, stopToolbarDrag);
-toolbarHandle.addEventListener('keydown', event => {
-  const moves = {ArrowLeft:[-10,0], ArrowRight:[10,0], ArrowUp:[0,-10], ArrowDown:[0,10]};
-  const move = moves[event.key];
-  if (!move) return;
-  event.preventDefault();
-  const area = $('session').getBoundingClientRect(), rect = toolbar.getBoundingClientRect();
-  positionToolbar(rect.left - area.left + move[0], rect.top - area.top + move[1]);
-});
-$('toolbar-toggle').addEventListener('click', () => {
-  const collapsed = !$('toolbar-controls').hidden;
-  $('toolbar-controls').hidden = collapsed;
-  const label = collapsed ? '展开工具条' : '收起工具条';
-  $('toolbar-toggle').setAttribute('aria-expanded', String(!collapsed));
-  $('toolbar-toggle').setAttribute('aria-label', label); $('toolbar-toggle').title = label;
-  $('toolbar-toggle').firstElementChild.textContent = collapsed ? '+' : '−';
-});
-new ResizeObserver(() => {
-  if (toolbarPosition) positionToolbar(toolbarPosition.x, toolbarPosition.y);
-}).observe(toolbar);
-window.addEventListener('resize', () => {
-  if (toolbarPosition) positionToolbar(toolbarPosition.x, toolbarPosition.y);
-});
+createToolbar($('session'), () => releaseAll());
 function releaseAll() { keyboard.releaseAll(); }
 function end(message) {
   clearInterval(heartbeat); heartbeat=null;
@@ -164,7 +117,11 @@ function connect() {
   const wsURL = new URL('./ws', location.href); wsURL.protocol = 'ws:'; wsURL.hash = ''; wsURL.search = '';
   socket=new WebSocket(wsURL); socket.binaryType='blob';
   const connection = socket;
-  socket.onopen=()=>send(display ? {type:'hello',display} : {type:'hello'});
+  socket.onopen=()=>{
+    const hello = display ? {type:'hello',display} : {type:'hello'};
+    if ($('access-key').value) hello.access_key = $('access-key').value.trim();
+    send(hello);
+  };
   socket.onmessage=event=>{
     if (socket !== connection) return;
     if(event.data instanceof Blob) {
@@ -183,7 +140,7 @@ function connect() {
         clipboardRequest = null; $('clipboard-copy').disabled = false; notify(text);
       };
       if(message.type === 'clipboard_error') { finish(message.message); return; }
-      navigator.clipboard.writeText(message.text).then(() => finish('Mac 文字已复制到本机剪贴板')).catch(error => finish(`无法写入本机剪贴板：${error.message}`));
+      navigator.clipboard.writeText(message.text).then(() => finish('远程文字已复制到本机剪贴板')).catch(error => finish(`无法写入本机剪贴板：${error.message}`));
       return;
     }
     if(message.type === 'display_state' || message.type === 'resolution_error') {
@@ -198,6 +155,8 @@ function connect() {
     if(message.type==='ready') {
       updateDisplay(message);
       $('virtual-display-options').hidden = !message.capabilities.virtual_display;
+      $('secure-attention').hidden = message.capabilities.os !== 'windows';
+      $('files-button').hidden = message.capabilities.files === false;
       $('connect-display').value='current'; $('connect-virtual-size').hidden=true;
       $('login').hidden=true; $('session').hidden=false;
       $('status').textContent='已连接';
@@ -206,11 +165,11 @@ function connect() {
 
       $('resolution-width').max = nativeWidth;
       for (const option of $('resolution-mode').options) if (/^\d+$/.test(option.value)) option.disabled = Number(option.value) > nativeWidth;
-      files.connect(message.width / message.height);
+      if (message.capabilities.files !== false) files.connect(message.width / message.height);
     }
 
   };
-  socket.onerror=()=>end('无法连接，请确认 Mac 应用和 LanDeskClient 或 SSH 隧道都在运行');
+  socket.onerror=()=>end('无法连接，请确认 服务端和 LanDeskClient 或 SSH 隧道都在运行');
   socket.onclose=()=>{ if(socket) end('连接已断开'); };
 }
 $('connect-form').addEventListener('submit', event => { event.preventDefault(); connect(); });
@@ -241,7 +200,7 @@ $('display-button').addEventListener('click', () => {
   $('resolution-width').value = resolutionWidth ?? nativeWidth;
   $('resolution-width').hidden = $('resolution-mode').value !== 'custom';
   const width = resolutionWidth ?? nativeWidth, height = Math.round(nativeHeight * width / nativeWidth);
-  $('resolution-status').textContent = `当前采集 ${width} × ${height}，等比例显示；Mac 系统分辨率不变。`;
+  $('resolution-status').textContent = `当前采集 ${width} × ${height}，等比例显示；远程系统分辨率不变。`;
   $('display-dialog').showModal();
 });
 $('resolution-mode').addEventListener('change', () => { $('resolution-width').hidden = $('resolution-mode').value !== 'custom'; });

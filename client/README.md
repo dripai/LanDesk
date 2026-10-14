@@ -19,7 +19,13 @@ Windows 10 / 11 x64 客户端，使用 GPUI Kit 0.7.1（GPUI / gpui-component）
 
 支持交互式 Shell、中文/UTF-8、终端尺寸同步、ANSI 全屏程序。Ctrl+C 交给终端；选中文字后 Ctrl+Shift+C 复制，Ctrl+Shift+V 粘贴，浏览器可能要求剪贴板权限。输出使用渲染确认限制积压，大段输入分块发送；输入队列超过 512 KiB 时拒绝本次输入并提示。
 
-每个标签创建独立 Shell。关闭或断开一个标签仅关闭对应 SSH 通道；重新连接会创建新的 Shell，不恢复旧进程。需要任务跨断线运行时由用户自行使用服务器上的 tmux 等工具。客户端断开服务器会结束该服务器的全部终端连接。没有新增 SFTP 文件面板、批量脚本、进程管理面板或额外权限隔离，命令按 SSH 账户权限执行。
+每个标签创建独立 Shell。关闭或断开一个标签仅关闭对应 SSH 通道；重新连接会创建新的 Shell，不恢复旧进程。需要任务跨断线运行时由用户自行使用服务器上的 tmux 等工具。客户端断开服务器会结束该服务器的全部终端连接。终端命令与文件操作都按 SSH 账户权限执行，不提供额外权限隔离。
+
+页面与桌面模式共用可拖动、可收起的悬浮工具条，不占整行顶栏。工具条提供选区复制、粘贴、文件面板、全屏、重连和断开。页面固定在可视高度内；历史输出只在终端内部滚动，目录和文件列表独立滚动。缩放窗口、全屏或调整右侧面板宽度会重新计算终端行列；正在看历史输出时不强制跳到底部。
+
+右侧默认显示目录与文件面板，可浏览 SSH 账户有权访问的目录（从 `/` 开始），支持上级目录、刷新、每批最多 500 项的分页、选择或拖入普通文件上传。目录切换完成前禁用上传，避免写入之前的目录。文件操作使用同一 SSH 连接的独立 SFTP v3 通道，依赖服务器启用 SFTP；不可用时明确提示，终端仍可使用。没有下载、删除、整目录上传或跟随目录符号链接的入口。
+
+单文件最多 512 MiB；上传先写同目录随机临时文件（0600 权限），完成后用 SFTP v3 RENAME 发布，同名目标拒绝覆盖。网页断开或取消时尝试清理未完成上传；SSH 断开、进程退出或网络故障可能留下 `.landesk-*.part`，清理失败会报错，不能保证断网后远程删除成功。文件操作不会调用 Shell 拼接命令。
 
 使用密码登录还要求服务器允许该账户的 SSH 密码认证；设置账户密码并不等于 SSH 已允许密码登录。客户端不会替你修改服务器密码或 SSH 策略。
 
@@ -29,7 +35,7 @@ Windows 10 / 11 x64 客户端，使用 GPUI Kit 0.7.1（GPUI / gpui-component）
 
 哈希标识连接地址，不是设备硬件身份，也不是凭据。SSH 主机密钥负责识别主机：首次自动记录，后续变化拒绝，不显示指纹确认，也不覆盖旧记录。首次使用信任无法验证第一次连接的主机身份。
 
-入口根据完整哈希路径分流，通过进程内独立通道连接对应 SSH；没有每服务器的公开本地端口。关闭路由后，已有引用无法转接到另一台机器。网页模块及 WebSocket 使用相对路径，标签标题显示服务器名称。入口验证 Host/Origin，终端还验证每次 SSH 连接随机生成的会话凭据；凭据不放在 URL 中，SSH 重连后旧凭据失效。每个 Mac 仍限制一个远控控制会话；多个不同 Mac 可同时连接。
+入口根据完整哈希路径分流，通过进程内独立通道连接对应 SSH；没有每服务器的公开本地端口。关闭路由后，已有引用无法转接到另一台机器。网页模块及 WebSocket 使用相对路径，标签标题显示服务器名称。入口验证 Host/Origin，终端与文件通道还验证每次 SSH 连接随机生成的会话凭据；凭据不放在 URL 中，SSH 重连后旧凭据失效。每个 Mac 仍限制一个远控控制会话；多个不同 Mac 可同时连接。
 
 各路径共享浏览器同源，哈希和会话凭据不构成同源网页之间的安全隔离；只连接自己信任的服务器。密码、私钥和私钥口令不会传给网页。
 
@@ -52,7 +58,7 @@ SSH 主机信任文件仍为同目录 `known_hosts`，同进程并发更新加�
 ```sh
 cargo fmt --manifest-path client/Cargo.toml --check
 cargo test --manifest-path client/Cargo.toml --locked --no-default-features --lib --tests
-node --test client/web/protocol.test.mjs
+node --test client/web/*.test.mjs web/*.test.mjs
 cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
 cargo build --manifest-path client/Cargo.toml --locked --release
 ```
@@ -72,3 +78,7 @@ cargo run --manifest-path client/Cargo.toml --locked --no-default-features --exa
 入口监听 `[::1]:17890` 并打印 `localhost` 网页地址，要求本机启用 IPv6 回环；与 Windows 正式客户端的 IPv4 入口不同。按回车退出，30 秒无网页会话也会退出。加密私钥的口令通过 `LANDESK_SSH_SECRET` 环境变量提供；私钥路径用 `-` 时改用该变量中的 SSH 密码。不要把真实凭据写入源码或命令历史。
 
 官方依据：[GPUI Kit](https://gpui-kit.com/docs/installation/)、[russh 0.64.1 Channel](https://docs.rs/russh/0.64.1/russh/struct.Channel.html)、[Hyper HTTP Upgrade](https://docs.rs/hyper/1.12.0/hyper/upgrade/index.html)、[xterm.js API](https://xtermjs.org/docs/api/terminal/classes/terminal/)、[xterm.js 安全建议](https://xtermjs.org/docs/guides/security/)、[Windows 凭据](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew)。实现核对了锁定的 GPUI Kit 0.7.1、Hyper 1.12.0、russh 0.64.1 源码。
+
+文件功能依据：[russh-sftp 3.0.0](https://docs.rs/russh-sftp/3.0.0/russh_sftp/client/struct.RawSftpSession.html)、[SFTP v3 文件创建和重命名语义](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02#section-6.5)。布局核对了内嵌 addon-fit 0.11.0 的 `proposeDimensions`：测量容器不能带额外内边距，否则终端行数可能超过实际可用高度。
+
+本轮验证：37 项公共库测试、客户端核心/SSH 集成测试及 25 项网页测试通过；新增 SFTP 来源与令牌校验、子系统拒绝不影响终端、目录切换期间禁用上传等回归。Mac Chrome 连接真实 Ubuntu 服务器，验证 963×340、600×500、1200×720 下终端底部可见且页面不溢出，以及工具条拖动/收起、文件面板开关、目录浏览、UTF-8 文件上传后 SHA-256 一致、同名拒绝、空文件上传和断开清理；临时文件已删除。Windows 浏览器及新 EXE 尚未验证。

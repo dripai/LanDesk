@@ -3,9 +3,9 @@ name: Windows client
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["client/**", ".github/workflows/windows-client.yml"]
+    paths: ["client/**", "web/**", ".github/workflows/windows-client.yml"]
   pull_request:
-    paths: ["client/**", ".github/workflows/windows-client.yml"]
+    paths: ["client/**", "web/**", ".github/workflows/windows-client.yml"]
   workflow_dispatch:
 
 permissions:
@@ -32,7 +32,7 @@ jobs:
       - name: Test connection core
         run: cargo test --manifest-path client/Cargo.toml --locked --no-default-features --lib --tests
       - name: Test terminal input protocol
-        run: node --test client/web/protocol.test.mjs
+        run: node --test client/web/*.test.mjs web/*.test.mjs
       - name: Check client
         run: cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
       - name: Build Windows x64

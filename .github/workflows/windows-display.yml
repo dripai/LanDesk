@@ -1,0 +1,54 @@
+name: Windows server
+
+on:
+  push:
+    branches: [main, "codex/**"]
+    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", "vendor/virtual-display/**", "scripts/Install-VirtualDisplay.ps1", "scripts/Install-LanDeskServer.ps1", "scripts/bundle_windows_display.py", "docs/windows-virtual-display.md", "docs/windows-server.md", ".github/workflows/windows-display.yml"]
+  pull_request:
+    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", "vendor/virtual-display/**", "scripts/Install-VirtualDisplay.ps1", "scripts/Install-LanDeskServer.ps1", "scripts/bundle_windows_display.py", "docs/windows-virtual-display.md", "docs/windows-server.md", ".github/workflows/windows-display.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: cargo +stable fmt --check
+      - name: Check Windows component
+        run: cargo +stable clippy --locked --lib --bin LanDeskDisplay --bin LanDeskServer -- -D warnings
+      - name: Windows library tests
+        run: cargo +stable test --locked --lib
+      - name: Validate installer syntax and driver catalog
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          $null = [Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/Install-VirtualDisplay.ps1", [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw ($errors | Out-String) }
+          $null = [Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/Install-LanDeskServer.ps1", [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw ($errors | Out-String) }
+          $signature = Get-AuthenticodeSignature vendor/virtual-display/mttvdd.cat
+          if ($signature.Status -ne 'Valid') { throw "Catalog signature: $($signature.Status)" }
+      - name: Build Windows x64
+        run: cargo +stable build --locked --release --bin LanDeskDisplay --bin LanDeskServer
+      - name: Read-only status smoke test
+        run: |
+          $state = & target/release/LanDeskDisplay.exe --status | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $state.installed) { throw 'Unexpected display device status on clean runner' }
+      - name: Package
+        run: python scripts/bundle_windows_display.py --exe target/release/LanDeskDisplay.exe --server-exe target/release/LanDeskServer.exe --output target/LanDeskServer-windows-x64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: LanDeskServer-windows-x64
+          path: target/LanDeskServer-windows-x64/
+          if-no-files-found: error
+          retention-days: 30

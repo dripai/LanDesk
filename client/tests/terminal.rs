@@ -92,6 +92,16 @@ impl server::Handler for SshServer {
         session.channel_success(channel)?;
         Ok(())
     }
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut server::Session,
+    ) -> Result<()> {
+        assert_eq!(name, "sftp");
+        session.channel_failure(channel)?;
+        Ok(())
+    }
     async fn window_change_request(
         &mut self,
         _: ChannelId,
@@ -131,6 +141,7 @@ impl server::Handler for SshServer {
 
 struct Fixture {
     _dir: tempfile::TempDir,
+    _events: mpsc::Receiver<tunnel::Event>,
     addr: std::net::SocketAddr,
     id: String,
     observed: Arc<Mutex<Observed>>,
@@ -241,6 +252,7 @@ impl Fixture {
         .unwrap();
         Self {
             _dir: dir,
+            _events: rx,
             addr,
             id,
             observed,
@@ -473,4 +485,46 @@ async fn slow_renderer_pauses_output_and_acknowledgements_resume_without_loss() 
     }
     assert_eq!(received, 512 * 1024);
     echo(&mut ws, b"still responsive").await;
+}
+
+#[tokio::test]
+async fn sftp_checks_origin_token_and_rejection_does_not_close_terminal() {
+    let fixture = Fixture::new(0, false).await;
+    let token = fixture.token().await;
+    let mut terminal = fixture.socket(&token).await;
+    assert_eq!(json(&mut terminal).await["type"], "ready");
+    let request = |origin: &str| {
+        let mut request = fixture.request(origin);
+        *request.uri_mut() = format!("ws://{}/s/{}/files-ws", fixture.addr, fixture.id)
+            .parse()
+            .unwrap();
+        request
+    };
+    assert!(
+        connect_async(request("http://untrusted.invalid"))
+            .await
+            .is_err()
+    );
+    for credential in ["wrong-token", token.as_str()] {
+        let (mut files, _) = connect_async(request("http://127.0.0.1:17890"))
+            .await
+            .unwrap();
+        files
+            .send(Message::Text(
+                serde_json::json!({"type":"hello","token":credential})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let reply = json(&mut files).await;
+        assert_eq!(reply["type"], "error");
+        let message = reply["message"].as_str().unwrap();
+        assert!(if credential == "wrong-token" {
+            message.contains("凭据")
+        } else {
+            message.contains("SFTP")
+        });
+        echo(&mut terminal, b"still-running").await;
+    }
 }

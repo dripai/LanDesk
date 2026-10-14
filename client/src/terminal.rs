@@ -22,7 +22,7 @@ use tokio_tungstenite::{
 
 const WAIT: Duration = Duration::from_secs(10);
 const OUTPUT_WINDOW: usize = 128 * 1024;
-type Socket = WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;
+pub(crate) type Socket = WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;
 
 pub(crate) struct Page {
     token: String,
@@ -88,6 +88,21 @@ where
                         "text/html; charset=utf-8",
                         include_str!("../web/index.html").replace("__SESSION_TOKEN__", &page.token),
                     ),
+                    "/files.js" => response(
+                        StatusCode::OK,
+                        "text/javascript; charset=utf-8",
+                        include_str!("../../web/files.js"),
+                    ),
+                    "/toolbar.js" => response(
+                        StatusCode::OK,
+                        "text/javascript; charset=utf-8",
+                        include_str!("../../web/toolbar.js"),
+                    ),
+                    "/shared.css" => response(
+                        StatusCode::OK,
+                        "text/css; charset=utf-8",
+                        include_str!("../../web/style.css"),
+                    ),
                     "/terminal.js" => response(
                         StatusCode::OK,
                         "text/javascript; charset=utf-8",
@@ -118,7 +133,7 @@ where
                         "text/css; charset=utf-8",
                         include_str!("../web/vendor/xterm.css"),
                     ),
-                    "/ws" if origin.is_some() => {
+                    "/ws" | "/files-ws" if origin.is_some() => {
                         let handshake = Request::builder()
                             .method(request.method())
                             .uri(request.uri());
@@ -130,8 +145,10 @@ where
                             Ok(reply) => {
                                 *slot
                                     .lock()
-                                    .map_err(|_| anyhow::anyhow!("终端升级状态不可用"))? =
-                                    Some(hyper::upgrade::on(&mut request));
+                                    .map_err(|_| anyhow::anyhow!("终端升级状态不可用"))? = Some((
+                                    request.uri().path() == "/files-ws",
+                                    hyper::upgrade::on(&mut request),
+                                ));
                                 reply.map(|_| Full::new(Bytes::new()))
                             }
                             Err(_) => response(
@@ -141,7 +158,9 @@ where
                             ),
                         }
                     }
-                    "/ws" => response(StatusCode::FORBIDDEN, "text/plain", "Origin required"),
+                    "/ws" | "/files-ws" => {
+                        response(StatusCode::FORBIDDEN, "text/plain", "Origin required")
+                    }
                     _ => response(StatusCode::NOT_FOUND, "text/plain", "Not found"),
                 }
             };
@@ -156,14 +175,18 @@ where
         .lock()
         .map_err(|_| anyhow::anyhow!("终端升级状态不可用"))?
         .take();
-    if let Some(upgrade) = upgrade {
+    if let Some((files, upgrade)) = upgrade {
         let io = timeout(WAIT, upgrade).await.context("终端网页升级超时")??;
         let config = WebSocketConfig::default()
             .max_message_size(Some(64 * 1024))
             .max_frame_size(Some(64 * 1024));
         let mut socket =
             WebSocketStream::from_raw_socket(TokioIo::new(io), Role::Server, Some(config)).await;
-        let result = run(&mut socket, ssh, activity, &page.token).await;
+        let result = if files {
+            crate::terminal_files::run(&mut socket, ssh, activity, &page.token).await
+        } else {
+            run(&mut socket, ssh, activity, &page.token).await
+        };
         if let Err(error) = &result {
             let _ = send_json(
                 &mut socket,
@@ -198,7 +221,7 @@ async fn send(socket: &mut Socket, message: Message) -> Result<()> {
         .context("终端网页写入超时")??;
     Ok(())
 }
-async fn send_json(socket: &mut Socket, value: serde_json::Value) -> Result<()> {
+pub(crate) async fn send_json(socket: &mut Socket, value: serde_json::Value) -> Result<()> {
     send(socket, Message::Text(value.to_string().into())).await
 }
 

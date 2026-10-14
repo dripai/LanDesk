@@ -178,7 +178,8 @@ fn protocol_accepts_virtual_source_before_a_desktop_exists() {
             display: Some(DisplayTarget::Virtual {
                 width: 1920,
                 height: 1080
-            })
+            }),
+            ..
         }
     ));
     assert!(

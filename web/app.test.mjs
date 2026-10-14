@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import {createKeyboard} from './keyboard.js';
 
 const source = (await readFile(new URL('./app.js', import.meta.url), 'utf8')).replace(/^import .*;\n/gm, '');
+const toolbarSource = (await readFile(new URL('./toolbar.js', import.meta.url), 'utf8')).replace('export function', 'function');
 function fixture(writeText = async () => {}) {
   const nodes = new Map(), sockets = [], images = [], timers = new Set();
   const node = id => {
@@ -38,6 +39,7 @@ function fixture(writeText = async () => {}) {
     setTimeout:fn=>{ timers.add(fn); return fn; },clearTimeout:fn=>timers.delete(fn),
     setInterval:()=>0,clearInterval() {},
   });
+  vm.runInContext(toolbarSource,context);
   vm.runInContext(source,context);
   function event(id,type,fields={}) {
     const event = new Event(type,{cancelable:true});
@@ -106,6 +108,26 @@ test('headless reconnect can request a virtual display before receiving any fram
   f.event('connect-form','submit');
   f.sockets[1].onopen();
   assert.deepEqual(f.sockets[1].sent[0],{type:'hello',display:{kind:'virtual',width:1920,height:1080}});
+});
+
+test('Windows access key only travels in hello; Windows controls respect capabilities', () => {
+  const f = fixture();
+  f.node('access-key').value = 'test-secret';
+  const socket = f.sockets[0];
+  socket.onopen();
+  assert.deepEqual(socket.sent[0], {type:'hello', access_key:'test-secret'});
+  socket.receive({type:'ready', width:1920, height:1080, native_width:1920, native_height:1080,
+    requested_width:null, display_id:1, displays:[], capabilities:{os:'windows', virtual_display:true, files:false}});
+  assert.equal(f.node('secure-attention').hidden, false);
+  assert.equal(f.node('files-button').hidden, true);
+  f.event('secure-attention', 'click');
+  assert.deepEqual(socket.sent.at(-1), {type:'secure_attention'});
+  f.event('disconnect', 'click');
+  f.event('connect-form', 'submit');
+  f.sockets[1].receive({type:'ready', width:1920, height:1080, native_width:1920, native_height:1080,
+    requested_width:null, display_id:1, displays:[], capabilities:{os:'macos', virtual_display:true, files:true}});
+  assert.equal(f.node('secure-attention').hidden, true);
+  assert.equal(f.node('files-button').hidden, false);
 });
 
 test('virtual display failures preserve the current remote session', () => {

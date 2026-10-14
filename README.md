@@ -4,7 +4,7 @@ Mac 运行 Rust 远控服务，Windows 通过 SSH 加密隧道和浏览器操作
 
 ## 实验分支
 
-`main` 保留已验证的 Mac 稳定版本；`codex/platform-virtual-display` 开发公共平台接口与 Mac 虚拟显示器。Windows 服务端后续接入。入口、接口、生命周期和实际验证范围见 [平台与虚拟显示器说明](docs/platforms.md)。
+`main` 保留已验证的 Mac 稳定版本；`codex/platform-virtual-display` 开发公共平台接口与 Mac 虚拟显示器。Windows 已添加[桌面服务端与内置虚拟显示器](docs/windows-server.md)，包含开机服务、画面采集和键鼠控制；Windows 实机验证待完成。入口、接口、生命周期和实际验证范围见 [平台与虚拟显示器说明](docs/platforms.md)。
 
 ## 使用
 

@@ -1,6 +1,8 @@
 //! OS-independent contracts. Native objects stay on their platform-owned threads.
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(windows)]
+pub mod windows;
 
 use crate::protocol::ClientMessage;
 use anyhow::Result;
@@ -26,6 +28,18 @@ pub struct Capabilities {
 }
 
 pub trait DesktopControl: Send + Sync {
+    fn requires_access_key(&self) -> bool {
+        false
+    }
+    fn authorize(&self, _key: Option<&str>) -> Result<()> {
+        Ok(())
+    }
+    fn supports_files(&self) -> bool {
+        true
+    }
+    fn secure_attention(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { anyhow::bail!("当前平台不支持 Ctrl+Alt+Delete") })
+    }
     fn capabilities(&self) -> Capabilities;
     fn check_permissions(&self) -> Result<()>;
     fn begin_input(&self, display_id: u32) -> BoxFuture<'_, Result<()>>;

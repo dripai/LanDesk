@@ -144,7 +144,14 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
             "/",
-            get(|| async { page_headers(Html(include_str!("../web/index.html")).into_response()) }),
+            get(|State(state): State<AppState>| async move {
+                let mut html = include_str!("../web/index.html").to_owned();
+                if state.native.requires_access_key() {
+                    html =
+                        html.replace("id=\"access-key-field\" hidden", "id=\"access-key-field\"");
+                }
+                page_headers(Html(html).into_response())
+            }),
         )
         .route(
             "/app.js",
@@ -201,6 +208,18 @@ pub fn router(state: AppState) -> Router {
                     (
                         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
                         include_str!("../web/files.js"),
+                    )
+                        .into_response(),
+                )
+            }),
+        )
+        .route(
+            "/toolbar.js",
+            get(|| async {
+                page_headers(
+                    (
+                        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                        include_str!("../web/toolbar.js"),
                     )
                         .into_response(),
                 )
@@ -280,9 +299,15 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     let Message::Text(text) = message else {
         bail!("请先建立会话");
     };
-    let ClientMessage::Hello { display } = serde_json::from_str(&text)? else {
+    let ClientMessage::Hello {
+        display,
+        access_key,
+    } = serde_json::from_str(&text)?
+    else {
         bail!("请先建立会话");
     };
+    state.native.authorize(access_key.as_deref())?;
+    drop(access_key);
     state
         .shared
         .active
@@ -314,6 +339,7 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
         let mut ready = initial;
         ready["type"] = "ready".into();
         ready["capabilities"] = serde_json::to_value(state.native.capabilities())?;
+        ready["capabilities"]["files"] = state.native.supports_files().into();
         ready
     })
     .await?;
@@ -386,6 +412,11 @@ async fn control_commands(
                         let message: ClientMessage = serde_json::from_str(&text).context("操作消息无效")?;
                         match message {
                             ClientMessage::Heartbeat => {},
+                            ClientMessage::SecureAttention => {
+                                if let Err(error) = state.native.secure_attention().await {
+                                    send_json(socket, serde_json::json!({"type":"notice", "message":format!("Ctrl+Alt+Delete 失败: {error:#}")})).await?;
+                                }
+                            },
                             ClientMessage::Disconnect => break,
 
                             ClientMessage::Hello { .. } => bail!("重复握手消息"),
@@ -472,6 +503,149 @@ pub async fn run(listener: tokio::net::TcpListener, state: AppState) -> Result<(
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    use crate::platform::{
+        Capabilities, CaptureBackend, DisplayTarget, FileBackend, FileSession, FrameSource,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize},
+    };
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{Message as WsMessage, client::IntoClientRequest},
+    };
+
+    struct Gate {
+        permissions: AtomicUsize,
+        restored: AtomicUsize,
+    }
+    impl DesktopControl for Gate {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                os: "windows",
+                virtual_display: true,
+            }
+        }
+        fn requires_access_key(&self) -> bool {
+            true
+        }
+        fn authorize(&self, key: Option<&str>) -> Result<()> {
+            ensure!(key == Some("test-key"), "access denied");
+            Ok(())
+        }
+        fn check_permissions(&self) -> Result<()> {
+            self.permissions.fetch_add(1, Ordering::SeqCst);
+            bail!("permission check reached")
+        }
+        fn begin_input(&self, _: u32) -> BoxFuture<'_, Result<()>> {
+            panic!("input must not start")
+        }
+        fn input(&self, _: ClientMessage) -> BoxFuture<'_, Result<()>> {
+            panic!("input must not start")
+        }
+        fn paste_text(&self, _: String) -> BoxFuture<'_, Result<()>> {
+            panic!("paste must not start")
+        }
+        fn paste_image(&self, _: Vec<u8>) -> BoxFuture<'_, Result<()>> {
+            panic!("paste must not start")
+        }
+        fn copy_text(&self) -> BoxFuture<'_, Result<String>> {
+            panic!("copy must not start")
+        }
+        fn read_clipboard(&self) -> BoxFuture<'_, Result<String>> {
+            panic!("clipboard must not start")
+        }
+        fn end_session(&self) -> BoxFuture<'_, Result<()>> {
+            panic!("session must not start")
+        }
+        fn restore(&self) {
+            self.restored.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct NoCapture;
+    impl CaptureBackend for NoCapture {
+        fn open(&mut self, _: Option<DisplayTarget>) -> Result<Box<dyn FrameSource>> {
+            panic!("capture must not start")
+        }
+    }
+    struct NoFiles;
+    impl FileBackend for NoFiles {
+        fn open_session(self: Arc<Self>, _: Arc<AtomicBool>) -> Box<dyn FileSession> {
+            panic!("files must not open")
+        }
+    }
+
+    #[tokio::test]
+    async fn access_key_is_checked_before_ownership_permissions_capture_and_input() {
+        let shared = Arc::new(Shared::default());
+        let native = Arc::new(Gate {
+            permissions: AtomicUsize::new(0),
+            restored: AtomicUsize::new(0),
+        });
+        let state = AppState {
+            native: native.clone(),
+            shared: shared.clone(),
+            capture: CaptureService::new(|| Box::new(NoCapture)).unwrap(),
+            files: FileService::new(NoFiles),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        for (hello, expected, active) in [
+            (serde_json::json!({"type":"hello"}), "access denied", false),
+            (
+                serde_json::json!({"type":"hello","access_key":"wrong"}),
+                "access denied",
+                true,
+            ),
+            (
+                serde_json::json!({"type":"hello","access_key":"test-key"}),
+                "已有一个连接",
+                true,
+            ),
+            (
+                serde_json::json!({"type":"hello","access_key":"test-key"}),
+                "permission check reached",
+                false,
+            ),
+        ] {
+            shared.active.store(active, Ordering::Release);
+            let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("host", "127.0.0.1:17890".parse().unwrap());
+            request
+                .headers_mut()
+                .insert("origin", "http://127.0.0.1:17890".parse().unwrap());
+            let (mut ws, _) = connect_async(request).await.unwrap();
+            ws.send(WsMessage::Text(hello.to_string().into()))
+                .await
+                .unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap();
+            assert!(response.contains(expected), "{response}");
+            assert_eq!(shared.active.load(Ordering::Acquire), active);
+            if expected != "permission check reached" {
+                assert_eq!(native.permissions.load(Ordering::SeqCst), 0);
+                assert_eq!(native.restored.load(Ordering::SeqCst), 0);
+            }
+        }
+        assert_eq!(native.permissions.load(Ordering::SeqCst), 1);
+        assert_eq!(native.restored.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

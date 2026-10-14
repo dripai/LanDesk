@@ -62,7 +62,7 @@ export function createImagePaste(send, notify) {
           type:'paste_image_chunk', id, offset, total:bytes.length, data:encode(bytes.subarray(offset,end)),
         });
       }
-      if (version === generation) notify('已向 Mac 当前应用粘贴图片');
+      if (version === generation) notify('已向 远程应用粘贴图片');
     } catch (error) {
       if (version === generation) {
         try { send({type:'paste_image_cancel',id}); } catch { /* Connection error already reported below. */ }
