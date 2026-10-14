@@ -1,4 +1,5 @@
 //! OS-independent contracts. Native objects stay on their platform-owned threads.
+pub mod authenticated;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(windows)]

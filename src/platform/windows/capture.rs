@@ -155,7 +155,7 @@ fn virtual_names() -> Result<Vec<String>> {
             };
             let result = unsafe { DisplayConfigGetDeviceInfo(&mut adapter.header) };
             ensure!(result == 0, "读取显示适配器失败: {result}");
-            if !super::virtual_display::owns_adapter(&adapter.adapterDevicePath)? {
+            if !super::virtual_display::is_mtt_adapter(&adapter.adapterDevicePath)? {
                 continue;
             }
             let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
@@ -229,7 +229,12 @@ impl Drop for Selected {
     }
 }
 
-fn jpeg(monitor: &Monitor, width: u32, height: u32) -> Result<Vec<u8>> {
+fn jpeg(
+    monitor: &Monitor,
+    width: u32,
+    height: u32,
+    inspect: bool,
+) -> Result<(Vec<u8>, Option<bool>)> {
     unsafe {
         let screen = ScreenDc(GetDC(null_mut()));
         ensure!(!screen.0.is_null(), "无法获取桌面 DC");
@@ -318,6 +323,14 @@ fn jpeg(monitor: &Monitor, width: u32, height: u32) -> Result<Vec<u8>> {
         for pixel in pixels.as_chunks::<4>().0 {
             rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
         }
+        // A generated frame does not prove the login UI was rendered. Record
+        // only this boolean on startup/desktop transition, never pixels/colors.
+        let uniform = inspect.then(|| {
+            rgb.as_chunks::<3>()
+                .0
+                .iter()
+                .all(|pixel| pixel == &rgb[..3])
+        });
         let mut result = Vec::new();
         JpegEncoder::new_with_quality(&mut result, 85).encode(
             &rgb,
@@ -325,7 +338,7 @@ fn jpeg(monitor: &Monitor, width: u32, height: u32) -> Result<Vec<u8>> {
             height,
             image::ExtendedColorType::Rgb8,
         )?;
-        Ok(result)
+        Ok((result, uniform))
     }
 }
 
@@ -340,6 +353,10 @@ struct Capture {
 impl Capture {
     fn start(monitor: Monitor, displays: Vec<Monitor>) -> Result<Self> {
         let (width, height) = dimensions(&monitor, None)?;
+        crate::diagnostics::log(&format!(
+            "GDI capture starting: {width}x{height}; {} monitors; selected={monitor:?}; displays={displays:?}",
+            displays.len(),
+        ));
         let (tx, frames) = watch::channel(None);
         let (size, sizes) = watch::channel((width, height));
         let stop = Arc::new(AtomicBool::new(false));
@@ -356,12 +373,18 @@ impl Capture {
                 while !cancelled.load(Ordering::Acquire) {
                     let began = Instant::now();
                     let result = (|| {
-                        desktop.sync()?;
+                        let changed = desktop.sync()?;
                         let (width, height) = *sizes.borrow();
-                        jpeg(&selected, width, height)
+                        jpeg(&selected, width, height, ready.is_some() || changed)
                     })();
                     match result {
-                        Ok(jpeg) => {
+                        Ok((jpeg, uniform)) => {
+                            if let Some(uniform) = uniform {
+                                crate::diagnostics::log(&format!(
+                                    "GDI sampled frame: uniform={uniform}; desktop={}",
+                                    super::desktop::context()
+                                ));
+                            }
                             failing_since = None;
                             sequence += 1;
                             tx.send_replace(Some(FrameEvent::Frame {
@@ -369,6 +392,7 @@ impl Capture {
                                 sequence,
                             }));
                             if let Some(ready) = ready.take() {
+                                crate::diagnostics::log("GDI first frame ready");
                                 let _ = ready.send(Ok(()));
                             }
                         }

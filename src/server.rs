@@ -289,7 +289,11 @@ async fn upgrade(
                 _ = wait_for_shutdown(&shared) => (Ok(()), false),
             };
             if let Err(e) = result {
-                eprintln!("LanDesk session failed: {e:#}");
+                if e.downcast_ref::<serde_json::Error>().is_some() {
+                    crate::diagnostics::log("LanDesk session rejected an invalid protocol message");
+                } else {
+                    crate::diagnostics::log(&format!("LanDesk session failed: {e:#}"));
+                }
                 if transport_done {
                     return;
                 }
@@ -313,6 +317,44 @@ async fn send_json(socket: &mut SessionSocket, value: serde_json::Value) -> Resu
     Ok(())
 }
 
+#[derive(Default)]
+struct InputStatus {
+    failure: Option<String>,
+}
+impl InputStatus {
+    // Send transitions only: mouse movement must not flood the warning banner.
+    fn observe(&mut self, result: Result<()>, can_recover: bool) -> Option<serde_json::Value> {
+        match result {
+            Err(error) => {
+                let error = format!("{error:#}");
+                if self.failure.is_some() {
+                    return None;
+                }
+                crate::diagnostics::log(&format!(
+                    "Input control unavailable; viewing continues: {error}"
+                ));
+                self.failure = Some(error.clone());
+                Some(
+                    serde_json::json!({"type":"input_state","available":false,"message":format!("键鼠控制暂不可用：{error}。画面保持连接，后续操作会继续尝试。")}),
+                )
+            }
+            Ok(()) if can_recover && self.failure.take().is_some() => {
+                crate::diagnostics::log("Input control recovered");
+                Some(serde_json::json!({"type":"input_state","available":true}))
+            }
+            Ok(()) => None,
+        }
+    }
+}
+fn actionable_input(message: &ClientMessage) -> bool {
+    match message {
+        ClientMessage::ReleaseAll => false,
+        ClientMessage::Text { text } | ClientMessage::PasteText { text } => !text.is_empty(),
+        ClientMessage::Wheel { x, y } => *x != 0 || *y != 0,
+        _ => true,
+    }
+}
+
 async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     let message = socket.recv().await.context("连接已关闭")?;
     let Message::Text(text) = message else {
@@ -328,13 +370,17 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("已有一个连接，请先断开"))?;
     let _guard = SessionGuard(state.native.clone(), state.shared.clone());
     state.native.check_permissions()?;
-    eprintln!("LanDesk session starting capture");
+    crate::diagnostics::log("LanDesk session starting capture");
     let mut capture = state.capture.start(display).await?;
     let initial = capture.info.borrow().clone();
-    state
-        .native
-        .begin_input(initial["display_id"].as_u64().context("缺少显示器编号")? as u32)
-        .await?;
+    let mut input_status = InputStatus::default();
+    let input_warning = input_status.observe(
+        state
+            .native
+            .begin_input(initial["display_id"].as_u64().context("缺少显示器编号")? as u32)
+            .await,
+        false,
+    );
     // Report readiness only after capture has produced a real frame.
     capture.frames.wait_for(|frame| frame.is_some()).await?;
     let first_frame = capture
@@ -359,12 +405,15 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     socket
         .send(Message::Binary(jpeg.as_ref().clone().into()))
         .await?;
+    if let Some(warning) = input_warning {
+        send_json(socket, warning).await?;
+    }
     let mut frames = capture.frames.clone();
     let mut metadata = capture.info.clone();
     let updates = socket.outgoing.clone();
     let display = state.shared.display.clone();
     tokio::select! {
-        result = control_loop(socket, &state, state.files.connect(), &mut frames, sequence,
+        result = control_loop(socket, &state, state.files.connect(), &mut frames, sequence, input_status,
             |change| capture.configure(change)) => result?,
         result = async {
             loop {
@@ -376,7 +425,9 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
             #[allow(unreachable_code)] Ok::<_, anyhow::Error>(())
         } => result?,
     }
-    state.native.end_session().await?;
+    if let Err(error) = state.native.end_session().await {
+        crate::diagnostics::log(&format!("Input cleanup failed at disconnect: {error:#}"));
+    }
     Ok(())
 }
 
@@ -386,11 +437,12 @@ async fn control_loop(
     files: FileChannel,
     frames: &mut tokio::sync::watch::Receiver<Option<FrameEvent>>,
     sequence: u64,
+    input_status: InputStatus,
     configure: impl FnMut(Change) -> BoxFuture<'static, Result<serde_json::Value>>,
 ) -> Result<()> {
     let output = socket.frames.clone();
     tokio::select! {
-        result = control_commands(socket, state, files, configure) => result,
+        result = control_commands(socket, state, files, input_status, configure) => result,
         result = async {
             let mut last_sequence = sequence;
             loop {
@@ -412,6 +464,7 @@ async fn control_commands(
     socket: &mut SessionSocket,
     state: &AppState,
     mut files: FileChannel,
+    mut input_status: InputStatus,
     mut configure: impl FnMut(Change) -> BoxFuture<'static, Result<serde_json::Value>>,
 ) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -426,9 +479,11 @@ async fn control_commands(
                         match message {
                             ClientMessage::Heartbeat => {},
                             ClientMessage::SecureAttention => {
-                                if let Err(error) = state.native.secure_attention().await {
-                                    send_json(socket, serde_json::json!({"type":"notice", "message":format!("Ctrl+Alt+Delete 失败: {error:#}")})).await?;
-                                }
+                                let message = match state.native.secure_attention().await {
+                                    Ok(()) => "Ctrl+Alt+Delete 请求已提交".into(),
+                                    Err(error) => format!("Ctrl+Alt+Delete 失败: {error:#}"),
+                                };
+                                send_json(socket, serde_json::json!({"type":"notice", "message":message})).await?;
                             },
                             ClientMessage::Disconnect => break,
 
@@ -449,8 +504,9 @@ async fn control_commands(
                             }
                             ClientMessage::PasteImageCancel { id } => images.cancel(id),
                             ClientMessage::PasteText { text } => {
-                                if let Err(error) = state.native.paste_text(text).await {
-                                    send_json(socket, serde_json::json!({"type":"notice", "message":format!("粘贴失败: {error:#}")})).await?;
+                                let can_recover = !text.is_empty();
+                                if let Some(status) = input_status.observe(state.native.paste_text(text).await, can_recover) {
+                                    send_json(socket, status).await?;
                                 }
                             }
                             message @ (ClientMessage::ReadClipboard { .. } | ClientMessage::CopyClipboard { .. }) => {
@@ -466,7 +522,9 @@ async fn control_commands(
                                 send_json(socket,response).await?;
                             }
                             message @ (ClientMessage::SetResolution { .. } | ClientMessage::SetDisplay { .. } | ClientMessage::SetDisplaySource { .. }) => {
-                                state.native.input(ClientMessage::ReleaseAll).await?;
+                                if let Some(status) = input_status.observe(state.native.input(ClientMessage::ReleaseAll).await, false) {
+                                    send_json(socket, status).await?;
+                                }
                                 let change = match message {
                                     ClientMessage::SetResolution { width } => Change::Resolution(width),
                                     ClientMessage::SetDisplay { display_id } => Change::Display(display_id),
@@ -482,7 +540,12 @@ async fn control_commands(
                                     send_json(socket,response).await?;
                                 }
                             }
-                            other => state.native.input(other).await?,
+                            other => {
+                                let can_recover = actionable_input(&other);
+                                if let Some(status) = input_status.observe(state.native.input(other).await, can_recover) {
+                                    send_json(socket, status).await?;
+                                }
+                            },
                         }
                     }
                     Message::Close(_) => break,
@@ -532,6 +595,38 @@ mod access_tests {
         connect_async,
         tungstenite::{Message as WsMessage, client::IntoClientRequest},
     };
+
+    #[test]
+    fn input_warning_deduplicates_failures_and_requires_real_input_to_recover() {
+        let mut status = InputStatus::default();
+        let denied = || anyhow::anyhow!("Windows input denied (5)");
+        assert_eq!(
+            status.observe(Err(denied()), true).unwrap()["available"],
+            false
+        );
+        assert!(status.observe(Err(denied()), true).is_none());
+        // Different event counts/errors during the same unavailable period
+        // must not trigger more browser releases and warnings.
+        assert!(
+            status
+                .observe(Err(anyhow::anyhow!("SendInput 0/3 denied")), true)
+                .is_none()
+        );
+        assert!(status.observe(Ok(()), false).is_none());
+        assert!(status.failure.is_some());
+        assert!(!actionable_input(&ClientMessage::ReleaseAll));
+        assert!(!actionable_input(&ClientMessage::Text {
+            text: String::new()
+        }));
+        assert!(!actionable_input(&ClientMessage::Wheel { x: 0, y: 0 }));
+        assert!(actionable_input(&ClientMessage::Key {
+            key: "Enter".into(),
+            down: true
+        }));
+        assert_eq!(status.observe(Ok(()), true).unwrap()["available"], true);
+        assert!(status.observe(Ok(()), true).is_none());
+        assert!(status.observe(Err(denied()), true).is_some());
+    }
 
     struct Gate {
         permissions: AtomicUsize,
@@ -601,7 +696,10 @@ mod access_tests {
             restored: AtomicUsize::new(0),
         });
         let state = AppState {
-            native: native.clone(),
+            native: Arc::new(crate::platform::authenticated::AuthenticatedDesktop::new(
+                native.clone(),
+                "test-key".into(),
+            )),
             shared: shared.clone(),
             capture: CaptureService::new(|| Box::new(NoCapture)).unwrap(),
             files: FileService::new(NoFiles),
@@ -855,7 +953,7 @@ mod tests {
                         state.shared.active.store(true, Ordering::Release);
                         let guard = SessionGuard(state.native.clone(), state.shared.clone());
                         let result = tokio::select! {
-                            result = control_loop(&mut socket, &state, files, &mut receiver, 0, |_| {
+                            result = control_loop(&mut socket, &state, files, &mut receiver, 0, InputStatus::default(), |_| {
                                 Box::pin(async { Ok(serde_json::json!({})) })
                             }) => result,
                             result = closed => result,
@@ -978,7 +1076,7 @@ mod tests {
                 state.shared.active.store(true, Ordering::Release);
                 let guard = SessionGuard(state.native.clone(), state.shared.clone());
                 let result = tokio::select! {
-                    result = control_loop(&mut socket, &state, state.files.connect(), &mut receiver, 0,
+                    result = control_loop(&mut socket, &state, state.files.connect(), &mut receiver, 0, InputStatus::default(),
                         |_| Box::pin(async { Ok(serde_json::json!({})) })) => result,
                     result = closed => result,
                 };
@@ -1033,6 +1131,150 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(reply.is_closed());
+        assert!(!shared.active.load(Ordering::Acquire));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn denied_input_preserves_frames_display_switching_and_recovers_without_reconnect() {
+        let (state, commands) = state();
+        let shared = state.shared.clone();
+        let configured = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (frames, receiver) = tokio::sync::watch::channel(None);
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let context = Arc::new(std::sync::Mutex::new(Some((receiver, finished))));
+        let switched = configured.clone();
+        let app = Router::new().route("/ws", get(move |upgrade: WebSocketUpgrade| {
+            let state = state.clone(); let switched = switched.clone();
+            let (mut receiver, finished) = context.lock().unwrap().take().unwrap();
+            async move { upgrade.on_upgrade(move |socket| async move {
+                let (mut socket, closed) = monitor_connection(socket);
+                state.shared.active.store(true, Ordering::Release);
+                let guard = SessionGuard(state.native.clone(), state.shared.clone());
+                let result = tokio::select! {
+                    result = control_loop(&mut socket, &state, state.files.connect(), &mut receiver, 0, InputStatus::default(),
+                        move |_| { switched.fetch_add(1, Ordering::SeqCst); Box::pin(async { Ok(serde_json::json!({})) }) }) => result,
+                    result = closed => result,
+                };
+                drop(guard); let _ = finished.send(result);
+            }) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+            .await
+            .unwrap();
+        async fn reply(commands: &std::sync::mpsc::Receiver<Command>, success: bool) {
+            let command = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Ok(command) = commands.try_recv() {
+                        break command;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let sender = match command {
+                Command::Input { reply, .. } => reply,
+                Command::PasteText { reply, .. } => reply,
+                _ => panic!("expected input command"),
+            };
+            sender
+                .send(if success {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("SendInput denied (5)"))
+                })
+                .unwrap();
+        }
+        ws.send(WsMessage::Text(
+            r#"{"type":"key","key":"Control","down":true}"#.into(),
+        ))
+        .await
+        .unwrap();
+        reply(&commands, false).await;
+        let warning = tokio::time::timeout(Duration::from_secs(1), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap();
+        assert!(
+            warning.contains("input_state")
+                && warning.contains("false")
+                && warning.contains("denied")
+        );
+        // The secure-attention command has its own response even when ordinary
+        // input is unavailable. This fixture's platform does not support SAS.
+        ws.send(WsMessage::Text(r#"{"type":"secure_attention"}"#.into()))
+            .await
+            .unwrap();
+        let notice = tokio::time::timeout(Duration::from_secs(1), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap();
+        assert!(notice.contains("notice") && notice.contains("Ctrl+Alt+Delete 失败"));
+        // Repeat denial, then a successful no-op release; neither should flood or clear the warning.
+        for (message, success) in [
+            (r#"{"type":"pointer","x":0.5,"y":0.5}"#, false),
+            (r#"{"type":"release_all"}"#, true),
+            (r#"{"type":"set_resolution","width":1280}"#, false),
+        ] {
+            ws.send(WsMessage::Text(message.into())).await.unwrap();
+            reply(&commands, success).await;
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while configured.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        frames
+            .send(Some(FrameEvent::Frame {
+                jpeg: Arc::new(vec![7, 8, 9]),
+                sequence: 1,
+            }))
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(1), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.into_data().as_ref(), &[7, 8, 9]);
+        assert!(shared.active.load(Ordering::Acquire));
+        ws.send(WsMessage::Text(
+            r#"{"type":"paste_text","text":"retry"}"#.into(),
+        ))
+        .await
+        .unwrap();
+        reply(&commands, true).await;
+        let recovered = tokio::time::timeout(Duration::from_secs(1), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap();
+        assert!(recovered.contains("input_state") && recovered.contains("true"));
+        // An actual capture failure is still fatal.
+        frames
+            .send(Some(FrameEvent::Error("capture unavailable".into())))
+            .unwrap();
+        let failure = tokio::time::timeout(Duration::from_secs(1), done)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(failure.to_string().contains("capture unavailable"));
         assert!(!shared.active.load(Ordering::Acquire));
         server.abort();
     }

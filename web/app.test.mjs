@@ -7,13 +7,14 @@ import {createKeyboard} from './keyboard.js';
 const source = (await readFile(new URL('./app.js', import.meta.url), 'utf8')).replace(/^import .*;\n/gm, '');
 const toolbarSource = (await readFile(new URL('./toolbar.js', import.meta.url), 'utf8')).replace('export function', 'function');
 function fixture(writeText = async () => {}) {
-  const nodes = new Map(), sockets = [], images = [], timers = new Set();
+  const nodes = new Map(), sockets = [], images = [], timers = new Set(), drawn = [], layoutWidths = [];
+  let frameResets = 0;
   const node = id => {
     if (!nodes.has(id)) {
       const element = new EventTarget();
       Object.assign(element, {value:'',style:{},hidden:false,options:[],
         focus() { this.dispatchEvent(new Event('focus')); }, close() {},
-        replaceChildren() {}, append() {}, getBoundingClientRect:()=>({width:100,height:100}),
+        replaceChildren() {}, append() {}, getBoundingClientRect:()=>({left:0,top:0,width:100,height:100}),
       });
       nodes.set(id,element);
     }
@@ -27,14 +28,15 @@ function fixture(writeText = async () => {}) {
     close() { this.readyState = 3; }
     receive(value) { this.onmessage({data:JSON.stringify(value)}); }
   }
+  node('session').hidden = true;
   const context = vm.createContext({
-    URL, URLSearchParams, Blob, TextEncoder, WebSocket:Socket,
+    URL, URLSearchParams, Blob, TextEncoder, WebSocket:Socket, performance:{now:()=>100},
     location:{href:'http://127.0.0.1:17890/s/test/',hash:''},
     document:{getElementById:node,createElement:()=>({})},
     window:new EventTarget(), navigator:{clipboard:{writeText}},
     ResizeObserver:class { observe() {} }, createKeyboard,
-    createFrames:()=>({draw() {},reset() {}}),
-    createFiles:()=>({handle:()=>false,resize() {},connect() {},reset() {}}),
+    createFrames:()=>({draw(frame) { drawn.push(frame); },reset() { frameResets++; }}),
+    createFiles:()=>({handle:()=>false,resize() { layoutWidths.push(node('session').hidden ? 0 : 1200); },connect() {},reset() {}}),
     createImagePaste:()=>({paste:image=>images.push(image),handle:()=>false,reset() {}}),
     setTimeout:fn=>{ timers.add(fn); return fn; },clearTimeout:fn=>timers.delete(fn),
     setInterval:()=>0,clearInterval() {},
@@ -48,8 +50,52 @@ function fixture(writeText = async () => {}) {
     return event;
   }
   const copy = () => event('keyboard-input','keydown',{key:'c',code:'KeyC',ctrlKey:true});
-  return {node,sockets,images,event,copy};
+  return {node,sockets,images,event,copy,timers,drawn,layoutWidths,get frameResets() { return frameResets; }};
 }
+
+test('Windows initial connection and reconnect measure visible desktop before centering toolbar', () => {
+  const f = fixture();
+  const ready = {type:'ready',width:1920,height:1080,native_width:1920,native_height:1080,
+    requested_width:null,display_id:1,displays:[],capabilities:{os:'windows',virtual_display:true,files:false}};
+  assert.equal(f.node('session').hidden,true);
+  f.sockets[0].receive(ready);
+  assert.deepEqual(f.layoutWidths,[1200]);
+  f.event('disconnect','click'); f.event('connect-form','submit');
+  f.sockets[1].receive(ready);
+  assert.deepEqual(f.layoutWidths,[1200,1200]);
+});
+
+test('failed input keeps video and commands connected; warning persists until recovery', () => {
+  const f = fixture(), socket = f.sockets[0];
+  socket.receive({type:'ready',width:1920,height:1080,native_width:1920,native_height:1080,
+    requested_width:null,display_id:1,displays:[],capabilities:{os:'windows',virtual_display:true,files:false}});
+  socket.receive({type:'input_state',available:false,message:'键鼠暂不可用：拒绝访问'});
+  assert.equal(socket.readyState,1);
+  assert.equal(f.node('session').hidden,false);
+  assert.equal(f.node('login').hidden,true);
+  assert.equal(f.node('notice').textContent,'键鼠暂不可用：拒绝访问');
+  assert.match(f.node('status').textContent,/键鼠暂不可用/);
+  const releases = () => socket.sent.filter(message => message.type === 'release_all').length;
+  assert.equal(releases(),1);
+  socket.receive({type:'input_state',available:false,message:'键鼠暂不可用：成功 0/3，拒绝访问'});
+  assert.equal(releases(),1);
+  const frame = new Blob(['jpeg']); socket.onmessage({data:frame});
+  assert.deepEqual(f.drawn,[frame]); assert.equal(f.frameResets,0);
+  f.event('screen','pointermove',{clientX:50,clientY:50});
+  assert.deepEqual(socket.sent.at(-1),{type:'pointer',x:0.5,y:0.5});
+  socket.receive({type:'notice',message:'临时提示'});
+  for (const timer of [...f.timers]) timer();
+  assert.equal(f.node('notice').textContent,'键鼠暂不可用：成功 0/3，拒绝访问');
+  assert.equal(f.node('notice').hidden,false);
+  socket.receive({type:'input_state',available:true});
+  assert.equal(f.node('status').textContent,'已连接');
+  for (const timer of [...f.timers]) timer();
+  assert.equal(f.node('notice').hidden,true);
+  socket.receive({type:'input_state',available:false,message:'再次拒绝访问'});
+  assert.equal(releases(),2);
+  socket.receive({type:'error',message:'画面采集停止'});
+  assert.equal(socket.readyState,3); assert.equal(f.node('session').hidden,true);
+});
 
 test('remote Ctrl+C writes returned text locally; Ctrl+V sends text or image to Mac', async () => {
   const written = [], f = fixture(async text=>written.push(text)), socket=f.sockets[0];

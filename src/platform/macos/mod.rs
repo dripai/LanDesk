@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod connection;
 pub mod files;
 mod input;
 pub mod native;

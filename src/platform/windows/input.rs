@@ -26,16 +26,26 @@ use windows_sys::Win32::{
 };
 
 fn send(input: &[INPUT]) -> Result<()> {
+    unsafe {
+        windows_sys::Win32::Foundation::SetLastError(0);
+    }
+    let sent = unsafe {
+        SendInput(
+            input.len() as u32,
+            input.as_ptr(),
+            size_of::<INPUT>() as i32,
+        )
+    };
+    let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
     ensure!(
-        unsafe {
-            SendInput(
-                input.len() as u32,
-                input.as_ptr(),
-                size_of::<INPUT>() as i32,
-            )
-        } == input.len() as u32,
-        "Windows 拒绝键鼠注入（可能正在切换桌面或权限不足）: {}",
-        std::io::Error::last_os_error()
+        sent == input.len() as u32,
+        "Windows 拒绝键鼠注入：成功 {sent}/{}，{}",
+        input.len(),
+        if error == 0 {
+            "系统未提供错误原因".into()
+        } else {
+            std::io::Error::from_raw_os_error(error as i32).to_string()
+        }
     );
     Ok(())
 }
@@ -119,10 +129,10 @@ fn key_code(key: &str) -> Result<u16> {
         }
         value if value.encode_utf16().count() == 1 => {
             let code = unsafe { VkKeyScanW(value.encode_utf16().next().unwrap()) };
-            ensure!(code != -1, "当前键盘布局不支持快捷键: {value}");
+            ensure!(code != -1, "当前键盘布局不支持此快捷键");
             code as u16 & 0xff
         }
-        _ => bail!("不支持的 Windows 按键: {key}"),
+        _ => bail!("不支持的 Windows 按键"),
     })
 }
 fn button(button: u8, down: bool) -> Result<u32> {
@@ -336,6 +346,7 @@ impl WindowsControl {
                     keys: BTreeSet::new(),
                     buttons: BTreeSet::new(),
                 };
+                let mut last_failure = None;
                 loop {
                     if release.swap(false, Ordering::AcqRel)
                         && input.apply(ClientMessage::ReleaseAll).is_err()
@@ -350,12 +361,41 @@ impl WindowsControl {
                             if job.reply.is_closed() {
                                 continue;
                             }
+                            let can_recover = match &job.command {
+                                Command::Clipboard(false) => false,
+                                Command::Input(ClientMessage::ReleaseAll) => false,
+                                Command::Input(
+                                    ClientMessage::Text { text }
+                                    | ClientMessage::PasteText { text },
+                                ) => !text.is_empty(),
+                                Command::Input(ClientMessage::Wheel { x, y }) => *x != 0 || *y != 0,
+                                _ => true,
+                            };
                             let result = match job.command {
                                 Command::Input(message) => {
                                     input.apply(message).map(|()| String::new())
                                 }
                                 Command::Clipboard(copy) => input.clipboard(copy),
                             };
+                            if let Err(error) = &result {
+                                if !input.keys.is_empty() || !input.buttons.is_empty() {
+                                    release.store(true, Ordering::Release);
+                                }
+                                let message = format!("{error:#}");
+                                if last_failure.is_none() {
+                                    service::log(&format!(
+                                        "Input/clipboard operation failed: {message}"
+                                    ));
+                                    service::log(&format!(
+                                        "Input failure desktop: {}; console state: {}",
+                                        super::desktop::context(),
+                                        super::interactive::report()
+                                    ));
+                                    last_failure = Some(message);
+                                }
+                            } else if can_recover && last_failure.take().is_some() {
+                                service::log("Input/clipboard operation recovered");
+                            }
                             let _ = job.reply.send(result);
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}

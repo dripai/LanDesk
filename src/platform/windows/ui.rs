@@ -28,9 +28,12 @@ const MINIMIZED: usize = 102;
 const APPLY: usize = 103;
 const OPEN: usize = 104;
 const EXIT: usize = 105;
+const EXPORT: usize = 106;
+const UNINSTALL: usize = 107;
+const PASSWORD: usize = 108;
 const TRAY: u32 = WM_APP + 1;
 
-struct Key(HKEY);
+pub(super) struct Key(HKEY);
 impl Drop for Key {
     fn drop(&mut self) {
         unsafe {
@@ -38,7 +41,7 @@ impl Drop for Key {
         }
     }
 }
-fn key(path: &str) -> Result<Key> {
+pub(super) fn key(path: &str) -> Result<Key> {
     let mut handle = null_mut();
     let error = unsafe {
         RegCreateKeyExW(
@@ -60,7 +63,7 @@ fn key(path: &str) -> Result<Key> {
     );
     Ok(Key(handle))
 }
-fn value(root: HKEY, path: &str, name: &str) -> Result<Option<(u32, Vec<u8>)>> {
+pub(super) fn value(root: HKEY, path: &str, name: &str) -> Result<Option<(u32, Vec<u8>)>> {
     let mut len = 0;
     let mut kind = 0;
     let flags = RRF_RT_ANY | RRF_NOEXPAND | RRF_SUBKEY_WOW6464KEY;
@@ -95,7 +98,7 @@ fn value(root: HKEY, path: &str, name: &str) -> Result<Option<(u32, Vec<u8>)>> {
     data.truncate(len as usize);
     Ok(Some((kind, data)))
 }
-fn put(key: &Key, name: &str, data: Option<&(u32, Vec<u8>)>) -> Result<()> {
+pub(super) fn put(key: &Key, name: &str, data: Option<&(u32, Vec<u8>)>) -> Result<()> {
     let error = match data {
         Some((kind, bytes)) => unsafe {
             RegSetValueExW(
@@ -128,9 +131,9 @@ fn service(access: u32) -> Result<ServiceHandle> {
     let manager =
         ServiceHandle::new(unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) })?;
     ServiceHandle::new(unsafe { OpenServiceW(manager.0, wide(ENTRY).as_ptr(), access) })
-        .context("请先运行安装脚本安装 LanDeskServer")
+        .context("LanDeskServer 后台服务未安装或不可访问")
 }
-fn configuration(service: &ServiceHandle) -> Result<(u32, PathBuf)> {
+pub(super) fn configuration(service: &ServiceHandle) -> Result<(u32, PathBuf)> {
     let mut needed = 0;
     unsafe {
         QueryServiceConfigW(service.0, null_mut(), 0, &mut needed);
@@ -240,11 +243,13 @@ struct Window {
     icon: NOTIFYICONDATAW,
     tray: std::cell::Cell<bool>,
 }
-fn error_box(hwnd: HWND, error: impl std::fmt::Display) {
+pub(super) fn error_box(hwnd: HWND, error: impl std::fmt::Display) {
+    crate::diagnostics::log(&format!("UI error: {error}"));
+    let message = format!("{error}\n\n{}", super::bootstrap::log_locations());
     unsafe {
         MessageBoxW(
             hwnd,
-            wide(&error.to_string()).as_ptr(),
+            wide(&message).as_ptr(),
             wide("LanDeskServer").as_ptr(),
             MB_OK | MB_ICONERROR,
         );
@@ -285,10 +290,17 @@ fn apply(hwnd: HWND, window: &Window) -> Result<()> {
             u8::from(automatic),
             u8::from(minimize)
         ),
+        false,
     )?;
+    crate::diagnostics::log("Startup preferences saved");
     refresh(window)
 }
-fn elevated(hwnd: HWND, executable: &std::path::Path, arguments: &str) -> Result<()> {
+pub(super) fn elevated(
+    hwnd: HWND,
+    executable: &std::path::Path,
+    arguments: &str,
+    installation: bool,
+) -> Result<()> {
     let parameters = wide(arguments);
     let path = wide(&executable.to_string_lossy());
     let verb = wide("runas");
@@ -308,7 +320,8 @@ fn elevated(hwnd: HWND, executable: &std::path::Path, arguments: &str) -> Result
     )?;
     let process = Handle::new(info.hProcess, "服务设置进程")?;
     ensure!(
-        unsafe { WaitForSingleObject(process.0, 30000) } == WAIT_OBJECT_0,
+        unsafe { WaitForSingleObject(process.0, if installation { INFINITE } else { 120000 }) }
+            == WAIT_OBJECT_0,
         "操作超时，请重新打开设置确认服务状态"
     );
     let mut exit = 1;
@@ -316,7 +329,7 @@ fn elevated(hwnd: HWND, executable: &std::path::Path, arguments: &str) -> Result
         unsafe { GetExitCodeProcess(process.0, &mut exit) },
         "读取服务操作结果",
     )?;
-    ensure!(exit == 0, "操作失败，请检查 server.log");
+    ensure!(exit == 0, "操作失败，请查看日志");
     Ok(())
 }
 pub fn start_background() -> Result<()> {
@@ -378,6 +391,32 @@ unsafe extern "system" fn procedure(
                             let _ = refresh(window);
                         }
                     }
+                    EXPORT => {
+                        let result = (|| -> Result<()> {
+                            elevated(hwnd, &std::env::current_exe()?, "--export-logs", false)?;
+                            super::bootstrap::open_folder(
+                                &super::bootstrap::machine_logs()?.join("exports"),
+                            )
+                        })();
+                        if let Err(error) = result {
+                            error_box(hwnd, format!("{error:#}"));
+                        }
+                    }
+                    PASSWORD => {
+                        let result = std::env::current_exe()
+                            .map_err(anyhow::Error::from)
+                            .and_then(|path| elevated(hwnd, &path, "--change-password", true));
+                        if let Err(error) = result {
+                            error_box(hwnd, format!("{error:#}"));
+                        }
+                    }
+                    UNINSTALL => {
+                        if super::bootstrap::request_uninstall().is_ok() {
+                            unsafe {
+                                DestroyWindow(hwnd);
+                            }
+                        }
+                    }
                     OPEN => show(hwnd),
                     EXIT => unsafe {
                         DestroyWindow(hwnd);
@@ -411,6 +450,7 @@ unsafe extern "system" fn procedure(
                         let menu = CreatePopupMenu();
                         if !menu.is_null() {
                             AppendMenuW(menu, MF_STRING, OPEN, wide("设置").as_ptr());
+                            AppendMenuW(menu, MF_STRING, EXPORT, wide("导出日志").as_ptr());
                             AppendMenuW(menu, MF_STRING, EXIT, wide("退出托盘").as_ptr());
                             let mut point = POINT::default();
                             GetCursorPos(&mut point);
@@ -449,7 +489,10 @@ pub fn run(force_show: bool) -> Result<()> {
     unsafe {
         FreeConsole();
     }
-    let result = run_window(force_show);
+    let result = (|| {
+        let installed_now = super::bootstrap::install_if_needed()?;
+        run_window(force_show || installed_now)
+    })();
     if let Err(error) = &result {
         error_box(null_mut(), format!("{error:#}"));
     }
@@ -471,7 +514,7 @@ fn run_window(force_show: bool) -> Result<()> {
         "读取后台状态",
     )?;
     if status.dwCurrentState == SERVICE_STOPPED {
-        elevated(null_mut(), &executable, "--start-background")?;
+        elevated(null_mut(), &executable, "--start-background", false)?;
     }
     let minimize = minimized()?;
     let instance = unsafe { GetModuleHandleW(null()) };
@@ -495,7 +538,7 @@ fn run_window(force_show: bool) -> Result<()> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             440,
-            240,
+            370,
             null_mut(),
             null_mut(),
             instance,
@@ -563,6 +606,30 @@ fn run_window(force_show: bool) -> Result<()> {
         145,
         90,
         APPLY,
+    )?;
+    child(
+        "BUTTON",
+        "修改连接密码",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        185,
+        140,
+        PASSWORD,
+    )?;
+    child(
+        "BUTTON",
+        "导出日志",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        225,
+        120,
+        EXPORT,
+    )?;
+    child(
+        "BUTTON",
+        "卸载服务",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        265,
+        120,
+        UNINSTALL,
     )?;
     unsafe {
         SendMessageW(

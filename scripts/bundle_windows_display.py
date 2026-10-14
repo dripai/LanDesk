@@ -25,7 +25,6 @@ def validate_executable(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--exe", required=True, type=Path)
     parser.add_argument("--server-exe", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -34,23 +33,16 @@ def main():
     for name, expected in HASHES.items():
         if hashlib.sha256((driver / name).read_bytes()).hexdigest() != expected:
             raise ValueError(f"Bundled driver checksum mismatch: {name}")
-    validate_executable(args.exe)
     validate_executable(args.server_exe)
     # Never replace an existing package or mix files from an earlier build.
     args.output.mkdir(parents=True, exist_ok=False)
     try:
-        shutil.copy2(args.exe, args.output / "LanDeskDisplay.exe")
         shutil.copy2(args.server_exe, args.output / "LanDeskServer.exe")
-        shutil.copytree(driver, args.output / "driver")
-        shutil.copy2(root / "scripts/Install-VirtualDisplay.ps1", args.output)
-        shutil.copy2(root / "scripts/Install-LanDeskServer.ps1", args.output)
+        shutil.copy2(driver / "LICENSE", args.output / "VIRTUAL-DISPLAY-LICENSE")
         shutil.copy2(root / "docs/windows-server.md", args.output / "README.md")
         shutil.copy2(root / "docs/windows-virtual-display.md", args.output / "virtual-display.md")
         display_doc = args.output / "virtual-display.md"
         display_doc.write_text(display_doc.read_text(encoding="utf-8").replace("(windows-server.md)", "(README.md)"), encoding="utf-8")
-        # Windows PowerShell 5.1 needs a BOM for UTF-8 scripts containing non-ASCII.
-        for script in args.output.glob("*.ps1"):
-            script.write_text(script.read_text(encoding="utf-8-sig"), encoding="utf-8-sig")
     except BaseException:
         shutil.rmtree(args.output)
         raise

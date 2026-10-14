@@ -7,12 +7,14 @@ import {createImagePaste} from './clipboard.js';
 const $ = id => document.getElementById(id);
 const serverName = new URLSearchParams(location.hash.slice(1)).get('name');
 if (serverName) document.title = `${serverName} · LanDesk`;
-let socket = null, heartbeat = null, lastMove = 0;
+let socket = null, heartbeat = null, lastMove = 0, inputWarning = '';
 const frames = createFrames($('screen'), end);
 const send = value => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
 function notify(message) {
   $('notice').textContent = message; $('notice').hidden = false;
-  clearTimeout(notify.timer); notify.timer = setTimeout(() => { $('notice').hidden = true; }, 5000);
+  clearTimeout(notify.timer); notify.timer = setTimeout(() => {
+    $('notice').textContent = inputWarning; $('notice').hidden = !inputWarning;
+  }, 5000);
 }
 const imagePaste = createImagePaste(value => {
   if (socket?.readyState !== WebSocket.OPEN) throw new Error('连接已断开');
@@ -64,6 +66,7 @@ $('clipboard-copy').addEventListener('click', () => copyClipboard());
 createToolbar($('session'), () => releaseAll());
 function releaseAll() { keyboard.releaseAll(); }
 function end(message) {
+  inputWarning = ''; clearTimeout(notify.timer);
   clearInterval(heartbeat); heartbeat=null;
   if(socket) { const old=socket; socket=null; old.onclose=null; old.onerror=null; old.close(); }
   keyboard.clear(); files.reset(); imagePaste.reset();
@@ -127,6 +130,17 @@ function connect() {
       frames.draw(event.data); return;
     }
     const message=JSON.parse(event.data);
+    if (message.type === 'input_state') {
+      const wasUnavailable = Boolean(inputWarning);
+      inputWarning = message.available ? '' : message.message;
+      $('status').textContent = message.available ? '已连接' : '已连接 · 键鼠暂不可用';
+      if (message.available) notify('键鼠控制已恢复');
+      else {
+        clearTimeout(notify.timer); $('notice').textContent = inputWarning; $('notice').hidden = false;
+        if (!wasUnavailable) keyboard.releaseAll();
+      }
+      return;
+    }
     if (message.type === 'notice') { notify(message.message); return; }
     if(imagePaste.handle(message)) return;
     if(files.handle(message)) return;
@@ -152,12 +166,14 @@ function connect() {
     }
     if(message.type==='error') { end(message.message); return; }
     if(message.type==='ready') {
-      updateDisplay(message);
       $('virtual-display-options').hidden = !message.capabilities.virtual_display;
       $('secure-attention').hidden = message.capabilities.os !== 'windows';
       $('files-button').hidden = message.capabilities.files === false;
       $('connect-display').value='current'; $('connect-virtual-size').hidden=true;
       $('login').hidden=true; $('session').hidden=false;
+      // Measure after the session is visible. A hidden session has zero width,
+      // which previously moved the centered toolbar halfway off the left edge.
+      updateDisplay(message);
       $('status').textContent='已连接';
       send({type:'heartbeat'}); heartbeat=setInterval(()=>send({type:'heartbeat'}),3000);
       keyboard.focus();

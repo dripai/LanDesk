@@ -12,11 +12,8 @@ const DISPLAY_CLASS: GUID = GUID::from_u128(0x4d36e968_e325_11ce_bfc1_08002be103
 
 /// Resolve the adapter interface through SetupAPI; DISPLAY_DEVICE.DeviceID is
 /// not a reliable device-instance identifier for an indirect display adapter.
-pub(super) fn owns_adapter(path: &[u16]) -> Result<bool> {
+pub(super) fn is_mtt_adapter(path: &[u16]) -> Result<bool> {
     let devices = Devices::new()?;
-    let Some(owned) = devices.owned()? else {
-        return Ok(false);
-    };
     let mut interface = SP_DEVICE_INTERFACE_DATA {
         cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
         ..Default::default()
@@ -61,7 +58,7 @@ pub(super) fn owns_adapter(path: &[u16]) -> Result<bool> {
         },
         "Resolve display adapter device",
     )?;
-    Ok(adapter.DevInst == owned.DevInst)
+    Ok(is_mtt(&hardware_ids(devices.0, &adapter)?))
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -216,15 +213,21 @@ fn hardware_ids(set: HDEVINFO, data: &SP_DEVINFO_DATA) -> Result<Vec<String>> {
     }
 }
 
-// The driver's configuration is global. Never alter another installation of MttVDD.
-fn reject_other_installation() -> Result<()> {
-    let raw = unsafe { SetupDiGetClassDevsW(&DISPLAY_CLASS, ptr::null(), ptr::null_mut(), 0) };
+fn is_mtt(ids: &[String]) -> bool {
+    ids.iter()
+        .any(|id| id.eq_ignore_ascii_case(HARDWARE) || id.eq_ignore_ascii_case("MttVDD"))
+}
+fn present_devices() -> Result<Vec<serde_json::Value>> {
+    let raw = unsafe {
+        SetupDiGetClassDevsW(&DISPLAY_CLASS, ptr::null(), ptr::null_mut(), DIGCF_PRESENT)
+    };
     ensure!(
         raw != INVALID_HANDLE_VALUE as isize,
         "Enumerate display adapters: {}",
         std::io::Error::last_os_error()
     );
     let devices = Devices(raw);
+    let mut result = Vec::new();
     for index in 0.. {
         let mut data = device_data();
         if unsafe { SetupDiEnumDeviceInfo(devices.0, index, &mut data) } == 0 {
@@ -235,13 +238,43 @@ fn reject_other_installation() -> Result<()> {
             );
             break;
         }
-        ensure!(
-            !hardware_ids(devices.0, &data)?
-                .iter()
-                .any(|id| id.eq_ignore_ascii_case(HARDWARE) || id.eq_ignore_ascii_case("MttVDD")),
-            "An existing MttVDD device is installed; remove it with its original installer before installing LanDesk's display"
-        );
+        let ids = hardware_ids(devices.0, &data)?;
+        if !is_mtt(&ids) {
+            continue;
+        }
+        let mut instance = [0u16; 4096];
+        check(
+            unsafe {
+                SetupDiGetDeviceInstanceIdW(
+                    devices.0,
+                    &data,
+                    instance.as_mut_ptr(),
+                    instance.len() as u32,
+                    ptr::null_mut(),
+                )
+            },
+            "Read display device instance",
+        )?;
+        let end = instance
+            .iter()
+            .position(|c| *c == 0)
+            .context("Device instance lacks terminator")?;
+        let instance = String::from_utf16(&instance[..end])?;
+        let (started, problem) = started(&data)?;
+        result.push(serde_json::json!({"owned": instance.eq_ignore_ascii_case(INSTANCE), "instance":instance,"hardware_ids":ids,"started":started,"problem":problem}));
     }
+    Ok(result)
+}
+fn reject_inactive_existing(state: &serde_json::Value) -> Result<()> {
+    ensure!(
+        state["devices"]
+            .as_array()
+            .context("Missing display devices")?
+            .is_empty()
+            || state["available"] == true,
+        "Existing MttVDD device is not running: {}",
+        state["devices"]
+    );
     Ok(())
 }
 
@@ -256,23 +289,33 @@ fn started(data: &SP_DEVINFO_DATA) -> Result<(bool, u32)> {
     Ok((flags & DN_STARTED != 0 && problem == 0, problem))
 }
 
-fn status() -> Result<serde_json::Value> {
+pub(super) fn status() -> Result<serde_json::Value> {
+    let present = present_devices()?;
     let devices = Devices::new()?;
-    let Some(data) = devices.owned()? else {
-        return Ok(serde_json::json!({"installed": false, "instance": INSTANCE}));
+    let owned = devices.owned()?;
+    let (running, problem) = match &owned {
+        Some(data) => started(data)?,
+        None => (false, 0),
     };
-    let (started, problem) = started(&data)?;
+    let available = present.iter().any(|device| device["started"] == true);
     Ok(
-        serde_json::json!({"installed": true, "started": started, "problem": problem, "instance": INSTANCE}),
+        serde_json::json!({"installed":owned.is_some(),"started":running,"problem":problem,"instance":INSTANCE,
+        "available":available,"devices":present,"created":false,"reused":available}),
     )
 }
 
-fn install(inf: &Path) -> Result<serde_json::Value> {
-    let devices = Devices::new()?;
-    if devices.owned()?.is_some() {
-        return status();
+pub(super) fn install(inf: &Path) -> Result<serde_json::Value> {
+    let state = status()?;
+    if state["available"] == true {
+        return Ok(state);
     }
-    reject_other_installation()?;
+    reject_inactive_existing(&state)?;
+    ensure!(
+        state["installed"] != true,
+        "LanDesk display is registered but not running (problem {}); inspect display status",
+        state["problem"]
+    );
+    let devices = Devices::new()?;
     ensure!(
         inf.is_file(),
         "Missing bundled driver INF: {}",
@@ -359,7 +402,11 @@ fn install(inf: &Path) -> Result<serde_json::Value> {
         );
     })();
     match result {
-        Ok(value) => Ok(value),
+        Ok(mut value) => {
+            value["created"] = true.into();
+            value["reused"] = false.into();
+            Ok(value)
+        }
         Err(error) => match devices.remove(&data) {
             Ok(reboot) => bail!(
                 "{error:#}; device rolled back (reboot_required={reboot}); Windows may retain the verified package in Driver Store"
@@ -380,10 +427,9 @@ pub fn run() -> Result<()> {
     let result = match args.as_slice() {
         [mode] if mode == "--status" => status()?,
         [mode] if mode == "--check-install" => {
-            if Devices::new()?.owned()?.is_none() {
-                reject_other_installation()?;
-            }
-            serde_json::json!({"install_allowed": true})
+            let state = status()?;
+            reject_inactive_existing(&state)?;
+            serde_json::json!({"install_allowed": true, "reuse_existing": state["available"]})
         }
         [mode] if mode == "--install" => {
             let exe = std::env::current_exe()?;
@@ -393,18 +439,19 @@ pub fn run() -> Result<()> {
                     .join("driver/MttVDD.inf"),
             )?
         }
-        [mode] if mode == "--uninstall" => {
-            let devices = Devices::new()?;
-            let reboot = match devices.owned()? {
-                Some(data) => devices.remove(&data)?,
-                None => false,
-            };
-            serde_json::json!({"removed": true, "reboot_required": reboot, "instance": INSTANCE})
-        }
+        [mode] if mode == "--uninstall" => uninstall()?,
         _ => bail!(
-            "Use --status, --install, or --uninstall. Run Install-VirtualDisplay.ps1 for installation and configuration."
+            "Use --status or --uninstall. Double-click LanDeskServer.exe for complete installation."
         ),
     };
     println!("{result}");
     Ok(())
+}
+pub(super) fn uninstall() -> Result<serde_json::Value> {
+    let devices = Devices::new()?;
+    let (removed, reboot) = match devices.owned()? {
+        Some(data) => (true, devices.remove(&data)?),
+        None => (false, false),
+    };
+    Ok(serde_json::json!({"removed": removed, "reboot_required": reboot, "instance": INSTANCE}))
 }

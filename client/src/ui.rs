@@ -165,7 +165,7 @@ impl Client {
             name: input(&initial.name, "例如：开发服务器", false, window, cx),
             host: input(&initial.host, "IP 或主机名", false, window, cx),
             user: input(&initial.user, "SSH 用户名", false, window, cx),
-            port: input(&initial.ssh_port.to_string(), "22", false, window, cx),
+            port: input(&initial.ssh_port.to_string(), "连接端口", false, window, cx),
             password: input("", "密码或私钥口令", true, window, cx),
             key_path: input(
                 match &initial.authentication {
@@ -178,7 +178,8 @@ impl Client {
                 cx,
             ),
             mode: initial.mode,
-            use_key: matches!(initial.authentication, Authentication::PrivateKey { .. }),
+            use_key: initial.mode == ConnectionMode::Terminal
+                && matches!(initial.authentication, Authentication::PrivateKey { .. }),
             editing: selected.is_none(),
             selected,
             delete_pending: false,
@@ -219,7 +220,8 @@ impl Client {
             }
         };
         self.mode = profile.mode;
-        self.use_key = matches!(profile.authentication, Authentication::PrivateKey { .. });
+        self.use_key = profile.mode == ConnectionMode::Terminal
+            && matches!(profile.authentication, Authentication::PrivateKey { .. });
         let key_path = match &profile.authentication {
             Authentication::PrivateKey { path } => path.to_string_lossy().into_owned(),
             Authentication::Password => String::new(),
@@ -245,7 +247,11 @@ impl Client {
         let value = Settings {
             name: self.name.read(cx).value().trim().to_string(),
             host: self.host.read(cx).value().trim().to_string(),
-            user: self.user.read(cx).value().trim().to_string(),
+            user: if self.mode == ConnectionMode::Desktop {
+                String::new()
+            } else {
+                self.user.read(cx).value().trim().to_string()
+            },
             ssh_port: self
                 .port
                 .read(cx)
@@ -256,7 +262,7 @@ impl Client {
             open_browser: true,
             minimize_to_tray: self.config.minimize_to_tray,
             mode: self.mode,
-            authentication: if self.use_key {
+            authentication: if self.use_key && self.mode == ConnectionMode::Terminal {
                 Authentication::PrivateKey {
                     path: PathBuf::from(self.key_path.read(cx).value().trim()),
                 }
@@ -281,7 +287,7 @@ impl Client {
         {
             return Ok(saved.password());
         }
-        anyhow::bail!("请输入当前 SSH 用户的密码")
+        anyhow::bail!("请输入连接密码")
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let value = self.read_settings(cx)?;
@@ -577,7 +583,7 @@ impl Render for Client {
             .items_center()
             .child(div().w(px(80.)).text_sm().child("连接模式"));
         for (id, label, mode) in [
-            ("desktop-mode", "Mac 桌面", ConnectionMode::Desktop),
+            ("desktop-mode", "远程桌面", ConnectionMode::Desktop),
             ("terminal-mode", "SSH 终端", ConnectionMode::Terminal),
         ] {
             modes = modes.child(
@@ -585,8 +591,20 @@ impl Render for Client {
                     .label(label)
                     .selected(self.mode == mode)
                     .disabled(blocked || busy || !self.editing)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.mode = mode;
+                        if this.selected.is_none() {
+                            let port = if mode == ConnectionMode::Desktop {
+                                "2222"
+                            } else {
+                                "22"
+                            };
+                            this.port
+                                .update(cx, |input, cx| input.set_value(port, window, cx));
+                        }
+                        if mode == ConnectionMode::Desktop {
+                            this.use_key = false;
+                        }
                         cx.notify();
                     })),
             );
@@ -614,18 +632,26 @@ impl Render for Client {
                     })),
             );
         }
-        detail = detail.child(auth);
+        if self.mode == ConnectionMode::Terminal {
+            detail = detail.child(auth);
+        }
         let secret_label = if self.use_key {
             "私钥口令"
         } else {
-            "SSH 密码"
+            if self.mode == ConnectionMode::Desktop {
+                "连接密码"
+            } else {
+                "SSH 密码"
+            }
         };
         let mut fields = vec![
             ("名称", &self.name),
             ("服务器地址", &self.host),
-            ("用户名", &self.user),
-            ("SSH 端口", &self.port),
+            ("连接端口", &self.port),
         ];
+        if self.mode == ConnectionMode::Terminal {
+            fields.push(("用户名", &self.user));
+        }
         if self.use_key {
             fields.push(("私钥路径", &self.key_path));
         }

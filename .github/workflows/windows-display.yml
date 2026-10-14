@@ -3,9 +3,9 @@ name: Windows server
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", "vendor/virtual-display/**", "scripts/Install-VirtualDisplay.ps1", "scripts/Install-LanDeskServer.ps1", "scripts/bundle_windows_display.py", "docs/windows-virtual-display.md", "docs/windows-server.md", ".github/workflows/windows-display.yml"]
+    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "docs/windows-virtual-display.md", "docs/windows-server.md", ".github/workflows/windows-display.yml"]
   pull_request:
-    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", "vendor/virtual-display/**", "scripts/Install-VirtualDisplay.ps1", "scripts/Install-LanDeskServer.ps1", "scripts/bundle_windows_display.py", "docs/windows-virtual-display.md", "docs/windows-server.md", ".github/workflows/windows-display.yml"]
+    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "docs/windows-virtual-display.md", "docs/windows-server.md", ".github/workflows/windows-display.yml"]
   workflow_dispatch:
 
 permissions:
@@ -28,17 +28,8 @@ jobs:
         run: cargo +stable clippy --locked --lib --bin LanDeskDisplay --bin LanDeskServer -- -D warnings
       - name: Windows library tests
         run: cargo +stable test --locked --lib
-      - name: Validate installer syntax and driver catalog
-        shell: powershell
-        run: |
-          $tokens = $null
-          $errors = $null
-          $null = [Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/Install-VirtualDisplay.ps1", [ref]$tokens, [ref]$errors)
-          if ($errors.Count) { throw ($errors | Out-String) }
-          $null = [Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/Install-LanDeskServer.ps1", [ref]$tokens, [ref]$errors)
-          if ($errors.Count) { throw ($errors | Out-String) }
-          $signature = Get-AuthenticodeSignature vendor/virtual-display/mttvdd.cat
-          if ($signature.Status -ne 'Valid') { throw "Catalog signature: $($signature.Status)" }
+      - name: Native SCM and setup API tests (administrator runner, no driver installation)
+        run: cargo +stable test --locked --lib native_setup_ -- --ignored --test-threads=1
       - name: Build Windows x64
         run: cargo +stable build --locked --release --bin LanDeskDisplay --bin LanDeskServer
       - name: Read-only status smoke test
@@ -46,7 +37,7 @@ jobs:
           $state = & target/release/LanDeskDisplay.exe --status | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $state.installed) { throw 'Unexpected display device status on clean runner' }
       - name: Package
-        run: python scripts/bundle_windows_display.py --exe target/release/LanDeskDisplay.exe --server-exe target/release/LanDeskServer.exe --output target/LanDeskServer-windows-x64
+        run: python scripts/bundle_windows_display.py --server-exe target/release/LanDeskServer.exe --output target/LanDeskServer-windows-x64
       - uses: actions/upload-artifact@v7
         with:
           name: LanDeskServer-windows-x64

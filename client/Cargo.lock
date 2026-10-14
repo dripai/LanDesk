@@ -4373,7 +4373,7 @@ dependencies = [
 
 [[package]]
 name = "landesk-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",

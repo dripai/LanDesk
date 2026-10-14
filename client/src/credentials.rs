@@ -25,7 +25,7 @@ impl SavedPassword {
     pub fn new(settings: &Settings, password: &str) -> Self {
         Self {
             host: settings.normalized_host(),
-            user: settings.user.clone(),
+            user: settings.ssh_user().into(),
             port: settings.ssh_port,
             password: password.into(),
         }
@@ -37,7 +37,7 @@ impl SavedPassword {
         }
         .normalized_host()
             == settings.normalized_host()
-            && self.user == settings.user
+            && self.user == settings.ssh_user()
             && self.port == settings.ssh_port
             && settings.authentication == Authentication::Password
     }

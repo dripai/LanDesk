@@ -15,7 +15,7 @@ use russh::{
 use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -42,10 +42,7 @@ pub struct Config {
 }
 impl Config {
     pub fn create(password: &str, port: u16) -> Result<Self> {
-        ensure!(
-            !password.is_empty() && password.len() <= 1024 && !password.contains('\0'),
-            "访问密码不能为空，不能包含 NUL，且不能超过 1024 字节"
-        );
+        crate::connection_password::validate(password)?;
         ensure!(port != 0, "SSH 端口无效");
         let password_hash = Argon2::default()
             .hash_password(password.as_bytes())?
@@ -88,14 +85,88 @@ impl Config {
     pub fn write_new(&self, path: &Path) -> Result<()> {
         use std::io::Write;
         let data = Zeroizing::new(serde_json::to_vec(self)?);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
         if let Err(error) = file.write_all(&data).and_then(|_| file.sync_all()) {
             drop(file);
             std::fs::remove_file(path).context("配置写入失败，且无法清理不完整配置")?;
             return Err(error.into());
+        }
+        Ok(())
+    }
+    /// Only the hash changes; host identity, port and desktop key stay unchanged.
+    pub fn change_password(path: &Path, password: &str) -> Result<()> {
+        use std::io::Write;
+        crate::connection_password::validate(password)?;
+        let mut config = Self::read(path)?;
+        config.password_hash = Argon2::default()
+            .hash_password(password.as_bytes())?
+            .to_string();
+        let parent = path.parent().context("连接配置路径无效")?;
+        let mut stage = tempfile::NamedTempFile::new_in(parent)?;
+        stage.write_all(&Zeroizing::new(serde_json::to_vec(&config)?))?;
+        stage.as_file().sync_all()?;
+        #[cfg(not(windows))]
+        stage
+            .persist(path)
+            .map_err(|error| error.error)
+            .context("保存连接密码失败")?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
+            };
+            let wide = |path: &Path| {
+                path.as_os_str()
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect::<Vec<_>>()
+            };
+            let backup = parent.join(format!(
+                "password-backup-{}.json",
+                stage.path().file_stem().unwrap().to_string_lossy()
+            ));
+            let (_, stage) = stage.keep().map_err(|error| error.error)?;
+            let result = unsafe {
+                ReplaceFileW(
+                    wide(path).as_ptr(),
+                    wide(&stage).as_ptr(),
+                    wide(&backup).as_ptr(),
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if result == 0 {
+                let error = std::io::Error::last_os_error();
+                if backup.exists()
+                    && unsafe {
+                        MoveFileExW(
+                            wide(&backup).as_ptr(),
+                            wide(path).as_ptr(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                        )
+                    } == 0
+                {
+                    anyhow::bail!(
+                        "保存连接密码失败: {error}; 原配置恢复失败: {}，备份保留在 {}",
+                        std::io::Error::last_os_error(),
+                        backup.display()
+                    );
+                }
+                if stage.exists() {
+                    std::fs::remove_file(&stage)?;
+                }
+                return Err(error).context("保存连接密码失败，原配置已保留");
+            }
+            std::fs::remove_file(backup).context("连接密码已保存，但旧配置备份清理失败")?;
         }
         Ok(())
     }
@@ -113,6 +184,7 @@ impl Config {
 
 struct Transport {
     config: Arc<Config>,
+    config_path: PathBuf,
     backend: Backend,
     hashing: Arc<Semaphore>,
 }
@@ -121,6 +193,7 @@ impl server::Server for Transport {
     fn new_client(&mut self, _: Option<SocketAddr>) -> Client {
         Client {
             config: self.config.clone(),
+            config_path: self.config_path.clone(),
             backend: self.backend.clone(),
             hashing: self.hashing.clone(),
             channels: JoinSet::new(),
@@ -128,11 +201,12 @@ impl server::Server for Transport {
     }
     fn handle_session_error(&mut self, _: anyhow::Error) {
         // Do not log peer-controlled packets or credentials.
-        eprintln!("LanDesk SSH connection closed with a protocol error");
+        crate::diagnostics::log("SSH connection closed with a protocol error");
     }
 }
 struct Client {
     config: Arc<Config>,
+    config_path: PathBuf,
     backend: Backend,
     hashing: Arc<Semaphore>,
     channels: JoinSet<()>,
@@ -151,10 +225,18 @@ impl server::Handler for Client {
         }
         let permit = self.hashing.clone().acquire_owned().await?;
         let config = self.config.clone();
+        let path = self.config_path.clone();
         let password = Zeroizing::new(password.to_owned());
         let accepted = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let hash = PasswordHash::new(&config.password_hash)?;
+            let current = Config::read(&path)?;
+            ensure!(
+                current.port == config.port
+                    && current.host_key == config.host_key
+                    && current.backend_key == config.backend_key,
+                "运行期间连接身份发生变化，请重新启动 LanDeskServer"
+            );
+            let hash = PasswordHash::new(&current.password_hash)?;
             Ok::<_, anyhow::Error>(
                 Argon2::default()
                     .verify_password(password.as_bytes(), &hash)
@@ -162,6 +244,11 @@ impl server::Handler for Client {
             )
         })
         .await??;
+        crate::diagnostics::log(if accepted {
+            "SSH password authentication accepted"
+        } else {
+            "SSH password authentication rejected"
+        });
         Ok(if accepted {
             server::Auth::Accept
         } else {
@@ -184,14 +271,21 @@ impl server::Handler for Client {
         // The existing client probes this channel before opening its browser.
         let socket = match timeout(Duration::from_secs(10), (self.backend)()).await {
             Ok(Ok(socket)) => socket,
-            _ => return Ok(()),
+            Ok(Err(error)) => {
+                crate::diagnostics::log(&format!("Desktop backend unavailable: {error:#}"));
+                return Ok(());
+            }
+            Err(_) => {
+                crate::diagnostics::log("Desktop backend connection timed out");
+                return Ok(());
+            }
         };
         while self.channels.try_join_next().is_some() {}
         let key = self.config.backend_key.clone();
         reply.accept().await;
         self.channels.spawn(async move {
             if proxy(channel.into_stream(), socket, key).await.is_err() {
-                eprintln!("LanDesk desktop forwarding channel closed");
+                crate::diagnostics::log("Desktop forwarding channel closed with an error");
             }
         });
         Ok(())
@@ -201,6 +295,7 @@ impl server::Handler for Client {
 pub async fn run(
     listener: TcpListener,
     config: Config,
+    config_path: PathBuf,
     backend: Backend,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
@@ -214,6 +309,7 @@ pub async fn run(
     });
     let mut transport = Transport {
         config: Arc::new(config),
+        config_path,
         backend,
         hashing: Arc::new(Semaphore::new(4)),
     };
@@ -320,6 +416,9 @@ mod tests {
     #[tokio::test]
     async fn password_tunnel_serves_http_and_websocket_without_exposing_internal_key() {
         let config = Config::create("测试-access-password", DEFAULT_PORT).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.json");
+        config.write_new(&config_path).unwrap();
         let public_key = config.private_key().unwrap().public_key().clone();
         let backend_key = config.backend_key.clone();
         let expected = backend_key.clone();
@@ -364,6 +463,7 @@ mod tests {
         let server = tokio::spawn(run(
             listener,
             config,
+            config_path.clone(),
             Arc::new(move || {
                 Box::pin(async move {
                     Ok(
@@ -454,10 +554,29 @@ mod tests {
             .unwrap();
         let closed = timeout(Duration::from_secs(5), ws.next()).await.unwrap();
         assert!(closed.is_none() || matches!(closed, Some(Err(_)) | Some(Ok(Message::Close(_)))));
-        let mut second = connect(addr, public_key).await;
+        let mut second = connect(addr, public_key.clone()).await;
         assert!(
             second
                 .authenticate_password(USER, "测试-access-password")
+                .await
+                .unwrap()
+                .success()
+        );
+        let channel = second
+            .channel_open_direct_tcpip("127.0.0.1", crate::protocol::PORT.into(), "127.0.0.1", 0)
+            .await
+            .unwrap();
+        assert!(http(channel, "/").await.contains("desktop page"));
+        Config::change_password(&config_path, "new-pass").unwrap();
+        let mut old = connect(addr, public_key).await;
+        assert!(
+            !old.authenticate_password(USER, "测试-access-password")
+                .await
+                .unwrap()
+                .success()
+        );
+        assert!(
+            old.authenticate_password(USER, "new-pass")
                 .await
                 .unwrap()
                 .success()
@@ -488,6 +607,28 @@ mod tests {
         assert_eq!(config.fingerprint().unwrap(), reread.fingerprint().unwrap());
         assert!(config.write_new(&path).is_err());
         assert!(Config::create("", DEFAULT_PORT).is_err());
+        assert!(Config::change_password(&path, "").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stored);
+        Config::change_password(&path, "abc12345").unwrap();
+        let changed = Config::read(&path).unwrap();
+        assert_eq!(
+            changed.fingerprint().unwrap(),
+            config.fingerprint().unwrap()
+        );
+        assert_eq!(changed.backend_key, config.backend_key);
+        assert_eq!(changed.port, config.port);
+        let hash = PasswordHash::new(&changed.password_hash).unwrap();
+        assert!(
+            Argon2::default()
+                .verify_password(b"abc12345", &hash)
+                .is_ok()
+        );
+        assert!(
+            Argon2::default()
+                .verify_password(b"another-test-password", &hash)
+                .is_err()
+        );
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("abc12345"));
         std::fs::remove_file(path).unwrap();
     }
 }

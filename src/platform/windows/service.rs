@@ -8,7 +8,6 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
-    io::Write,
     mem::size_of,
     path::PathBuf,
     ptr::{null, null_mut},
@@ -42,29 +41,7 @@ static STATUS: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(null_mut());
 fn data_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var_os("ProgramData").context("ProgramData missing")?).join(NAME))
 }
-pub fn log(message: &str) {
-    eprintln!("{message}");
-    if let Ok(directory) = data_dir()
-        && let Ok(mut file) =
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(directory.join(if TRANSPORT.load(Ordering::Relaxed) {
-                    "transport.log"
-                } else {
-                    "server.log"
-                }))
-    {
-        // Bound disk use. Never log input, clipboard text, or access keys.
-        if file
-            .metadata()
-            .map(|m| m.len() < 2_000_000)
-            .unwrap_or(false)
-        {
-            let _ = writeln!(file, "{:?} {message}", std::time::SystemTime::now());
-        }
-    }
-}
+pub use crate::diagnostics::log;
 fn process_token() -> Result<Handle> {
     let mut token = null_mut();
     checked(
@@ -121,6 +98,7 @@ fn enable_privileges() -> Result<()> {
         "SeTcbPrivilege",
         "SeAssignPrimaryTokenPrivilege",
         "SeIncreaseQuotaPrivilege",
+        "SeDebugPrivilege",
     ] {
         let mut luid = LUID::default();
         checked(
@@ -146,34 +124,7 @@ fn enable_privileges() -> Result<()> {
     Ok(())
 }
 fn session_token(session: u32) -> Result<Handle> {
-    let own = process_token()?;
-    let mut token = null_mut();
-    checked(
-        unsafe {
-            DuplicateTokenEx(
-                own.0,
-                TOKEN_ALL_ACCESS,
-                null(),
-                SecurityImpersonation,
-                TokenPrimary,
-                &mut token,
-            )
-        },
-        "DuplicateTokenEx",
-    )?;
-    let token = Handle::new(token, "Session token")?;
-    checked(
-        unsafe {
-            SetTokenInformation(
-                token.0,
-                TokenSessionId,
-                (&session as *const u32).cast(),
-                size_of::<u32>() as u32,
-            )
-        },
-        "SetTokenSessionId",
-    )?;
-    Ok(token)
+    super::interactive::session_token(session)
 }
 fn named_stop_event(name: &str) -> Result<Handle> {
     unsafe {
@@ -347,7 +298,7 @@ unsafe extern "system" fn control(
     }
     0
 }
-fn sas_policy() -> Result<()> {
+fn sas_policy() -> Result<u32> {
     let mut value = 0u32;
     let mut size = size_of::<u32>() as u32;
     let status = unsafe {
@@ -362,13 +313,21 @@ fn sas_policy() -> Result<()> {
         )
     };
     ensure!(
-        status == 0 && matches!(value, 1 | 3),
-        "系统策略未允许服务发送 Ctrl+Alt+Delete，请运行安装程序或联系系统管理员"
+        status == 0,
+        "读取软件 SAS 策略失败: {}",
+        std::io::Error::from_raw_os_error(status as i32)
     );
-    Ok(())
+    ensure!(
+        matches!(value, 1 | 3),
+        "系统策略未允许服务发送 Ctrl+Alt+Delete，当前值为 {value}"
+    );
+    Ok(value)
 }
 fn send_sas(session: u32) -> Result<()> {
-    sas_policy()?;
+    let policy = sas_policy()?;
+    log(&format!(
+        "SAS dispatch starting: session={session}, SoftwareSASGeneration={policy}"
+    ));
     let token = session_token(session)?;
     checked(
         unsafe { ImpersonateLoggedOnUser(token.0) },
@@ -382,6 +341,10 @@ fn send_sas(session: u32) -> Result<()> {
         log("RevertToSelf failed after SAS");
         std::process::abort();
     }
+    // SendSAS is VOID: returning does not prove the login UI reacted.
+    log(&format!(
+        "SendSAS returned: session={session}; Windows provides no result acknowledgment"
+    ));
     Ok(())
 }
 pub(super) struct ServiceHandle(pub SC_HANDLE);
@@ -403,6 +366,10 @@ impl Drop for ServiceHandle {
     }
 }
 pub fn request_sas() -> Result<()> {
+    log(&format!(
+        "SAS requested by worker; desktop={}",
+        super::desktop::context()
+    ));
     require_system_console()?;
     sas_policy()?;
     let manager =
@@ -413,7 +380,9 @@ pub fn request_sas() -> Result<()> {
     checked(
         unsafe { ControlService(service.0, SAS_CONTROL, &mut SERVICE_STATUS::default()) },
         "请求 Ctrl+Alt+Delete",
-    )
+    )?;
+    log("SAS request accepted by SCM; pending service dispatch");
+    Ok(())
 }
 fn serve() -> Result<()> {
     require_system()?;
@@ -429,6 +398,9 @@ fn serve() -> Result<()> {
         if session != last_session {
             worker.take();
             failures = 0;
+            log(&format!(
+                "Console session changed: {last_session} -> {session}"
+            ));
             last_session = session;
         } else if worker.as_ref().is_some_and(|w| !w.alive()) {
             worker.take();
@@ -450,11 +422,14 @@ fn serve() -> Result<()> {
                 }
             }
         }
-        if SAS.swap(false, Ordering::AcqRel)
-            && let Some(worker) = &worker
-            && let Err(error) = send_sas(worker.session)
-        {
-            log(&format!("SAS failed: {error:#}"));
+        if SAS.swap(false, Ordering::AcqRel) {
+            if let Some(worker) = &worker {
+                if let Err(error) = send_sas(worker.session) {
+                    log(&format!("SAS failed: {error:#}"));
+                }
+            } else {
+                log("SAS dispatch failed: no console worker exists");
+            }
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -512,6 +487,7 @@ fn serve_transport() -> Result<()> {
         crate::transport::run(
             listener,
             config,
+            transport_path()?,
             Arc::new(|| {
                 Box::pin(async {
                     Ok(Box::new(super::pipe::connect().await?)
@@ -529,26 +505,17 @@ fn serve_transport() -> Result<()> {
     runtime.shutdown_timeout(Duration::from_secs(3));
     result
 }
-fn configure_transport() -> Result<()> {
-    use std::io::Read;
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Setup {
-        password: String,
-        port: u16,
-    }
-    let mut text = zeroize::Zeroizing::new(String::new());
-    std::io::stdin().take(8193).read_to_string(&mut text)?;
-    ensure!(text.len() <= 8192, "安装输入过长");
-    let setup: Setup = serde_json::from_str(&text).context("安装输入无效")?;
-    let password = zeroize::Zeroizing::new(setup.password);
-    let config = crate::transport::Config::create(&password, setup.port)?;
-    config.write_new(&transport_path()?)?;
-    println!("SSH host fingerprint: {}", config.fingerprint()?);
-    Ok(())
-}
 fn worker(stop_name: &str) -> Result<()> {
     require_system_console()?;
+    log(&format!(
+        "Worker security context: {}",
+        super::interactive::current_token_report()
+            .unwrap_or_else(|e| serde_json::json!({"error":format!("{e:#}")}))
+    ));
+    log(&format!(
+        "Worker console state: {}",
+        super::interactive::report()
+    ));
     ensure!(
         stop_name
             .strip_prefix(r"Global\LanDeskServer-")
@@ -591,61 +558,98 @@ fn worker(stop_name: &str) -> Result<()> {
 }
 pub fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let result = match args.as_slice() {
-        [mode] if mode == "--service" || mode == "--transport-service" => {
-            TRANSPORT.store(mode == "--transport-service", Ordering::Relaxed);
-            let mut name = wide(if TRANSPORT.load(Ordering::Relaxed) {
-                TRANSPORT_NAME
-            } else {
-                NAME
-            });
-            let table = [
-                SERVICE_TABLE_ENTRYW {
-                    lpServiceName: name.as_mut_ptr(),
-                    lpServiceProc: Some(service_main),
-                },
-                SERVICE_TABLE_ENTRYW {
-                    lpServiceName: null_mut(),
-                    lpServiceProc: None,
-                },
-            ];
-            checked(
-                unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) },
-                "启动服务调度器",
-            )
+    if let Err(error) = super::bootstrap::initialize_logging(&args) {
+        if args.is_empty()
+            || args.first().is_some_and(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--settings"
+                        | "--startup-ui"
+                        | "--install-integrated"
+                        | "--uninstall"
+                        | "--prepare-uninstall"
+                        | "--run-uninstall"
+                        | "--export-logs"
+                )
+            })
+        {
+            super::ui::error_box(null_mut(), format!("无法创建日志：{error:#}"));
         }
-        [mode, stop] if mode == "--worker" => worker(stop),
-        [mode] if mode == "--configure-transport" => configure_transport(),
-        [mode] if mode == "--desktop-check" => {
-            let config = read_transport()?;
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            runtime.block_on(super::pipe::health(&config.backend_key))
+        return Err(error);
+    }
+    let result = (|| -> Result<()> {
+        match args.as_slice() {
+            [mode] if mode == "--service" || mode == "--transport-service" => {
+                TRANSPORT.store(mode == "--transport-service", Ordering::Relaxed);
+                let mut name = wide(if TRANSPORT.load(Ordering::Relaxed) {
+                    TRANSPORT_NAME
+                } else {
+                    NAME
+                });
+                let table = [
+                    SERVICE_TABLE_ENTRYW {
+                        lpServiceName: name.as_mut_ptr(),
+                        lpServiceProc: Some(service_main),
+                    },
+                    SERVICE_TABLE_ENTRYW {
+                        lpServiceName: null_mut(),
+                        lpServiceProc: None,
+                    },
+                ];
+                checked(
+                    unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) },
+                    "启动服务调度器",
+                )
+            }
+            [mode, stop] if mode == "--worker" => worker(stop),
+            [mode] if mode == "--desktop-check" => {
+                let config = read_transport()?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                runtime.block_on(super::pipe::health(&config.backend_key))
+            }
+            [mode] if mode == "--transport-info" => {
+                let config = read_transport()?;
+                println!(
+                    "{}",
+                    serde_json::json!({"port":config.port,"user":crate::transport::USER,"fingerprint":config.fingerprint()?})
+                );
+                Ok(())
+            }
+            [mode] if mode == "--start-background" => super::ui::start_background(),
+            [mode] if mode == "--install-integrated" => super::bootstrap::install(),
+            [mode] if mode == "--prepare-uninstall" => super::bootstrap::prepare_uninstall(),
+            [mode, parent] if mode == "--run-uninstall" => {
+                super::setup::run_uninstall(parent.parse().context("卸载进程参数无效")?)
+            }
+            [mode] if mode == "--uninstall" => super::bootstrap::request_uninstall(),
+            [mode] if mode == "--version" => {
+                println!("{}", env!("CARGO_PKG_VERSION"));
+                Ok(())
+            }
+            [mode] if mode == "--status" => {
+                println!("{}", super::setup::status()?);
+                Ok(())
+            }
+            [mode] if mode == "--export-logs" => super::bootstrap::export(),
+            [mode] if mode == "--change-password" => super::setup::change_password(),
+            [] => super::ui::run(false),
+            [mode] if mode == "--settings" => super::ui::run(true),
+            [mode] if mode == "--startup-ui" => super::ui::run(false),
+            [mode, automatic, minimized] if mode == "--set-startup" => {
+                ensure!(
+                    matches!(automatic.as_str(), "0" | "1")
+                        && matches!(minimized.as_str(), "0" | "1"),
+                    "启动参数无效"
+                );
+                super::ui::set_startup(automatic == "1", minimized == "1")
+            }
+            _ => {
+                bail!("参数无效；双击 LanDeskServer.exe 安装或打开设置")
+            }
         }
-        [mode] if mode == "--transport-info" => {
-            let config = read_transport()?;
-            println!(
-                "{}",
-                serde_json::json!({"port":config.port,"user":crate::transport::USER,"fingerprint":config.fingerprint()?})
-            );
-            Ok(())
-        }
-        [mode] if mode == "--start-background" => super::ui::start_background(),
-        [] => super::ui::run(false),
-        [mode] if mode == "--settings" => super::ui::run(true),
-        [mode] if mode == "--startup-ui" => super::ui::run(false),
-        [mode, automatic, minimized] if mode == "--set-startup" => {
-            ensure!(
-                matches!(automatic.as_str(), "0" | "1") && matches!(minimized.as_str(), "0" | "1"),
-                "启动参数无效"
-            );
-            super::ui::set_startup(automatic == "1", minimized == "1")
-        }
-        _ => {
-            bail!("参数无效；请先运行 Install-LanDeskServer.ps1 安装，再打开 LanDeskServer 设置")
-        }
-    };
+    })();
     if let Err(error) = &result {
         log(&format!("LanDeskServer failed: {error:#}"));
     }

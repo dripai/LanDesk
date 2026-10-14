@@ -46,7 +46,7 @@ impl Default for Settings {
             name: String::new(),
             host: String::new(),
             user: String::new(),
-            ssh_port: 22,
+            ssh_port: 2222,
             open_browser: true,
             minimize_to_tray: true,
             mode: ConnectionMode::Desktop,
@@ -56,6 +56,12 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn ssh_user(&self) -> &str {
+        match self.mode {
+            ConnectionMode::Desktop => "landesk",
+            ConnectionMode::Terminal => &self.user,
+        }
+    }
     pub fn normalized_host(&self) -> String {
         let host = self.host.trim();
         host.parse::<std::net::IpAddr>()
@@ -116,12 +122,13 @@ impl Settings {
             "服务器地址应为 IP 或主机名，不含协议、端口或空格"
         );
         ensure!(
-            !self.user.is_empty()
-                && self.user.len() <= 256
-                && !self
-                    .user
-                    .chars()
-                    .any(|c| c.is_control() || c.is_whitespace()),
+            self.mode == ConnectionMode::Desktop
+                || (!self.user.is_empty()
+                    && self.user.len() <= 256
+                    && !self
+                        .user
+                        .chars()
+                        .any(|c| c.is_control() || c.is_whitespace())),
             "请填写有效的 SSH 用户名"
         );
         ensure!(self.ssh_port != 0, "SSH 端口必须为 1–65535");
@@ -154,6 +161,20 @@ mod tests {
             user: "developer".into(),
             ..Settings::default()
         }
+    }
+    #[test]
+    fn desktop_uses_connection_password_without_an_os_account() {
+        let mut value = Settings {
+            host: "example.test".into(),
+            ..Settings::default()
+        };
+        value.validate().unwrap();
+        assert_eq!(value.ssh_user(), "landesk");
+        value.mode = ConnectionMode::Terminal;
+        assert!(value.validate().is_err());
+        value.user = "developer".into();
+        value.validate().unwrap();
+        assert_eq!(value.ssh_user(), "developer");
     }
     #[test]
     fn settings_round_trip_and_replacement_do_not_include_password() {
@@ -319,7 +340,7 @@ mod connection_tests {
         config.replace(None, profile("Mac.LOCAL.")).unwrap();
         assert_eq!(config.profiles[0].host, "Mac.LOCAL.");
         assert!(config.replace(None, profile("mac.local")).is_err());
-        b.ssh_port = 2222;
+        b.ssh_port = 22;
         assert_ne!(a.id(), b.id());
     }
     #[test]

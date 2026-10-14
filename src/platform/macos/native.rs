@@ -10,9 +10,9 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEventMask,
-    NSFont, NSPasteboard, NSPasteboardItem, NSPasteboardTypePNG, NSPasteboardTypeString,
-    NSTextField, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSAlert, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton,
+    NSEventMask, NSFont, NSPasteboard, NSPasteboardItem, NSPasteboardTypePNG,
+    NSPasteboardTypeString, NSTextField, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSData, NSDate, NSDefaultRunLoopMode, NSNotification, NSObject, NSObjectProtocol,
@@ -41,6 +41,16 @@ define_class!(
     struct PermissionActions;
     unsafe impl NSObjectProtocol for PermissionActions {}
     impl PermissionActions {
+        #[unsafe(method(changePassword:))]
+        fn change_password(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::new().expect("password UI runs on main thread");
+            if let Err(error) = super::connection::change_password(mtm) {
+                let alert = NSAlert::new(mtm);
+                alert.setMessageText(&NSString::from_str("连接密码未保存"));
+                alert.setInformativeText(&NSString::from_str(&format!("{error:#}")));
+                alert.runModal();
+            }
+        }
         #[unsafe(method(requestCapture:))]
         fn request_capture(&self, _sender: &AnyObject) {
             unsafe { CGRequestScreenCaptureAccess(); }
@@ -322,16 +332,22 @@ impl NativeCommands {
     }
 }
 
-pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
+pub fn initialize_app() -> MainThreadMarker {
     let mtm = MainThreadMarker::new().expect("native UI runs on main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     app.finishLaunching();
+    mtm
+}
+
+pub fn run(native: Native, rx: mpsc::Receiver<Command>, port: u16) -> Result<()> {
+    let mtm = MainThreadMarker::new().expect("native UI runs on main thread");
+    let app = NSApplication::sharedApplication(mtm);
     // These retained windows never release themselves when closed.
     let panel = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 320.0)),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 380.0)),
             NSWindowStyleMask::Titled
                 | NSWindowStyleMask::Closable
                 | NSWindowStyleMask::Miniaturizable,
@@ -349,18 +365,34 @@ pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
     };
     panel.setDelegate(Some(ProtocolObject::from_ref(&*lifecycle)));
     panel.center();
-    label(&panel, mtm, "LanDesk", 264.0, 28.0);
+    label(&panel, mtm, "LanDesk", 324.0, 28.0);
     label(
         &panel,
         mtm,
-        "通过 LanDeskClient 建立 SSH 连接后，浏览器自动进入桌面",
-        218.0,
+        &format!("连接端口：{port} · 使用 LanDesk 连接密码"),
+        278.0,
         16.0,
     );
-    let status = label(&panel, mtm, "等待连接", 170.0, 15.0);
-    let permission_label = label(&panel, mtm, "", 120.0, 13.0);
+    let status = label(&panel, mtm, "等待连接", 230.0, 15.0);
+    let permission_label = label(&panel, mtm, "", 180.0, 13.0);
     let actions: Retained<PermissionActions> =
         unsafe { msg_send![PermissionActions::alloc(mtm), init] };
+    let password = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("修改连接密码"),
+            Some(&actions),
+            Some(sel!(changePassword:)),
+            mtm,
+        )
+    };
+    password.setFrame(NSRect::new(
+        NSPoint::new(24.0, 132.0),
+        NSSize::new(250.0, 32.0),
+    ));
+    panel
+        .contentView()
+        .expect("native content view")
+        .addSubview(&password);
     for (title, action, x) in [
         ("授权屏幕录制", sel!(requestCapture:), 24.0),
         ("授权辅助功能", sel!(requestInput:), 290.0),
@@ -412,7 +444,7 @@ pub fn run(native: Native, rx: mpsc::Receiver<Command>) -> Result<()> {
                 let text = if timer_native.shared.active.load(Ordering::Acquire) {
                     "远程连接中 · 本机显示画面"
                 } else {
-                    "等待连接 · 仅监听本机，通过 SSH 加密连接"
+                    "等待连接 · 内置 SSH 加密连接"
                 };
                 status.setStringValue(&NSString::from_str(text));
                 last_update.set(Instant::now());

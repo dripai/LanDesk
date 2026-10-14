@@ -247,10 +247,14 @@ async fn authenticate(
     let auth = match &settings.authentication {
         Authentication::Password => {
             session
-                .authenticate_password(&settings.user, secret.to_string())
+                .authenticate_password(settings.ssh_user(), secret.to_string())
                 .await?
         }
         Authentication::PrivateKey { path } => {
+            ensure!(
+                settings.mode == crate::settings::ConnectionMode::Terminal,
+                "新版 LanDesk 桌面使用连接密码，请编辑旧连接配置"
+            );
             let path = path.clone();
             let key = tokio::task::spawn_blocking(move || {
                 // Keep both the file contents and passphrase out of logs and config files.
@@ -264,7 +268,7 @@ async fn authenticate(
             let hash = session.best_supported_rsa_hash().await?.flatten();
             session
                 .authenticate_publickey(
-                    &settings.user,
+                    settings.ssh_user(),
                     keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash),
                 )
                 .await?
@@ -272,7 +276,7 @@ async fn authenticate(
     };
     ensure!(
         auth.success(),
-        "SSH 认证失败，请检查用户名、认证方式和服务器登录策略"
+        "连接认证失败，请检查连接密码或 SSH 登录设置"
     );
     Ok(())
 }
@@ -291,7 +295,7 @@ mod tests {
             user: &str,
             password: &str,
         ) -> Result<russh::server::Auth> {
-            Ok(if user == "tester" && password == "test-only" {
+            Ok(if user == "landesk" && password == "test-only" {
                 russh::server::Auth::Accept
             } else {
                 russh::server::Auth::reject()

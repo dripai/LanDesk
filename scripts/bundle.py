@@ -7,8 +7,9 @@ import subprocess
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
-subprocess.run(["cargo", "build", "--release", "--locked"], cwd=root, check=True)
+subprocess.run(["cargo", "build", "--release", "--locked", "--bin", "landesk"], cwd=root, check=True)
 metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=root, text=True, encoding="utf-8"))
+version = next(package["version"] for package in metadata["packages"] if Path(package["manifest_path"]) == root / "Cargo.toml")
 target = Path(metadata["target_directory"]) / "release"
 bundle = target / "bundle" / "macos" / "LanDesk.app"
 macos = bundle / "Contents" / "MacOS"
@@ -19,8 +20,8 @@ info = {
     "CFBundleDisplayName": "LanDesk",
     "CFBundleIdentifier": "local.aiwork.LanDesk",
     "CFBundleExecutable": "LanDesk",
-    "CFBundleVersion": "2",
-    "CFBundleShortVersionString": "0.1.1",
+    "CFBundleVersion": version,
+    "CFBundleShortVersionString": version,
     "CFBundlePackageType": "APPL",
     "LSMinimumSystemVersion": "14.2",
     "NSHighResolutionCapable": True,

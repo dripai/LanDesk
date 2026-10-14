@@ -172,9 +172,9 @@ impl CaptureService {
                             }
                         }
                     }
-                    eprintln!("LanDesk capture cleanup started");
+                    crate::diagnostics::log("LanDesk capture cleanup started");
                     drop(capture);
-                    eprintln!("LanDesk capture cleanup finished");
+                    crate::diagnostics::log("LanDesk capture cleanup finished");
                 }
             })
             .context("无法启动采集工作线程")?;

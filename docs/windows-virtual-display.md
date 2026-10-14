@@ -1,55 +1,30 @@
 # Windows 内置虚拟显示器
 
-Windows 服务端附带的虚拟显示组件提供：一个 **1920×1080、60 Hz、SDR** 屏幕。安装包包含原始签名驱动和 `LanDeskDisplay.exe`，不需要另装 DevCon 或驱动控制面板。
+直接双击 `LanDeskServer.exe`，原生安装流程会一起处理显示器。驱动、配置模板和授权文件都在 EXE 内，不需要脚本或另外下载组件。完整操作见[Windows 服务端说明](windows-server.md)。
 
-固定设备实例为 `ROOT\LANDESKDISPLAY\0000`，使用持久化的 Windows 根枚举设备。重复安装不增加设备；关闭安装程序不移除设备。重启恢复及真实显示输出待实机验证。
+新配置提供一个 1920×1080、60 Hz、SDR 显示器，自建设备为 `ROOT\LANDESKDISPLAY\0000`。已有运行中的 MttVDD 直接复用，保留其配置、数量、分辨率和归属。只有全局配置而没有设备时保留原 VDDPATH/XML，在原配置下安装自建设备；没有 VDDPATH 使用上游默认 `C:\VirtualDisplayDriver`。已有设备未启动或配置缺失/无效会明确报错。
 
-## 安装与测试
+驱动采用上游 25.7.23 原始 DLL、INF 和 CAT。安装时校验 SHA-256、调用 WinVerifyTrust 检查目录签名，再由 Windows DiInstallDevice 验证并安装驱动；不导入证书或开启测试签名。需要管理员权限，Windows 提示需要重启时先重启。
 
-完整解压 `LanDeskServer-windows-x64`，在该目录打开**管理员 Windows PowerShell 5.1**：
+状态命令：
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-VirtualDisplay.ps1
+```text
+LanDeskServer.exe --status
 ```
 
-需要管理员权限安装显示驱动；命令中的 Bypass 仅用于运行这份本地脚本，不修改系统执行策略或驱动签名策略。脚本校验驱动 SHA-256 和目录签名，Windows 继续校验整个驱动包。校验失败明确报错，不导入证书或开启测试签名。
+`installed` / `started` 表示 LanDesk 自建设备的注册/启动状态；`devices` 列出系统当前的 MttVDD 实例、硬件 ID、启动状态与问题码；`available` 表示至少一个设备在运行。这些字段不证明已经捕获到画面。
 
-查看设备状态：
+卸载时可勾选“同时移除 LanDesk 虚拟显示器”，仅移除自建设备，保留其他设备、配置和共享 Driver Store 包。安装回滚只撤销本次创建的设备，不撤销复用设备。
 
-```powershell
-.\LanDeskDisplay.exe --status
+## 构建与验证
+
+```text
+cargo build --locked --release --bin LanDeskServer --bin LanDeskDisplay
+python scripts/bundle_windows_display.py --server-exe target/release/LanDeskServer.exe --output target/LanDeskServer-windows-x64
 ```
 
-`installed` 表示设备注册，`started` 表示 Windows 设备节点已启动，`problem` 是设备问题码。它们不代表捕获到画面。安装返回 `reboot_required` 时需要重启后再检查。
+发布包只需要服务端 EXE 和说明文件，输出目录必须不存在。`LanDeskDisplay.exe` 仍可作为开发时的设备诊断工具构建，不参与服务端安装流程。
 
-Win11 办公机先确认显示设置中多出一个 1920×1080 屏幕，重复安装不增加屏幕。Win10 mini 主机确认无物理显示器时设备启动、重启后设备仍存在。完整远控请安装同包的 `Install-LanDeskServer.ps1`，使用和验证范围见[Windows 服务端说明](windows-server.md)。单独安装显示组件不会启动远控服务。
+当前本机为 Mac，已完成 Windows 交叉构建。用户的 Win10 0.1.7/0.1.8 日志确认 MttVDD 设备启动且问题码为 0；0.1.10 用户在无实体屏幕、重启后未连接 RDP 的 mini 上通过 Web 登录并操作主屏，登录后的虚拟副屏也显示桌面和任务栏。选副屏不自动搬动应用窗口或改变主屏。尚未验证卸载虚拟驱动后能否继续无头输出；Win11、UAC、锁屏解锁等未全面验收。CI 增加原生服务、文件/注册表恢复、防火墙、快捷方式和目录签名测试，不安装显示设备；本轮未运行。
 
-卸载 LanDesk 创建的设备：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-VirtualDisplay.ps1 -Action Uninstall
-```
-
-卸载保留 `C:\VirtualDisplayDriver` 配置及 Windows Driver Store 中的共享驱动包，不移除其他设备。安装失败会尝试移除本次新建设备；回滚失败明确报错并保留配置，供卸载重试。Windows 已暂存的驱动包可能保留。
-
-## 约束
-
-- 此包只支持 Windows x64，目标为 Win10/Win11。签名信任、系统版本、显卡及驱动加载是否可用仍须目标机验证。
-- 驱动采用全局配置路径。检测到其他 MttVDD 设备、已有第三方配置目录或全局注册表配置时明确拒绝，不覆盖它们。
-- 单独使用本显示组件不改动账号、登录、RDP、SSH 或桌面会话逻辑。完整服务包另有开机服务、工作进程、内置 SSH、访问密码和托盘设置。
-- 上游驱动版本、哈希和授权见安装包 `driver/README.md`、`driver/LICENSE`。上游列出 Visual C++ 运行库依赖；加载失败时先查设备问题码及 `C:\Windows\INF\setupapi.dev.log`，不把安装返回成功视为驱动运行成功。
-
-## 构建与验证范围
-
-在 Windows x64 仓库目录执行：
-
-```powershell
-cargo build --locked --release --bin LanDeskDisplay --bin LanDeskServer
-python scripts/bundle_windows_display.py --exe target/release/LanDeskDisplay.exe --server-exe target/release/LanDeskServer.exe --output target/LanDeskServer-windows-x64
-```
-
-若配置了自定义 Cargo target-dir，替换命令中的可执行文件路径。输出目录必须不存在，避免混入旧包。
-
-当前已验证驱动文件与上游 ZIP 一致，Windows GNU 目标 `cargo check` / Clippy、37 项本机公共库测试、Rust 格式及 diff 检查通过；新增文本 UTF-8、Python 打包脚本语法及 XML 单屏配置检查通过。Windows 实机安装、卸载、重启持久性和无头输出尚未验证。已添加 Windows CI 构建、PowerShell 语法/签名检查及只读状态检查；工作流尚未运行；本机已交叉构建 Windows x64 服务端和显示组件 EXE，尚未在 Windows 执行。CI 不安装显示驱动。
-
-官方依据：[Microsoft IDD 模型](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/indirect-display-driver-model-overview)、[注册根枚举设备](https://learn.microsoft.com/en-us/previous-versions/windows/drivers/install/dif-registerdevice)、[DiInstallDevice](https://learn.microsoft.com/en-us/windows/win32/api/newdev/nf-newdev-diinstalldevice)、[限定单个 INF](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/ns-setupapi-sp_devinstall_params_w)。驱动和配置依据：[上游 25.7.23](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23)。
+官方依据：[Microsoft IDD](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/indirect-display-driver-model-overview)、[根枚举设备注册](https://learn.microsoft.com/en-us/previous-versions/windows/drivers/install/dif-registerdevice)、[DiInstallDevice](https://learn.microsoft.com/en-us/windows/win32/api/newdev/nf-newdev-diinstalldevice)、[单 INF 选择](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/ns-setupapi-sp_devinstall_params_w)、[上游 25.7.23](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23)、[该版本 VDDPATH/loadSettings](https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/25.7.23/Virtual%20Display%20Driver%20(HDR)/MttVDD/Driver.cpp)。
