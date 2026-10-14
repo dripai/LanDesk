@@ -110,12 +110,11 @@ test('headless reconnect can request a virtual display before receiving any fram
   assert.deepEqual(f.sockets[1].sent[0],{type:'hello',display:{kind:'virtual',width:1920,height:1080}});
 });
 
-test('Windows access key only travels in hello; Windows controls respect capabilities', () => {
+test('Windows connects without a second credential; controls respect capabilities', () => {
   const f = fixture();
-  f.node('access-key').value = 'test-secret';
   const socket = f.sockets[0];
   socket.onopen();
-  assert.deepEqual(socket.sent[0], {type:'hello', access_key:'test-secret'});
+  assert.deepEqual(socket.sent[0], {type:'hello'});
   socket.receive({type:'ready', width:1920, height:1080, native_width:1920, native_height:1080,
     requested_width:null, display_id:1, displays:[], capabilities:{os:'windows', virtual_display:true, files:false}});
   assert.equal(f.node('secure-attention').hidden, false);

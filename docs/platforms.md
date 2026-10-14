@@ -1,6 +1,6 @@
 # 平台接口与虚拟显示器
 
-Mac 桌面服务端已有实机验证。Windows 客户端通过 SSH 和浏览器连接；新增 SSH 终端模式直接连接 Linux 的 SSH 服务，不要求桌面或 LanDesk 服务端。Windows 已添加[控制台桌面服务端及内置虚拟显示器](windows-server.md)，采集、输入和开机服务均已接入，实机验证待完成；Linux 图形桌面服务仍待实现。网络传输不决定目标电脑有没有桌面。
+Mac 桌面服务端已有实机验证。Windows 客户端通过 SSH 和浏览器连接；新增 SSH 终端模式直接连接 Linux 的 SSH 服务，不要求桌面或 LanDesk 服务端。Windows 已添加[控制台桌面服务端及内置虚拟显示器](windows-server.md)，采集、输入、内置 SSH、开机服务和托盘均已接入，实机验证待完成；Linux 图形桌面服务仍待实现。网络传输不决定目标电脑有没有桌面。
 
 ## 代码边界
 
@@ -42,7 +42,7 @@ LANDESK_TEST_VIRTUAL_DISPLAY=1 LANDESK_TEST_VIRTUAL_CAPTURE=1 cargo test --locke
 
 普通 `cargo test` 不创建系统显示器。首帧测试需要测试进程已有屏幕录制权限；未授权时明确失败，不主动申请权限。测试用 `CGGetOnlineDisplayList` 检查移除；本机 `CGDisplayIsOnline` 对无效编号返回 `UINT32_MAX`，不可按非零视为仍在线。
 
-Windows 服务端已完成 x64 EXE 交叉构建及 Windows 目标 Clippy；这不代表 Windows 实机验证通过。当前 38 项本机 Rust 库测试、3 项平台契约测试、26 项网页测试通过，覆盖失败保留旧会话、显示设备持有、重连、无首帧时选择虚拟屏和访问密钥拒绝路径。Windows 测试包、具体边界及安装步骤见 [Windows 服务端说明](windows-server.md)。
+Windows 服务端已完成 x64 EXE 交叉构建及 Windows 目标 Clippy；这不代表 Windows 实机验证通过。当前 40 项本机 Rust 库测试、3 项平台契约测试、26 项网页测试通过，覆盖失败保留旧会话、显示设备持有、重连、无首帧时选择虚拟屏、内置 SSH 传输和内部凭据拒绝路径。Windows 测试包、具体边界及安装步骤见 [Windows 服务端说明](windows-server.md)。
 
 尚未验证：打包 App 下网页切换虚拟屏和真实远程键鼠、没有实体屏的 Mac 启动、合盖/锁屏/FileVault 登录阶段，以及其他 macOS 版本。虚拟屏不是独立用户会话，也不提供这些登录或电源行为的保证。
 

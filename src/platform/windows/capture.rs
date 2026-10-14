@@ -315,7 +315,7 @@ fn jpeg(monitor: &Monitor, width: u32, height: u32) -> Result<Vec<u8>> {
         let pixels =
             std::slice::from_raw_parts(bits.cast::<u8>(), width as usize * height as usize * 4);
         let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
-        for pixel in pixels.chunks_exact(4) {
+        for pixel in pixels.as_chunks::<4>().0 {
             rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
         }
         let mut result = Vec::new();

@@ -36,7 +36,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-VirtualDisplay
 
 - 此包只支持 Windows x64，目标为 Win10/Win11。签名信任、系统版本、显卡及驱动加载是否可用仍须目标机验证。
 - 驱动采用全局配置路径。检测到其他 MttVDD 设备、已有第三方配置目录或全局注册表配置时明确拒绝，不覆盖它们。
-- 单独使用本显示组件不改动账号、登录、RDP、SSH 或桌面会话逻辑。完整服务包另有开机服务、工作进程和访问密钥。
+- 单独使用本显示组件不改动账号、登录、RDP、SSH 或桌面会话逻辑。完整服务包另有开机服务、工作进程、内置 SSH、访问密码和托盘设置。
 - 上游驱动版本、哈希和授权见安装包 `driver/README.md`、`driver/LICENSE`。上游列出 Visual C++ 运行库依赖；加载失败时先查设备问题码及 `C:\Windows\INF\setupapi.dev.log`，不把安装返回成功视为驱动运行成功。
 
 ## 构建与验证范围

@@ -4,3 +4,4 @@ pub mod file_worker;
 pub mod platform;
 pub mod protocol;
 pub mod server;
+pub mod transport;

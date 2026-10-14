@@ -16,6 +16,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     env:
+      AWS_LC_SYS_PREBUILT_NASM: "1"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7

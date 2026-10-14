@@ -4,11 +4,7 @@ use super::{
     input::{NoFiles, WindowsControl},
 };
 use crate::{
-    capture::CaptureService,
-    file_worker::FileService,
-    platform::Shared,
-    protocol::PORT,
-    server::{self, AppState},
+    capture::CaptureService, file_worker::FileService, platform::Shared, server::AppState,
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -36,6 +32,8 @@ use windows_sys::Win32::{
 };
 
 const NAME: &str = "LanDeskServer";
+const TRANSPORT_NAME: &str = "LanDeskTransport";
+static TRANSPORT: AtomicBool = AtomicBool::new(false);
 const SAS_CONTROL: u32 = 128;
 static STOP: AtomicBool = AtomicBool::new(false);
 static SAS: AtomicBool = AtomicBool::new(false);
@@ -46,20 +44,24 @@ fn data_dir() -> Result<PathBuf> {
 }
 pub fn log(message: &str) {
     eprintln!("{message}");
-    if let Ok(directory) = data_dir() {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(directory.join("server.log"))
+    if let Ok(directory) = data_dir()
+        && let Ok(mut file) =
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(directory.join(if TRANSPORT.load(Ordering::Relaxed) {
+                    "transport.log"
+                } else {
+                    "server.log"
+                }))
+    {
+        // Bound disk use. Never log input, clipboard text, or access keys.
+        if file
+            .metadata()
+            .map(|m| m.len() < 2_000_000)
+            .unwrap_or(false)
         {
-            // Bound disk use. Never log input, clipboard text, or access keys.
-            if file
-                .metadata()
-                .map(|m| m.len() < 2_000_000)
-                .unwrap_or(false)
-            {
-                let _ = writeln!(file, "{:?} {message}", std::time::SystemTime::now());
-            }
+            let _ = writeln!(file, "{:?} {message}", std::time::SystemTime::now());
         }
     }
 }
@@ -338,7 +340,7 @@ unsafe extern "system" fn control(
             report(SERVICE_STOP_PENDING, 0);
         }
         SERVICE_CONTROL_INTERROGATE => {}
-        SAS_CONTROL => {
+        SAS_CONTROL if !TRANSPORT.load(Ordering::Relaxed) => {
             SAS.store(true, Ordering::Release);
         }
         _ => return ERROR_CALL_NOT_IMPLEMENTED,
@@ -382,9 +384,9 @@ fn send_sas(session: u32) -> Result<()> {
     }
     Ok(())
 }
-struct ServiceHandle(SC_HANDLE);
+pub(super) struct ServiceHandle(pub SC_HANDLE);
 impl ServiceHandle {
-    fn new(handle: SC_HANDLE) -> Result<Self> {
+    pub(super) fn new(handle: SC_HANDLE) -> Result<Self> {
         ensure!(
             !handle.is_null(),
             "打开 Windows 服务失败: {}",
@@ -417,7 +419,7 @@ fn serve() -> Result<()> {
     require_system()?;
     enable_privileges()?;
     // Validate configuration before telling SCM that service startup succeeded.
-    let _ = read_key()?;
+    let _ = read_transport()?;
     report(SERVICE_RUNNING, 0);
     let mut worker: Option<Worker> = None;
     let mut failures = 0;
@@ -448,12 +450,11 @@ fn serve() -> Result<()> {
                 }
             }
         }
-        if SAS.swap(false, Ordering::AcqRel) {
-            if let Some(worker) = &worker {
-                if let Err(error) = send_sas(worker.session) {
-                    log(&format!("SAS failed: {error:#}"));
-                }
-            }
+        if SAS.swap(false, Ordering::AcqRel)
+            && let Some(worker) = &worker
+            && let Err(error) = send_sas(worker.session)
+        {
+            log(&format!("SAS failed: {error:#}"));
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -461,15 +462,29 @@ fn serve() -> Result<()> {
     Ok(())
 }
 unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
-    let handle =
-        unsafe { RegisterServiceCtrlHandlerExW(wide(NAME).as_ptr(), Some(control), null()) };
+    let handle = unsafe {
+        RegisterServiceCtrlHandlerExW(
+            wide(if TRANSPORT.load(Ordering::Relaxed) {
+                TRANSPORT_NAME
+            } else {
+                NAME
+            })
+            .as_ptr(),
+            Some(control),
+            null(),
+        )
+    };
     if handle.is_null() {
         log("RegisterServiceCtrlHandler failed");
         return;
     }
     STATUS.store(handle, Ordering::Release);
     report(SERVICE_START_PENDING, 0);
-    match serve() {
+    match if TRANSPORT.load(Ordering::Relaxed) {
+        serve_transport()
+    } else {
+        serve()
+    } {
         Ok(()) => report(SERVICE_STOPPED, 0),
         Err(error) => {
             log(&format!("Service stopped: {error:#}"));
@@ -477,15 +492,60 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
         }
     }
 }
-fn read_key() -> Result<String> {
-    let key = std::fs::read_to_string(data_dir()?.join("access-key.txt"))
-        .context("缺少服务访问密钥，请重新安装服务端")?;
-    let key = key.trim().to_owned();
-    ensure!(
-        key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
-        "服务访问密钥格式无效"
-    );
-    Ok(key)
+fn transport_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("transport").join("config.json"))
+}
+fn read_transport() -> Result<crate::transport::Config> {
+    crate::transport::Config::read(&transport_path()?)
+}
+fn serve_transport() -> Result<()> {
+    let config = read_transport()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port))
+            .await
+            .context("内置 SSH 端口被占用")?;
+        log(&format!("SSH ready on port {}", config.port));
+        report(SERVICE_RUNNING, 0);
+        crate::transport::run(
+            listener,
+            config,
+            Arc::new(|| {
+                Box::pin(async {
+                    Ok(Box::new(super::pipe::connect().await?)
+                        as Box<dyn crate::transport::StreamIo>)
+                })
+            }),
+            async {
+                while !STOP.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
+        )
+        .await
+    });
+    runtime.shutdown_timeout(Duration::from_secs(3));
+    result
+}
+fn configure_transport() -> Result<()> {
+    use std::io::Read;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Setup {
+        password: String,
+        port: u16,
+    }
+    let mut text = zeroize::Zeroizing::new(String::new());
+    std::io::stdin().take(8193).read_to_string(&mut text)?;
+    ensure!(text.len() <= 8192, "安装输入过长");
+    let setup: Setup = serde_json::from_str(&text).context("安装输入无效")?;
+    let password = zeroize::Zeroizing::new(setup.password);
+    let config = crate::transport::Config::create(&password, setup.port)?;
+    config.write_new(&transport_path()?)?;
+    println!("SSH host fingerprint: {}", config.fingerprint()?);
+    Ok(())
 }
 fn worker(stop_name: &str) -> Result<()> {
     require_system_console()?;
@@ -503,17 +563,15 @@ fn worker(stop_name: &str) -> Result<()> {
         unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) },
         "设置 DPI 感知",
     )?;
-    let key = read_key()?;
+    let key = read_transport()?.backend_key;
     let shared = Arc::new(Shared::default());
     let native = Arc::new(WindowsControl::new(shared.clone(), key)?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", PORT)).await.context("17890 端口被占用")?;
         let state = AppState { native, shared: shared.clone(), capture: CaptureService::new(|| Box::new(WindowsCapture::default()))?, files: FileService::new(NoFiles) };
-        log(&format!("Desktop HTTP ready on 127.0.0.1:{PORT}"));
-        let server = server::run(listener, state);
+        let server = super::pipe::serve(state);
         tokio::pin!(server);
         loop {
             tokio::select! {
@@ -534,8 +592,13 @@ fn worker(stop_name: &str) -> Result<()> {
 pub fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let result = match args.as_slice() {
-        [mode] if mode == "--service" => {
-            let mut name = wide(NAME);
+        [mode] if mode == "--service" || mode == "--transport-service" => {
+            TRANSPORT.store(mode == "--transport-service", Ordering::Relaxed);
+            let mut name = wide(if TRANSPORT.load(Ordering::Relaxed) {
+                TRANSPORT_NAME
+            } else {
+                NAME
+            });
             let table = [
                 SERVICE_TABLE_ENTRYW {
                     lpServiceName: name.as_mut_ptr(),
@@ -552,8 +615,35 @@ pub fn run() -> Result<()> {
             )
         }
         [mode, stop] if mode == "--worker" => worker(stop),
+        [mode] if mode == "--configure-transport" => configure_transport(),
+        [mode] if mode == "--desktop-check" => {
+            let config = read_transport()?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(super::pipe::health(&config.backend_key))
+        }
+        [mode] if mode == "--transport-info" => {
+            let config = read_transport()?;
+            println!(
+                "{}",
+                serde_json::json!({"port":config.port,"user":crate::transport::USER,"fingerprint":config.fingerprint()?})
+            );
+            Ok(())
+        }
+        [mode] if mode == "--start-background" => super::ui::start_background(),
+        [] => super::ui::run(false),
+        [mode] if mode == "--settings" => super::ui::run(true),
+        [mode] if mode == "--startup-ui" => super::ui::run(false),
+        [mode, automatic, minimized] if mode == "--set-startup" => {
+            ensure!(
+                matches!(automatic.as_str(), "0" | "1") && matches!(minimized.as_str(), "0" | "1"),
+                "启动参数无效"
+            );
+            super::ui::set_startup(automatic == "1", minimized == "1")
+        }
         _ => {
-            bail!("请运行 Install-LanDeskServer.ps1 安装服务；不支持双击运行或从 RDP 会话手动启动")
+            bail!("参数无效；请先运行 Install-LanDeskServer.ps1 安装，再打开 LanDeskServer 设置")
         }
     };
     if let Err(error) = &result {

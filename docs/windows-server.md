@@ -1,64 +1,84 @@
-# Windows 服务端测试包
+# Windows 服务端 0.1.2 测试包
 
-已实现 Windows 控制台桌面采集、鼠标键盘、中文输入、文字剪贴板读取、Ctrl+Alt+Delete、自动启动服务，以及配套 1920×1080 / 60 Hz 虚拟显示驱动。网页继续使用悬浮工具条，通过 LanDeskClient 的 SSH 隧道连接。
+Windows 被控端现在自带 SSH 通信、虚拟显示器、桌面采集和键鼠控制，不需要安装系统 OpenSSH，也不需要先连接 RDP。用现有 LanDeskClient 的桌面模式连接，只输入一次 LanDesk 访问密码。
 
-代码路径覆盖未登录、锁屏和登录后的控制台桌面；这些场景、UAC 和 Win10 无头输出仍待实机验证。当前环境是 Mac，不能将交叉编译通过视为 Windows 远控已验证。
+新增设置窗口和托盘，提供“开机启动”和“启动时最小化到托盘”。当前环境是 Mac：协议测试和 Windows 交叉构建可以在本机完成，Windows 安装、托盘、无头画面、登录/锁屏/UAC 及真实键鼠仍待实机验收。
 
-## 安装
+## 安装与连接
 
-目标系统为 Windows 10 / Windows 11 x64，使用管理员 Windows PowerShell 5.1。OpenSSH 系统组件要求 Windows 10 1809 或以上；完整驱动兼容性仍须目标系统验证。完整解压 `LanDeskServer-windows-x64.zip`，在解压目录执行：
+目标为 Windows 10 / Windows 11 x64。完整解压测试包，在该目录打开**管理员 Windows PowerShell 5.1**：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LanDeskServer.ps1
 ```
 
-如果被控机尚未启用 OpenSSH Server，需要安装并启动 SSH 传输组件时执行：
+安装时输入 LanDesk 访问密码；留空会生成密码并仅显示一次，需自行保存。密码以 Argon2id 散列保存，无法通过状态命令恢复明文。它与 Windows 登录密码无关。
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LanDeskServer.ps1 -InstallOpenSSH
-```
+安装会配置两个后台服务、虚拟显示器和 TCP 2222 的程序专用入站防火墙规则，适用于所有网络配置文件；不会修改系统 SSH、账号、RDP 或自动登录。可用 `-Port 2223` 在首次安装时指定其他端口。驱动提示需要重启时先重启。已有版本先执行 `-Action Uninstall` 再安装；新版本的密码和设备身份会保留，原版本的 Web 密钥不再使用。
 
-`-InstallOpenSSH` 使用 Windows 可选功能，需要 Windows Update 或配置的组件来源。Windows 安装该组件会创建 TCP 22 防火墙规则；已有规则保持不变，缺失时脚本只补充专用/域网络的同子网规则。不改现有 SSH 登录策略、账号密码或 RDP 配置。不加此参数时不改 SSH 和防火墙。已安装 LanDesk 后补 SSH，请按下方微软 OpenSSH 文档操作。
+在办公机 LanDeskClient 填写：
 
-安装完成会显示 **Web 访问密钥**，请保存。它与 Windows 登录密码、SSH 密码是三项不同的凭据。服务端密钥只保存在 `%ProgramData%\LanDeskServer\access-key.txt`，目录仅 SYSTEM 和管理员可访问；不会写入 URL、浏览器存储或日志。
+| 设置 | 值 |
+|---|---|
+| 模式 | 桌面 |
+| 主机 | mini 的 IP |
+| SSH 端口 | 2222，或安装时指定的端口 |
+| 用户名 | `landesk`，产品固定名称，无需创建 Windows 用户 |
+| 认证 | 密码 |
+| 密码 | 安装时设置或生成的 LanDesk 密码 |
 
-服务安装到 `%ProgramFiles%\LanDeskServer`，以 LocalSystem 自动启动。安装会检查签名驱动、创建虚拟显示器，并验证桌面工作进程的 HTTP 入口已启动；这一步不证明能采集出画面。驱动要求重启时，重启后再测试。
+网页自动连接，不再输入 Web 密钥。当前 Windows 界面显示什么，网页就显示什么；未登录时在 Windows 自己的登录界面操作。服务不自动登录、不接管 RDP 会话，也不切换系统用户。
 
-为了支持登录界面的 Ctrl+Alt+Delete，安装时若 `SoftwareSASGeneration` 策略不存在，会设置为 `1`（只允许服务），卸载时移除自己创建且未被修改的值。已有禁止策略会明确阻止安装；不覆盖组织策略，不关闭 UAC，不设置自动登录。驱动细节和运行库要求见安装包 `virtual-display.md` 与 `driver/README.md`。
+客户端首次连接沿用现有主机密钥记录机制，之后设备密钥变化会拒绝连接。状态命令可显示 SSH 指纹，方便核对。跨公网仍需可达的地址/端口或已有组网，本版本不含 NAT 穿透和中继。
 
-## 连接和验收
+## 启动与托盘
 
-1. 在办公机 LanDeskClient 新建 mini 主机连接，选择 **桌面** 模式，填写 mini 的 IP、SSH 端口、Windows SSH 用户名和密码/密钥。
-2. 打开网页后输入安装时生成的 Web 访问密钥。此时应看到控制台当前画面；未登录时由用户在 Windows 登录界面输入自己的账号密码。
-3. 测试鼠标移动/左右键、滚轮、中文输入、Ctrl+A/C/V、拖动、全屏和采集分辨率。文本粘贴通过 Unicode 输入；应用必须支持 Windows Unicode 输入事件。
-4. 用工具条的 Ctrl+Alt+Delete 按钮进入 Windows 安全界面，测试锁屏、解锁、UAC 提示和重新登录。
-5. mini 保持无实体显示器，重启后直接用 LanDeskClient 连接；无需先启动 RDP。服务跟随物理控制台，不接管已有 RDP 会话，既有 RDP 桌面不一定是网页看到的桌面。
-6. 断开网页再连接，检查按键没有卡住。切换 Windows 用户导致控制台会话编号变化时，工作进程会重建，网页需点重新连接；同一会话内锁屏/解锁会重新绑定输入桌面。
+安装完成会打开设置窗口；以后从开始菜单 **LanDeskServer** 或托盘“设置”打开。
 
-办公机若也装服务端，必须从另一台电脑连接测试：服务端与 LanDeskClient 本地网关均使用 17890，不能在同一 Windows 机器同时运行。办公机控制 mini 时只安装/运行 LanDeskClient，mini 安装服务端。
+- **开机启动**：默认开启。后台远控服务随 Windows 启动，无需用户登录；用户登录后启动托盘。取消后改为手动启动，不立即中断当前服务或远控连接。
+- **启动时最小化到托盘**：默认开启。普通启动和登录自启时不弹设置窗口；从开始菜单“设置”打开时仍显示窗口。关闭或最小化窗口会收进托盘。
 
-当前 Windows 不提供文件面板、图片剪贴板、音频、独立多用户桌面或 BIOS/BitLocker 启动前画面。文件面板在 Windows 会话中隐藏，服务不会以 SYSTEM 身份对外提供文件管理。采集采用 GDI → JPEG，最高约 10 帧/秒；驱动的 60 Hz 不等于网页传输 60 帧/秒，不含硬件视频编码。
+保存系统启动设置时，Windows 可能弹出管理员授权。设置保存失败会尝试恢复旧值，并明确报告错误。两个选项为整机设置。
 
-## 状态与卸载
+退出托盘只关闭管理界面，后台远控继续运行。若关闭了开机启动，重启后手动打开已安装的服务端会启动后台服务（需要管理员授权）。托盘属于登录后的桌面；未登录时没有托盘，也不影响后台服务。
+
+## 建议验收顺序
+
+1. 首次连接检查画面、鼠标移动/左右键/滚轮、中文输入、Ctrl+A/C/V、拖动和全屏。Windows 文本粘贴通过 Unicode 输入，目标应用需支持此输入方式。
+2. 点击工具条 Ctrl+Alt+Delete，测试 Windows 登录、锁屏/解锁、UAC 提示及注销。只在 Windows 界面输入 Windows 密码。
+3. mini 不接实体显示器，重启后直接连接，无需先用 RDP。服务采集物理控制台，网页与已有 RDP 会话可能是不同桌面。
+4. 关闭网页再连接，确认按键没有卡住；切换用户使控制台会话编号变化时，工作进程会重建，网页需重新连接。
+5. 勾选/取消两个启动选项，保存后重启验证：后台服务是否自启、登录后的窗口是否进入托盘。关闭窗口、退出托盘时确认远控继续工作。
+
+Windows 桌面服务使用受 ACL 保护的本机命名管道，不再监听内部 TCP 端口。默认配置不会与同机 LanDeskClient 的 17890 网关冲突；网页仍由客户端打开。
+
+当前 Windows 不提供文件面板、图片剪贴板、音频、独立多用户桌面或 BIOS/BitLocker 启动前画面。GDI → JPEG 采集最高约 10 帧/秒，虚拟显示驱动 60 Hz 不等于网页 60 帧/秒。内置 SSH 仅承载 LanDesk 桌面，不提供 Shell、SFTP 或任意端口转发；Linux 终端模式仍连接 Linux 原有 SSH 服务。
+
+## 状态、停止与卸载
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LanDeskServer.ps1 -Action Status
-# 需要重新查看访问密钥时，仍须管理员权限：
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LanDeskServer.ps1 -Action Status -ShowAccessKey
-# 停止并移除服务，保留访问密钥、日志、虚拟显示器及 SSH：
+# 停止后台服务，不只是退出托盘：
+Stop-Service LanDeskServer
+Stop-Service LanDeskTransport
+# 移除两个服务、托盘自启、开始菜单入口和专用防火墙规则：
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-LanDeskServer.ps1 -Action Uninstall
-# 另行移除 LanDesk 虚拟显示设备：
+# 另行移除虚拟显示设备：
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-VirtualDisplay.ps1 -Action Uninstall
 ```
 
-服务日志：`%ProgramData%\LanDeskServer\server.log`，最多 2 MB。驱动加载问题查看 `C:\Windows\INF\setupapi.dev.log` 和 `LanDeskDisplay.exe --status`。安装失败会回滚本次服务、策略和新建显示设备；回滚失败会明确报告并保留现场。共享 Driver Store、驱动配置、访问密钥和日志可能保留。可选 SSH 安装失败会单独报告，已完成的 LanDesk 安装和 Windows 组件变更会保留。
+卸载保留访问密码散列、设备身份密钥、日志、托盘偏好和虚拟显示器；不修改系统 OpenSSH。重装继续使用原 SSH 端口和凭据。
 
-## 实现依据与验证边界
+程序位于 `%ProgramFiles%\LanDeskServer`；配置为 `%ProgramData%\LanDeskServer\transport\config.json`，仅 SYSTEM、管理员及通信服务账号可读，普通用户不能读取。日志 `server.log` / `transport.log` 各最多 2 MB，不记录输入或密码。驱动排查见 `C:\Windows\INF\setupapi.dev.log` 和 `LanDeskDisplay.exe --status`。
 
-- 服务用 [CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw) 和带控制台 SessionId 的 SYSTEM 主令牌启动工作进程，避免在隔离的 Session 0 里采集。目标通过 [WTSGetActiveConsoleSessionId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-wtsgetactiveconsolesessionid) 获取；工作进程由 Job Object 管理。
-- 采集使用微软的 [GDI 采集方式](https://learn.microsoft.com/en-us/windows/win32/gdi/capturing-an-image)，通过 [OpenInputDesktop](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-openinputdesktop) / [SetThreadDesktop](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setthreaddesktop) 绑定当前桌面。采集/输入线程不创建窗口或钩子。
-- 输入采用 [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)，受 Windows 完整性和桌面权限约束；安全注意序列由服务调用 [SendSAS](https://learn.microsoft.com/en-us/windows/win32/api/sas/nf-sas-sendsas)，不伪造普通按键组合。
-- 传输采用系统 [OpenSSH Server](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse)，桌面 HTTP 仅绑定 `127.0.0.1:17890`，WebSocket 校验 Origin、Host 和独立随机访问密钥后才启动采集及输入。
-- Rust Windows API 绑定为项目锁定的 `windows-sys 0.61.2`。本机测试包通过官方 LLVM-MinGW 和 Rust `x86_64-pc-windows-gnullvm` 目标交叉构建；Windows CI 用 MSVC 构建。尚未在 Windows 实机执行，待测试包验收。
+安装失败会尝试回滚此次服务、启动入口、规则、策略和新建设备；回滚失败明确报告。配置、日志和 Windows 已暂存的驱动文件可能保留。为了支持 Ctrl+Alt+Delete，若 `SoftwareSASGeneration` 不存在，安装设置为允许服务调用的 `1`，卸载移除自己创建且未被修改的值；已有组织禁止策略不会被覆盖。
 
-2026-10-14 本机验证：38 项 Rust 库测试、3 项平台契约测试、26 项网页测试通过；Windows 目标 Clippy、Mac Clippy、Rust 格式、UTF-8、diff 及安装脚本语法检查通过。Windows x64 两个 EXE 和 Windows 库测试程序均已完成交叉链接，库测试程序尚未在 Windows 执行。检查过服务端 EXE 的 DLL 导入，无额外 LLVM/GCC 运行库 DLL 依赖；仍需 Windows 系统自带的 DLL。这些结果不替代驱动安装、真实采集、登录切换和键鼠实测。
+## 实现与验证
+
+- 通信使用项目锁定的 [russh 0.64.1](https://github.com/Eugeny/russh)，密码使用 [Argon2 0.6.0](https://docs.rs/argon2/0.6.0/argon2/)。`LanDeskTransport` 以 [LocalService](https://learn.microsoft.com/en-us/windows/win32/services/localservice-account) 运行，只转发桌面 HTTP/WebSocket。内部连接采用 [Windows 命名管道权限](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)，拒绝远程管道客户端，并先验证管道所有者为 SYSTEM 再注入随机凭据。网页、URL、浏览器存储和客户端均不接触该凭据。
+- `LanDeskServer` 以 SYSTEM 运行，通过 [CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw) 在 [活动控制台会话](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-wtsgetactiveconsolesessionid) 启动采集/输入进程；SCM 依赖关系负责先启动通信服务。两个服务和托盘使用同一个 EXE 的不同启动模式。
+- 采集为 [GDI](https://learn.microsoft.com/en-us/windows/win32/gdi/capturing-an-image)，采集和输入线程通过 [OpenInputDesktop](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-openinputdesktop) / [SetThreadDesktop](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setthreaddesktop) 跟随当前桌面，使用 [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) / [SendSAS](https://learn.microsoft.com/en-us/windows/win32/api/sas/nf-sas-sendsas)。不实现 Windows 登录逻辑。
+- 设置窗口使用 Win32 和 [Shell_NotifyIcon](https://learn.microsoft.com/en-us/windows/win32/shell/notification-area)，开机选项调用 [ChangeServiceConfig](https://learn.microsoft.com/en-us/windows/win32/services/changing-a-service-configuration)，登录托盘通过 HKLM Run 启动。Windows API 绑定为 `windows-sys 0.61.2`。
+- 本机测试包通过官方 LLVM-MinGW 和 Rust `x86_64-pc-windows-gnullvm` 交叉构建；加密依赖采用 [aws-lc-sys 官方预编译 NASM 对象](https://github.com/aws/aws-lc-rs/tree/main/aws-lc-sys#use-of-prebuilt-nasm-objects)，未关闭加密或汇编加速。Windows CI 使用 MSVC，本轮尚未运行。
+
+2026-10-14 本机验证：40 项 Rust 库测试、3 项平台契约测试通过，包括真实 SSH 密码认证、HTTP/WebSocket 转发、转发目标拒绝、断线释放、身份持久化和内部 HTTP 认证。网页回归、静态检查、格式、UTF-8、安装脚本语法和 Windows 构建结果见测试包 BUILD.txt。这些检查不等于 Windows 服务安装、托盘、驱动、无头桌面及登录界面实机验证。

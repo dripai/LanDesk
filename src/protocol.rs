@@ -9,8 +9,6 @@ pub const UPLOAD_CHUNK_BYTES: usize = 65_536;
 pub enum ClientMessage {
     Hello {
         #[serde(default)]
-        access_key: Option<String>,
-        #[serde(default)]
         display: Option<crate::platform::DisplayTarget>,
     },
     Heartbeat,

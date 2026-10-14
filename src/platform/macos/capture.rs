@@ -111,7 +111,7 @@ fn bgra_to_rgb(data: &[u8], width: usize, height: usize, stride: usize) -> Resul
     ensure!(length <= MAX_RGB_BYTES, "画面尺寸超过 1600 万像素上限");
     let mut rgb = Vec::with_capacity(length);
     for y in 0..height {
-        for pixel in data[y * stride..y * stride + row].chunks_exact(4) {
+        for pixel in data[y * stride..y * stride + row].as_chunks::<4>().0 {
             rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
         }
     }
@@ -297,14 +297,13 @@ impl CaptureBackend for MacCaptureBackend {
             }
         };
         let mut capture = Capture::start(id)?;
-        if spec.is_some() {
-            if let Some(previous) = self.virtuals.current_id() {
-                if previous != capture.display_id {
-                    // The old stream still owns this display until the caller
-                    // swaps streams; omit the device that is about to disappear.
-                    capture.displays.retain(|display| display["id"] != previous);
-                }
-            }
+        if spec.is_some()
+            && let Some(previous) = self.virtuals.current_id()
+            && previous != capture.display_id
+        {
+            // The old stream still owns this display until the caller
+            // swaps streams; omit the device that is about to disappear.
+            capture.displays.retain(|display| display["id"] != previous);
         }
         for display in &mut capture.displays {
             let id = display["id"].as_u64().unwrap_or(0) as u32;

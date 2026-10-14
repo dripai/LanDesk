@@ -390,10 +390,10 @@ impl WindowsControl {
 impl Drop for WindowsControl {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
-        if let Ok(worker) = self.worker.get_mut() {
-            if let Some(worker) = worker.take() {
-                let _ = worker.join();
-            }
+        if let Ok(worker) = self.worker.get_mut()
+            && let Some(worker) = worker.take()
+        {
+            let _ = worker.join();
         }
     }
 }
@@ -417,7 +417,10 @@ impl DesktopControl for WindowsControl {
             .fold(difference, |diff, (i, byte)| {
                 diff | usize::from(byte ^ supplied.get(i).copied().unwrap_or(0))
             });
-        ensure!(difference == 0, "请输入安装 Windows 服务端时生成的访问密钥");
+        ensure!(
+            difference == 0,
+            "内部通信认证失败，请通过 LanDeskClient 连接"
+        );
         Ok(())
     }
     fn supports_files(&self) -> bool {

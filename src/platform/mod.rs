@@ -118,10 +118,10 @@ impl VirtualDisplays {
     }
     pub fn prepare(&self, spec: VirtualDisplaySpec) -> Result<std::rc::Rc<dyn VirtualDisplay>> {
         let spec = spec.validate()?;
-        if let Some((current, display)) = &self.current {
-            if *current == spec {
-                return Ok(display.clone());
-            }
+        if let Some((current, display)) = &self.current
+            && *current == spec
+        {
+            return Ok(display.clone());
         }
         self.provider.create(spec)
     }

@@ -144,14 +144,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
             "/",
-            get(|State(state): State<AppState>| async move {
-                let mut html = include_str!("../web/index.html").to_owned();
-                if state.native.requires_access_key() {
-                    html =
-                        html.replace("id=\"access-key-field\" hidden", "id=\"access-key-field\"");
-                }
-                page_headers(Html(html).into_response())
-            }),
+            get(|| async { page_headers(Html(include_str!("../web/index.html")).into_response()) }),
         )
         .route(
             "/app.js",
@@ -238,7 +231,33 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route("/ws", get(upgrade))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            transport_auth,
+        ))
         .with_state(state)
+}
+
+async fn transport_auth(
+    State(state): State<AppState>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if state.native.requires_access_key()
+        && state
+            .native
+            .authorize(
+                request
+                    .headers()
+                    .get(crate::transport::AUTH_HEADER)
+                    .and_then(|v| v.to_str().ok()),
+            )
+            .is_err()
+    {
+        return (StatusCode::UNAUTHORIZED, "请通过 LanDeskClient 连接").into_response();
+    }
+    request.headers_mut().remove(crate::transport::AUTH_HEADER);
+    next.run(request).await
 }
 
 async fn upgrade(
@@ -299,15 +318,9 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     let Message::Text(text) = message else {
         bail!("请先建立会话");
     };
-    let ClientMessage::Hello {
-        display,
-        access_key,
-    } = serde_json::from_str(&text)?
-    else {
+    let ClientMessage::Hello { display } = serde_json::from_str(&text)? else {
         bail!("请先建立会话");
     };
-    state.native.authorize(access_key.as_deref())?;
-    drop(access_key);
     state
         .shared
         .active
@@ -598,23 +611,29 @@ mod access_tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, router(state)).await.unwrap();
         });
-        for (hello, expected, active) in [
-            (serde_json::json!({"type":"hello"}), "access denied", false),
-            (
-                serde_json::json!({"type":"hello","access_key":"wrong"}),
-                "access denied",
-                true,
-            ),
-            (
-                serde_json::json!({"type":"hello","access_key":"test-key"}),
-                "已有一个连接",
-                true,
-            ),
-            (
-                serde_json::json!({"type":"hello","access_key":"test-key"}),
-                "permission check reached",
-                false,
-            ),
+        // The local desktop socket must not expose either assets or control
+        // without the transport's private credential.
+        for path in ["/", "/app.js", "/ws"] {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:17890\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+        }
+        for (key, expected, active) in [
+            (None, "access denied", false),
+            (Some("wrong"), "access denied", true),
+            (Some("test-key"), "已有一个连接", true),
+            (Some("test-key"), "permission check reached", false),
         ] {
             shared.active.store(active, Ordering::Release);
             let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
@@ -624,8 +643,24 @@ mod access_tests {
             request
                 .headers_mut()
                 .insert("origin", "http://127.0.0.1:17890".parse().unwrap());
-            let (mut ws, _) = connect_async(request).await.unwrap();
-            ws.send(WsMessage::Text(hello.to_string().into()))
+            if let Some(key) = key {
+                request
+                    .headers_mut()
+                    .insert(crate::transport::AUTH_HEADER, key.parse().unwrap());
+            }
+            let result = connect_async(request).await;
+            if expected == "access denied" {
+                let Err(tokio_tungstenite::tungstenite::Error::Http(response)) = result else {
+                    panic!("must reject before upgrade");
+                };
+                assert_eq!(response.status(), 401);
+                assert_eq!(shared.active.load(Ordering::Acquire), active);
+                assert_eq!(native.permissions.load(Ordering::SeqCst), 0);
+                assert_eq!(native.restored.load(Ordering::SeqCst), 0);
+                continue;
+            }
+            let (mut ws, _) = result.unwrap();
+            ws.send(WsMessage::Text(r#"{"type":"hello"}"#.into()))
                 .await
                 .unwrap();
             let response = tokio::time::timeout(Duration::from_secs(2), ws.next())

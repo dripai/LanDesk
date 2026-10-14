@@ -119,7 +119,6 @@ function connect() {
   const connection = socket;
   socket.onopen=()=>{
     const hello = display ? {type:'hello',display} : {type:'hello'};
-    if ($('access-key').value) hello.access_key = $('access-key').value.trim();
     send(hello);
   };
   socket.onmessage=event=>{
