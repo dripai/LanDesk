@@ -8,30 +8,14 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 use landesk_client::{
+    connections::{ConnectionManager, Notification},
     credentials::{self, SavedPassword},
-    gateway,
     settings::{Authentication, ConnectionMode, Connections, Settings},
-    tunnel::{self, Event},
 };
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, mpsc},
-    time::Duration,
-};
-use tokio::{runtime::Runtime, sync::oneshot};
+use std::{path::PathBuf, sync::Arc, time::Duration};
+use tokio::runtime::Runtime;
 use zeroize::Zeroizing;
 
-struct Session {
-    cancel: Option<oneshot::Sender<()>>,
-    busy: bool,
-    ready: bool,
-    status: String,
-}
-enum Update {
-    Session(String, Event),
-    Gateway(String),
-}
 struct Client {
     name: Entity<InputState>,
     host: Entity<InputState>,
@@ -48,12 +32,7 @@ struct Client {
     remember_password: bool,
     settings_path: Option<PathBuf>,
     startup_error: Option<String>,
-    runtime: Arc<Runtime>,
-    events: mpsc::Receiver<Update>,
-    sender: mpsc::Sender<Update>,
-    sessions: HashMap<String, Session>,
-    routes: gateway::Routes,
-    gateway_stop: Option<oneshot::Sender<()>>,
+    connections: ConnectionManager,
     quitting: bool,
     status: String,
     tray: Option<Tray>,
@@ -92,29 +71,11 @@ impl Client {
             Err(error) => (None, Some(format!("托盘初始化失败：{error:#}"))),
         };
         startup_error = startup_error.or(tray_error);
-        let (sender, events) = mpsc::channel();
-        let routes = gateway::Routes::default();
-        let mut gateway_stop = None;
-        if startup_error.is_none() {
-            match runtime.block_on(tokio::net::TcpListener::bind(("127.0.0.1", gateway::PORT))) {
-                Ok(listener) => {
-                    let (stop, cancelled) = oneshot::channel();
-                    gateway_stop = Some(stop);
-                    let routes = routes.clone();
-                    let events = sender.clone();
-                    runtime.spawn(async move {
-                        if let Err(error) = gateway::run(listener, routes, cancelled).await {
-                            let _ =
-                                events.send(Update::Gateway(format!("网页入口已停止：{error:#}")));
-                        }
-                    });
-                }
-                Err(error) => {
-                    startup_error = Some(format!(
-                        "本机 17890 端口不可用，请关闭旧客户端或连接脚本：{error}"
-                    ))
-                }
-            }
+        let mut connections = ConnectionManager::new(runtime);
+        if startup_error.is_none()
+            && let Err(error) = connections.start_gateway()
+        {
+            startup_error = Some(format!("{error:#}"));
         }
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -188,12 +149,7 @@ impl Client {
             config,
             settings_path,
             startup_error,
-            runtime,
-            events,
-            sender,
-            sessions: HashMap::new(),
-            routes,
-            gateway_stop,
+            connections,
             quitting: false,
             tray,
         }
@@ -201,8 +157,8 @@ impl Client {
     fn current_busy(&self) -> bool {
         self.selected
             .as_ref()
-            .and_then(|id| self.sessions.get(id))
-            .is_some_and(|s| s.busy)
+            .and_then(|id| self.connections.get(id))
+            .is_some_and(|s| s.is_busy())
     }
     fn select(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let profile = id
@@ -290,6 +246,7 @@ impl Client {
         anyhow::bail!("请输入连接密码")
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.current_busy(), "请先断开连接再修改配置");
         let value = self.read_settings(cx)?;
         let saved = if self.remember_password && !self.use_key {
             Some(SavedPassword::new(&value, &self.password_for(&value, cx)?))
@@ -314,7 +271,7 @@ impl Client {
         if let Some(old) = &self.selected
             && old != &id
         {
-            self.sessions.remove(old);
+            self.connections.forget(old)?;
         }
         self.config = config;
         self.selected = Some(id);
@@ -357,63 +314,27 @@ impl Client {
         }
         self.password
             .update(cx, |state, cx| state.set_value("", window, cx));
-        let (cancel, cancelled) = oneshot::channel();
-        self.sessions.insert(
-            id.clone(),
-            Session {
-                cancel: Some(cancel),
-                busy: true,
-                ready: false,
-                status: "正在连接…".into(),
-            },
-        );
-        self.status.clear();
-        let events = self.sender.clone();
-        let routes = self.routes.clone();
         let known_hosts = self
             .settings_path
             .as_ref()
             .unwrap()
             .with_file_name("known_hosts");
-        // Bridge per-session events without allowing one session to overwrite another.
-        self.runtime.spawn(async move {
-            let (tx, rx) = mpsc::channel();
-            let task = tunnel::run(settings, password, known_hosts, tx, cancelled, routes);
-            tokio::pin!(task);
-            let mut tick = tokio::time::interval(Duration::from_millis(30));
-            loop {
-                tokio::select! {
-                    result = &mut task => {
-                        while let Ok(event) = rx.try_recv() { let _ = events.send(Update::Session(id.clone(), event)); }
-                        let _ = events.send(Update::Session(id, Event::Stopped(result))); break;
-                    }
-                    _ = tick.tick() => { while let Ok(event) = rx.try_recv() { let _ = events.send(Update::Session(id.clone(), event)); } }
-                }
-            }
-        });
+        match self.connections.connect(settings, password, known_hosts) {
+            Ok(()) => self.status.clear(),
+            Err(error) => self.status = format!("{error:#}"),
+        }
         cx.notify();
     }
     fn disconnect_id(&mut self, id: &str) {
-        if let Some(session) = self.sessions.get_mut(id) {
-            if let Some(cancel) = session.cancel.take() {
-                let _ = cancel.send(());
-                session.status = "正在断开…".into();
-            }
-            session.ready = false;
-        }
+        self.connections.disconnect(id);
     }
     fn disconnect_all(&mut self) {
-        for id in self.sessions.keys().cloned().collect::<Vec<_>>() {
-            self.disconnect_id(&id);
-        }
+        self.connections.disconnect_all();
     }
     fn quit(&mut self, cx: &mut Context<Self>) {
         self.quitting = true;
-        self.disconnect_all();
-        if !self.sessions.values().any(|s| s.busy) {
-            if let Some(stop) = self.gateway_stop.take() {
-                let _ = stop.send(());
-            }
+        self.connections.shutdown();
+        if self.connections.is_idle() {
             cx.quit();
         }
     }
@@ -433,7 +354,11 @@ impl Client {
         ) {
             Ok(()) => {
                 self.config = config;
-                self.sessions.remove(&id);
+                if let Err(error) = self.connections.forget(&id) {
+                    self.status = format!("{error:#}");
+                    cx.notify();
+                    return;
+                }
                 self.select(self.config.profiles.first().map(Settings::id), window, cx);
             }
             Err(error) => {
@@ -443,48 +368,22 @@ impl Client {
         }
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        while let Ok(update) = self.events.try_recv() {
+        for update in self.connections.poll() {
             match update {
-                Update::Gateway(error) => {
+                Notification::GatewayFailed(error) => {
                     self.startup_error = Some(error.clone());
                     self.status = error;
-                    self.disconnect_all();
                 }
-                Update::Session(id, event) => {
-                    if let Some(session) = self.sessions.get_mut(&id) {
-                        match event {
-                            Event::Status(status) => session.status = status,
-                            Event::Ready => {
-                                if session.cancel.is_none() {
-                                    continue;
-                                }
-                                session.ready = true;
-                                session.status = "已连接 · 无网页会话 30 秒后断开".into();
-                                if let Some(profile) =
-                                    self.config.profiles.iter().find(|p| p.id() == id)
-                                {
-                                    cx.open_url(&profile.viewer_url());
-                                }
-                            }
-                            Event::Stopped(result) => {
-                                session.cancel = None;
-                                session.busy = false;
-                                session.ready = false;
-                                session.status = match result {
-                                    Ok(tunnel::StopReason::Disconnected) => "已断开".into(),
-                                    Ok(tunnel::StopReason::IdleTimeout) => {
-                                        "空闲 30 秒，SSH 已关闭，请重新连接".into()
-                                    }
-                                    Err(error) => format!("{error:#}"),
-                                };
-                            }
-                        }
+                Notification::Ready(id) => {
+                    if let Some(profile) = self.config.profiles.iter().find(|p| p.id() == id) {
+                        cx.open_url(&profile.viewer_url());
                     }
                 }
+                Notification::Changed => {}
             }
             cx.notify();
         }
-        if self.quitting && !self.sessions.values().any(|s| s.busy) {
+        if self.quitting && self.connections.is_idle() {
             self.quit(cx);
             return;
         }
@@ -552,12 +451,12 @@ impl Render for Client {
             let id = profile.id();
             let selected = self.selected.as_ref() == Some(&id);
             let state = self
-                .sessions
+                .connections
                 .get(&id)
                 .map(|s| {
-                    if s.ready {
+                    if s.is_ready() {
                         "已连接"
-                    } else if s.busy {
+                    } else if s.is_busy() {
                         "连接中"
                     } else {
                         "未连接"
@@ -790,7 +689,7 @@ impl Render for Client {
         } else {
             self.selected
                 .as_ref()
-                .and_then(|id| self.sessions.get(id))
+                .and_then(|id| self.connections.get(id))
                 .map(|s| s.status.clone())
                 .unwrap_or_else(|| "未连接".into())
         };

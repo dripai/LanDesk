@@ -1,7 +1,7 @@
 use crate::{
     capture::{CaptureService, Change, FrameEvent},
     file_worker::{FileChannel, FileRequest, FileService},
-    platform::{DesktopControl, Shared},
+    platform::{CaptureInfo, DesktopControl, InputEvent, Shared},
     protocol::{ClientMessage, PORT, origin_allowed},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -20,6 +20,7 @@ use std::{sync::atomic::Ordering, time::Duration};
 
 #[derive(Clone)]
 pub struct AppState {
+    pub transport_key: crate::server_auth::TransportKey,
     pub native: std::sync::Arc<dyn DesktopControl>,
     pub shared: std::sync::Arc<Shared>,
     pub files: FileService,
@@ -243,16 +244,15 @@ async fn transport_auth(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if state.native.requires_access_key()
-        && state
-            .native
-            .authorize(
-                request
-                    .headers()
-                    .get(crate::transport::AUTH_HEADER)
-                    .and_then(|v| v.to_str().ok()),
-            )
-            .is_err()
+    if state
+        .transport_key
+        .authorize(
+            request
+                .headers()
+                .get(crate::transport::AUTH_HEADER)
+                .and_then(|v| v.to_str().ok()),
+        )
+        .is_err()
     {
         return (StatusCode::UNAUTHORIZED, "请通过 LanDeskClient 连接").into_response();
     }
@@ -312,8 +312,10 @@ async fn upgrade(
         .into_response()
 }
 
-async fn send_json(socket: &mut SessionSocket, value: serde_json::Value) -> Result<()> {
-    socket.send(Message::Text(value.to_string().into())).await?;
+async fn send_json(socket: &mut SessionSocket, value: impl serde::Serialize) -> Result<()> {
+    socket
+        .send(Message::Text(serde_json::to_string(&value)?.into()))
+        .await?;
     Ok(())
 }
 
@@ -374,13 +376,8 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     let mut capture = state.capture.start(display).await?;
     let initial = capture.info.borrow().clone();
     let mut input_status = InputStatus::default();
-    let input_warning = input_status.observe(
-        state
-            .native
-            .begin_input(initial["display_id"].as_u64().context("缺少显示器编号")? as u32)
-            .await,
-        false,
-    );
+    let input_warning =
+        input_status.observe(state.native.begin_input(initial.display_id).await, false);
     // Report readiness only after capture has produced a real frame.
     capture.frames.wait_for(|frame| frame.is_some()).await?;
     let first_frame = capture
@@ -395,7 +392,7 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
         bail!("{error}");
     };
     send_json(socket, {
-        let mut ready = initial;
+        let mut ready = serde_json::to_value(initial)?;
         ready["type"] = "ready".into();
         ready["capabilities"] = serde_json::to_value(state.native.capabilities())?;
         ready["capabilities"]["files"] = state.native.supports_files().into();
@@ -419,8 +416,8 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
             loop {
                 metadata.changed().await.context("采集状态已停止")?;
                 let info = metadata.borrow_and_update().clone();
-                display.store(info["display_id"].as_u64().context("缺少显示器编号")? as u32, Ordering::Release);
-                updates.send(Message::Text(info.to_string().into())).await.context("网页连接已关闭")?;
+                display.store(info.display_id, Ordering::Release);
+                updates.send(Message::Text(crate::protocol::display_message(info)?.to_string().into())).await.context("网页连接已关闭")?;
             }
             #[allow(unreachable_code)] Ok::<_, anyhow::Error>(())
         } => result?,
@@ -438,7 +435,7 @@ async fn control_loop(
     frames: &mut tokio::sync::watch::Receiver<Option<FrameEvent>>,
     sequence: u64,
     input_status: InputStatus,
-    configure: impl FnMut(Change) -> BoxFuture<'static, Result<serde_json::Value>>,
+    configure: impl FnMut(Change) -> BoxFuture<'static, Result<CaptureInfo>>,
 ) -> Result<()> {
     let output = socket.frames.clone();
     tokio::select! {
@@ -465,7 +462,7 @@ async fn control_commands(
     state: &AppState,
     mut files: FileChannel,
     mut input_status: InputStatus,
-    mut configure: impl FnMut(Change) -> BoxFuture<'static, Result<serde_json::Value>>,
+    mut configure: impl FnMut(Change) -> BoxFuture<'static, Result<CaptureInfo>>,
 ) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut images = crate::clipboard_image::Images::default();
@@ -522,7 +519,7 @@ async fn control_commands(
                                 send_json(socket,response).await?;
                             }
                             message @ (ClientMessage::SetResolution { .. } | ClientMessage::SetDisplay { .. } | ClientMessage::SetDisplaySource { .. }) => {
-                                if let Some(status) = input_status.observe(state.native.input(ClientMessage::ReleaseAll).await, false) {
+                                if let Some(status) = input_status.observe(state.native.input(InputEvent::ReleaseAll).await, false) {
                                     send_json(socket, status).await?;
                                 }
                                 let change = match message {
@@ -536,13 +533,13 @@ async fn control_commands(
                                 }
                             }
                             message @ (ClientMessage::ListDirectory { .. } | ClientMessage::UploadStart { .. } | ClientMessage::UploadFinish { .. } | ClientMessage::UploadCancel { .. }) => {
-                                if let Some(response) = files.submit(FileRequest::Message(message)) {
+                                if let Some(response) = files.submit(FileRequest::Message(message.try_into()?)) {
                                     send_json(socket,response).await?;
                                 }
                             }
                             other => {
                                 let can_recover = actionable_input(&other);
-                                if let Some(status) = input_status.observe(state.native.input(other).await, can_recover) {
+                                if let Some(status) = input_status.observe(state.native.input(other.try_into()?).await, can_recover) {
                                     send_json(socket, status).await?;
                                 }
                             },
@@ -639,13 +636,6 @@ mod access_tests {
                 virtual_display: true,
             }
         }
-        fn requires_access_key(&self) -> bool {
-            true
-        }
-        fn authorize(&self, key: Option<&str>) -> Result<()> {
-            ensure!(key == Some("test-key"), "access denied");
-            Ok(())
-        }
         fn check_permissions(&self) -> Result<()> {
             self.permissions.fetch_add(1, Ordering::SeqCst);
             bail!("permission check reached")
@@ -653,7 +643,7 @@ mod access_tests {
         fn begin_input(&self, _: u32) -> BoxFuture<'_, Result<()>> {
             panic!("input must not start")
         }
-        fn input(&self, _: ClientMessage) -> BoxFuture<'_, Result<()>> {
+        fn input(&self, _: InputEvent) -> BoxFuture<'_, Result<()>> {
             panic!("input must not start")
         }
         fn paste_text(&self, _: String) -> BoxFuture<'_, Result<()>> {
@@ -696,10 +686,8 @@ mod access_tests {
             restored: AtomicUsize::new(0),
         });
         let state = AppState {
-            native: Arc::new(crate::platform::authenticated::AuthenticatedDesktop::new(
-                native.clone(),
-                "test-key".into(),
-            )),
+            native: native.clone(),
+            transport_key: crate::server_auth::TransportKey::new("test-key".into()).unwrap(),
             shared: shared.clone(),
             capture: CaptureService::new(|| Box::new(NoCapture)).unwrap(),
             files: FileService::new(NoFiles),
@@ -799,6 +787,7 @@ mod tests {
         let shared = Arc::new(Shared::default());
         (
             AppState {
+                transport_key: crate::server_auth::TransportKey::new("test-key".into()).unwrap(),
                 shared: shared.clone(),
                 native: Arc::new(Native { tx, shared }),
                 capture: CaptureService::new(|| {
@@ -831,6 +820,9 @@ mod tests {
         request
             .headers_mut()
             .insert("origin", origin.parse().unwrap());
+        request
+            .headers_mut()
+            .insert(crate::transport::AUTH_HEADER, "test-key".parse().unwrap());
         request
     }
     #[tokio::test]
@@ -954,7 +946,7 @@ mod tests {
                         let guard = SessionGuard(state.native.clone(), state.shared.clone());
                         let result = tokio::select! {
                             result = control_loop(&mut socket, &state, files, &mut receiver, 0, InputStatus::default(), |_| {
-                                Box::pin(async { Ok(serde_json::json!({})) })
+                                Box::pin(async { Ok(CaptureInfo::default()) })
                             }) => result,
                             result = closed => result,
                         };
@@ -1077,7 +1069,7 @@ mod tests {
                 let guard = SessionGuard(state.native.clone(), state.shared.clone());
                 let result = tokio::select! {
                     result = control_loop(&mut socket, &state, state.files.connect(), &mut receiver, 0, InputStatus::default(),
-                        |_| Box::pin(async { Ok(serde_json::json!({})) })) => result,
+                        |_| Box::pin(async { Ok(CaptureInfo::default()) })) => result,
                     result = closed => result,
                 };
                 drop(guard); let _ = finished.send(result);
@@ -1153,7 +1145,7 @@ mod tests {
                 let guard = SessionGuard(state.native.clone(), state.shared.clone());
                 let result = tokio::select! {
                     result = control_loop(&mut socket, &state, state.files.connect(), &mut receiver, 0, InputStatus::default(),
-                        move |_| { switched.fetch_add(1, Ordering::SeqCst); Box::pin(async { Ok(serde_json::json!({})) }) }) => result,
+                        move |_| { switched.fetch_add(1, Ordering::SeqCst); Box::pin(async { Ok(CaptureInfo::default()) }) }) => result,
                     result = closed => result,
                 };
                 drop(guard); let _ = finished.send(result);

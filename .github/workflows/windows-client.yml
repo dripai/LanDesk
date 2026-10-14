@@ -3,9 +3,9 @@ name: Windows client
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["client/**", "web/**", ".github/workflows/windows-client.yml"]
+    paths: ["client/**", "src/encryption.rs", "web/**", ".github/workflows/windows-client.yml"]
   pull_request:
-    paths: ["client/**", "web/**", ".github/workflows/windows-client.yml"]
+    paths: ["client/**", "src/encryption.rs", "web/**", ".github/workflows/windows-client.yml"]
   workflow_dispatch:
 
 permissions:

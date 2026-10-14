@@ -1,6 +1,8 @@
-use crate::protocol::{ClientMessage, UPLOAD_CHUNK_BYTES};
+use crate::{
+    platform::{FileCommand, FileEntry, FileKind, FileResponse},
+    protocol::UPLOAD_CHUNK_BYTES,
+};
 use anyhow::{Context, Result, bail, ensure};
-use serde_json::{Value, json};
 use std::{
     ffi::{CStr, CString},
     fs::File,
@@ -84,7 +86,7 @@ impl HomeFiles {
         Ok(directory)
     }
 
-    fn list(&self, id: u32, path: &str, cursor: &str) -> Result<Value> {
+    fn list(&self, id: u32, path: &str, cursor: &str) -> Result<FileResponse> {
         let directory = self.directory(path)?;
         // fdopendir owns this descriptor; reopen '.' so concurrent listings do not share offsets.
         let scan = open_directory(&directory, c".")?;
@@ -142,18 +144,30 @@ impl HomeFiles {
                 bail!("无法读取文件信息 {filename}: {error}");
             }
             let kind = match stat.st_mode & libc::S_IFMT {
-                libc::S_IFDIR => "directory",
-                libc::S_IFREG => "file",
-                libc::S_IFLNK => "symlink",
-                _ => "other",
+                libc::S_IFDIR => FileKind::Directory,
+                libc::S_IFREG => FileKind::File,
+                libc::S_IFLNK => FileKind::Symlink,
+                _ => FileKind::Other,
             };
-            let key = format!("{}/{}", if kind == "directory" { 0 } else { 1 }, filename);
+            let key = format!(
+                "{}/{}",
+                if matches!(kind, FileKind::Directory) {
+                    0
+                } else {
+                    1
+                },
+                filename
+            );
             if key.as_str() <= cursor {
                 continue;
             }
             entries.insert(
                 key,
-                json!({"name":filename,"kind":kind,"size":stat.st_size.max(0)}),
+                FileEntry {
+                    name: filename.into(),
+                    kind,
+                    size: stat.st_size.max(0) as u64,
+                },
             );
             if entries.len() > PAGE_SIZE + 1 {
                 entries.pop_last();
@@ -168,9 +182,13 @@ impl HomeFiles {
         } else {
             None
         };
-        Ok(
-            json!({"type":"directory","id":id,"root":self.label,"path":path,"entries":entries.into_values().collect::<Vec<_>>(),"next_cursor":next_cursor}),
-        )
+        Ok(FileResponse::Directory {
+            id,
+            root: self.label.clone(),
+            path: path.into(),
+            entries: entries.into_values().collect(),
+            next_cursor,
+        })
     }
 }
 
@@ -234,7 +252,7 @@ impl Upload {
         })
     }
 
-    fn chunk(&mut self, data: &[u8]) -> Result<Value> {
+    fn chunk(&mut self, data: &[u8]) -> Result<FileResponse> {
         ensure!(
             !data.is_empty() && data.len() <= UPLOAD_CHUNK_BYTES,
             "上传分块必须为 1–64 KiB"
@@ -245,10 +263,13 @@ impl Upload {
         );
         self.file.write_all(data).context("写入上传文件失败")?;
         self.written += data.len() as u64;
-        Ok(json!({"type":"upload_progress","id":self.id,"written":self.written}))
+        Ok(FileResponse::UploadProgress {
+            id: self.id,
+            written: self.written,
+        })
     }
 
-    fn finish(&mut self, cancelled: &AtomicBool) -> Result<Value> {
+    fn finish(&mut self, cancelled: &AtomicBool) -> Result<FileResponse> {
         ensure!(self.written == self.expected, "上传尚未完整接收");
         self.file.sync_all().context("保存上传文件失败")?;
         ensure!(!cancelled.load(Ordering::Acquire), "文件会话已取消");
@@ -267,7 +288,7 @@ impl Upload {
             std::io::Error::last_os_error()
         );
         self.live = false;
-        Ok(json!({"type":"upload_done","id":self.id}))
+        Ok(FileResponse::UploadDone { id: self.id })
     }
 
     fn cleanup(&mut self) -> Result<()> {
@@ -314,7 +335,7 @@ impl FileSession {
         }
         Ok(())
     }
-    fn response(&mut self, id: u32, result: Result<Value>, abort: bool) -> Value {
+    fn response(&mut self, id: u32, result: Result<FileResponse>, abort: bool) -> FileResponse {
         match result {
             Ok(value) => value,
             Err(error) => {
@@ -323,16 +344,20 @@ impl FileSession {
                     Ok(()) => format!("{error:#}"),
                     Err(cleanup) => format!("{error:#}；{cleanup:#}"),
                 };
-                json!({"type":"file_error","id":id,"message":message,"upload_active":self.upload.is_some()})
+                FileResponse::FileError {
+                    id,
+                    message,
+                    upload_active: self.upload.is_some(),
+                }
             }
         }
     }
-    pub fn message(&mut self, message: ClientMessage) -> Value {
+    pub fn message(&mut self, message: FileCommand) -> FileResponse {
         let (id, result, abort) = match message {
-            ClientMessage::ListDirectory { id, path, cursor } => {
+            FileCommand::ListDirectory { id, path, cursor } => {
                 (id, self.home.list(id, &path, &cursor), false)
             }
-            ClientMessage::UploadStart {
+            FileCommand::UploadStart {
                 id,
                 path,
                 name,
@@ -342,11 +367,14 @@ impl FileSession {
                     ensure!(self.upload.is_none(), "已有文件正在上传");
                     self.upload = Some(Upload::start(&self.home, id, &path, &name, size)?);
                     ensure!(!self.cancelled.load(Ordering::Acquire), "文件会话已取消");
-                    Ok(json!({"type":"upload_ready","id":id,"chunk_size":UPLOAD_CHUNK_BYTES}))
+                    Ok(FileResponse::UploadReady {
+                        id,
+                        chunk_size: UPLOAD_CHUNK_BYTES,
+                    })
                 })();
                 (id, result, self.cancelled.load(Ordering::Acquire))
             }
-            ClientMessage::UploadFinish { id } => {
+            FileCommand::UploadFinish { id } => {
                 let result = (|| {
                     let upload = self.upload.as_mut().context("没有正在上传的文件")?;
                     ensure!(upload.id == id, "上传编号不匹配");
@@ -356,22 +384,21 @@ impl FileSession {
                 })();
                 (id, result, true)
             }
-            ClientMessage::UploadCancel { id } => {
+            FileCommand::UploadCancel { id } => {
                 let result = (|| {
                     ensure!(
                         self.upload.as_ref().is_some_and(|u| u.id == id),
                         "上传编号不匹配"
                     );
                     self.abort()?;
-                    Ok(json!({"type":"upload_cancelled","id":id}))
+                    Ok(FileResponse::UploadCancelled { id })
                 })();
                 (id, result, false)
             }
-            _ => return json!({"type":"file_error","id":0,"message":"不是文件消息"}),
         };
         self.response(id, result, abort)
     }
-    pub fn chunk(&mut self, data: &[u8]) -> Value {
+    pub fn chunk(&mut self, data: &[u8]) -> FileResponse {
         let id = self.upload.as_ref().map_or(0, |u| u.id);
         let result = self
             .upload
@@ -391,10 +418,10 @@ impl crate::platform::FileBackend for HomeFiles {
     }
 }
 impl crate::platform::FileSession for FileSession {
-    fn message(&mut self, message: ClientMessage) -> Value {
+    fn message(&mut self, message: FileCommand) -> FileResponse {
         FileSession::message(self, message)
     }
-    fn chunk(&mut self, bytes: &[u8]) -> Value {
+    fn chunk(&mut self, bytes: &[u8]) -> FileResponse {
         FileSession::chunk(self, bytes)
     }
 }
@@ -402,6 +429,7 @@ impl crate::platform::FileSession for FileSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::{fs, os::unix::fs::symlink, path::PathBuf};
 
     struct Fixture {
@@ -422,12 +450,13 @@ mod tests {
             FileSession::new(self.home.clone())
         }
         fn start(&self, session: &mut FileSession, filename: &str, size: u64) -> Value {
-            session.message(ClientMessage::UploadStart {
+            serde_json::to_value(session.message(FileCommand::UploadStart {
                 id: 1,
                 path: String::new(),
                 name: filename.into(),
                 size,
-            })
+            }))
+            .unwrap()
         }
         fn count(&self) -> usize {
             fs::read_dir(&self.path).unwrap().count()
@@ -448,7 +477,8 @@ mod tests {
             "upload_ready"
         );
         session.cancelled.store(true, Ordering::Release);
-        let response = session.message(ClientMessage::UploadFinish { id: 1 });
+        let response =
+            serde_json::to_value(session.message(FileCommand::UploadFinish { id: 1 })).unwrap();
         assert_eq!(response["type"], "file_error");
         assert_eq!(response["upload_active"], false);
         assert_eq!(f.count(), 0);
@@ -460,8 +490,8 @@ mod tests {
         fs::create_dir(f.path.join("工程")).unwrap();
         fs::write(f.path.join("hello.rs"), "你好").unwrap();
         symlink("/", f.path.join("outside")).unwrap();
-        let a = f.home.list(1, "", "").unwrap();
-        let b = f.home.list(1, "", "").unwrap();
+        let a = serde_json::to_value(f.home.list(1, "", "").unwrap()).unwrap();
+        let b = serde_json::to_value(f.home.list(1, "", "").unwrap()).unwrap();
         assert_eq!(a, b);
         assert_eq!(a["entries"][0]["kind"], "directory");
         assert!(
@@ -483,7 +513,7 @@ mod tests {
         let mut cursor = String::new();
         let mut names = std::collections::BTreeSet::new();
         loop {
-            let page = f.home.list(1, "", &cursor).unwrap();
+            let page = serde_json::to_value(f.home.list(1, "", &cursor).unwrap()).unwrap();
             let entries = page["entries"].as_array().unwrap();
             assert!(entries.len() <= PAGE_SIZE);
             for entry in entries {
@@ -521,16 +551,19 @@ mod tests {
             f.start(&mut session, "内容.bin", bytes.len() as u64)["type"],
             "upload_ready"
         );
-        assert_eq!(session.chunk(&bytes)["type"], "upload_progress");
+        assert_eq!(
+            serde_json::to_value(session.chunk(&bytes)).unwrap()["type"],
+            "upload_progress"
+        );
         assert!(!f.path.join("内容.bin").exists());
         assert!(
-            f.home.list(1, "", "").unwrap()["entries"]
+            serde_json::to_value(f.home.list(1, "", "").unwrap()).unwrap()["entries"]
                 .as_array()
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            session.message(ClientMessage::UploadFinish { id: 1 })["type"],
+            serde_json::to_value(session.message(FileCommand::UploadFinish { id: 1 })).unwrap()["type"],
             "upload_done"
         );
         assert_eq!(fs::read(f.path.join("内容.bin")).unwrap(), bytes);
@@ -547,7 +580,7 @@ mod tests {
         session.chunk(b"new");
         fs::write(f.path.join("race"), "original").unwrap();
         assert_eq!(
-            session.message(ClientMessage::UploadFinish { id: 1 })["type"],
+            serde_json::to_value(session.message(FileCommand::UploadFinish { id: 1 })).unwrap()["type"],
             "file_error"
         );
         assert_eq!(fs::read(f.path.join("race")).unwrap(), b"original");
@@ -567,13 +600,14 @@ mod tests {
         let mut session = f.session();
         f.start(&mut session, "b", 3);
         assert_eq!(
-            session.message(ClientMessage::UploadCancel { id: 1 })["type"],
+            serde_json::to_value(session.message(FileCommand::UploadCancel { id: 1 })).unwrap()["type"],
             "upload_cancelled"
         );
         assert_eq!(f.count(), 0);
         f.start(&mut session, "c", 3);
         session.chunk(b"x");
-        let result = session.message(ClientMessage::UploadFinish { id: 1 });
+        let result =
+            serde_json::to_value(session.message(FileCommand::UploadFinish { id: 1 })).unwrap();
         assert_eq!(result["type"], "file_error");
         assert_eq!(result["upload_active"], false);
         assert_eq!(f.count(), 0);
@@ -585,7 +619,7 @@ mod tests {
         let mut session = f.session();
         f.start(&mut session, "empty", 0);
         assert_eq!(
-            session.message(ClientMessage::UploadFinish { id: 1 })["type"],
+            serde_json::to_value(session.message(FileCommand::UploadFinish { id: 1 })).unwrap()["type"],
             "upload_done"
         );
         assert_eq!(fs::metadata(f.path.join("empty")).unwrap().len(), 0);
@@ -594,10 +628,13 @@ mod tests {
             "file_error"
         );
         f.start(&mut session, "overrun", 1);
-        assert_eq!(session.chunk(b"xx")["type"], "file_error");
+        assert_eq!(
+            serde_json::to_value(session.chunk(b"xx")).unwrap()["type"],
+            "file_error"
+        );
         f.start(&mut session, "large-chunk", MAX_FILE_BYTES);
         assert_eq!(
-            session.chunk(&vec![0; UPLOAD_CHUNK_BYTES + 1])["type"],
+            serde_json::to_value(session.chunk(&vec![0; UPLOAD_CHUNK_BYTES + 1])).unwrap()["type"],
             "file_error"
         );
         assert_eq!(f.count(), 1);
@@ -609,20 +646,26 @@ mod tests {
         let outside = Fixture::new();
         let mut session = f.session();
         symlink(&outside.path, f.path.join("escape")).unwrap();
-        let start = |path: &str| ClientMessage::UploadStart {
+        let start = |path: &str| FileCommand::UploadStart {
             id: 1,
             path: path.into(),
             name: "test".into(),
             size: 1,
         };
-        assert_eq!(session.message(start("escape"))["type"], "file_error");
+        assert_eq!(
+            serde_json::to_value(session.message(start("escape"))).unwrap()["type"],
+            "file_error"
+        );
         fs::create_dir(f.path.join("work")).unwrap();
-        assert_eq!(session.message(start("work"))["type"], "upload_ready");
+        assert_eq!(
+            serde_json::to_value(session.message(start("work"))).unwrap()["type"],
+            "upload_ready"
+        );
         fs::rename(f.path.join("work"), f.path.join("moved")).unwrap();
         symlink(&outside.path, f.path.join("work")).unwrap();
         session.chunk(b"x");
         assert_eq!(
-            session.message(ClientMessage::UploadFinish { id: 1 })["type"],
+            serde_json::to_value(session.message(FileCommand::UploadFinish { id: 1 })).unwrap()["type"],
             "upload_done"
         );
         assert_eq!(fs::read(f.path.join("moved/test")).unwrap(), b"x");

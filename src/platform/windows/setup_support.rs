@@ -603,7 +603,15 @@ pub(super) fn verify_catalog(path: &Path) -> Result<()> {
     ensure!(result == 0, "驱动签名信任校验失败: 0x{:08x}", result as u32);
     Ok(())
 }
-pub(super) fn close_installed_processes(executable: &Path) -> Result<()> {
+pub(super) fn close_installed_processes(executable: &Path, launcher: u32) -> Result<()> {
+    // The management UI can run from the downloaded copy rather than Program
+    // Files. Match its bytes to the owned installation before closing it; a
+    // matching filename alone must never authorize terminating a process.
+    let installed_bytes = match std::fs::read(executable) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("读取已安装程序以识别旧界面"),
+    };
     let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     ensure!(
         raw != INVALID_HANDLE_VALUE,
@@ -618,6 +626,7 @@ pub(super) fn close_installed_processes(executable: &Path) -> Result<()> {
     let mut found = unsafe { Process32FirstW(snapshot.0, &mut entry) };
     while found != 0 {
         if entry.th32ProcessID != std::process::id()
+            && entry.th32ProcessID != launcher
             && unsafe { super::setup_services::string(entry.szExeFile.as_ptr())? }
                 .eq_ignore_ascii_case("LanDeskServer.exe")
         {
@@ -647,9 +656,20 @@ pub(super) fn close_installed_processes(executable: &Path) -> Result<()> {
                     },
                     "读取进程路径",
                 )?;
-                if String::from_utf16(&path[..length as usize])?
-                    .eq_ignore_ascii_case(&executable.to_string_lossy())
-                {
+                let process_path = String::from_utf16(&path[..length as usize])?;
+                let same_path = process_path.eq_ignore_ascii_case(&executable.to_string_lossy());
+                let same_copy = if !same_path && let Some(bytes) = &installed_bytes {
+                    std::fs::read(&process_path)
+                        .with_context(|| format!("检查旧界面程序: {process_path}"))?
+                        == *bytes
+                } else {
+                    false
+                };
+                if same_path || same_copy {
+                    crate::diagnostics::log(&format!(
+                        "关闭旧 LanDesk 进程 pid={} path={process_path}",
+                        entry.th32ProcessID
+                    ));
                     checked(
                         unsafe { TerminateProcess(handle.0, 0) },
                         "关闭已安装的 LanDesk 界面",

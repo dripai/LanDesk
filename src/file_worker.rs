@@ -1,6 +1,5 @@
-use crate::{platform::FileBackend, protocol::ClientMessage};
+use crate::platform::{FileBackend, FileCommand, FileResponse};
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
 use std::{
     sync::{
         Arc,
@@ -49,7 +48,13 @@ impl FileService {
                         let _ = started.send(());
                     }
                     blocked.recv_timeout(Duration::from_secs(30)).unwrap();
-                    json!({"type":"directory", "id":1})
+                    FileResponse::Directory {
+                        id: 1,
+                        root: String::new(),
+                        path: String::new(),
+                        entries: Vec::new(),
+                        next_cursor: None,
+                    }
                 })
             })
             .unwrap(),
@@ -59,13 +64,13 @@ impl FileService {
 }
 
 pub enum FileRequest {
-    Message(ClientMessage),
+    Message(FileCommand),
     Chunk(Vec<u8>),
 }
 
 struct Job {
     request: FileRequest,
-    reply: oneshot::Sender<Value>,
+    reply: oneshot::Sender<FileResponse>,
 }
 
 struct Worker {
@@ -83,7 +88,7 @@ impl Drop for Worker {
 impl Worker {
     fn start(
         slots: Arc<Semaphore>,
-        build: impl FnOnce(Arc<AtomicBool>) -> Box<dyn FnMut(FileRequest) -> Value + Send>
+        build: impl FnOnce(Arc<AtomicBool>) -> Box<dyn FnMut(FileRequest) -> FileResponse + Send>
         + Send
         + 'static,
     ) -> Result<Self> {
@@ -119,7 +124,7 @@ impl Worker {
 
 struct Pending {
     id: u32,
-    reply: oneshot::Receiver<Value>,
+    reply: oneshot::Receiver<FileResponse>,
     deadline: tokio::time::Instant,
 }
 
@@ -131,18 +136,17 @@ pub struct FileChannel {
 }
 
 impl FileChannel {
-    fn error(&self, id: u32, message: String) -> Value {
-        json!({"type":"file_error", "id":id, "message":message, "upload_active":self.upload_id.is_some()})
+    fn error(&self, id: u32, message: String) -> FileResponse {
+        FileResponse::FileError {
+            id,
+            message,
+            upload_active: self.upload_id.is_some(),
+        }
     }
 
-    pub fn submit(&mut self, request: FileRequest) -> Option<Value> {
+    pub fn submit(&mut self, request: FileRequest) -> Option<FileResponse> {
         let id = match &request {
-            FileRequest::Message(
-                ClientMessage::ListDirectory { id, .. }
-                | ClientMessage::UploadStart { id, .. }
-                | ClientMessage::UploadFinish { id }
-                | ClientMessage::UploadCancel { id },
-            ) => *id,
+            FileRequest::Message(command) => command.id(),
             _ => self.upload_id.unwrap_or(0),
         };
         if self.pending.is_some() {
@@ -186,7 +190,7 @@ impl FileChannel {
     }
 
     // Cancellation-safe: select! may drop this future for every frame/heartbeat.
-    pub async fn response(&mut self) -> Value {
+    pub async fn response(&mut self) -> FileResponse {
         let Some(pending) = self.pending.as_mut() else {
             return std::future::pending().await;
         };
@@ -194,10 +198,14 @@ impl FileChannel {
         let id = self.pending.take().unwrap().id;
         match result {
             Ok(Ok(value)) => {
-                match value["type"].as_str() {
-                    Some("upload_ready") => self.upload_id = Some(id),
-                    Some("upload_done" | "upload_cancelled") => self.upload_id = None,
-                    Some("file_error") if value["upload_active"] == false => self.upload_id = None,
+                match &value {
+                    FileResponse::UploadReady { id, .. } => self.upload_id = Some(*id),
+                    FileResponse::UploadDone { .. }
+                    | FileResponse::UploadCancelled { .. }
+                    | FileResponse::FileError {
+                        upload_active: false,
+                        ..
+                    } => self.upload_id = None,
                     _ => {}
                 }
                 value
@@ -225,7 +233,7 @@ mod tests {
         FileService::new(HomeFiles::open(std::path::Path::new("/private/tmp")).unwrap())
     }
     fn list(id: u32) -> FileRequest {
-        FileRequest::Message(ClientMessage::ListDirectory {
+        FileRequest::Message(FileCommand::ListDirectory {
             cursor: String::new(),
             id,
             path: String::new(),
@@ -238,17 +246,21 @@ mod tests {
         let (mut files, started, release) = service.blocked_channel();
         assert!(files.submit(list(1)).is_none());
         started.await.unwrap();
-        assert_eq!(files.submit(list(2)).unwrap()["type"], "file_error");
+        assert_eq!(
+            serde_json::to_value(files.submit(list(2)).unwrap()).unwrap()["type"],
+            "file_error"
+        );
         files.pending.as_mut().unwrap().deadline = tokio::time::Instant::now();
         let error = tokio::time::timeout(Duration::from_secs(1), files.response())
             .await
             .unwrap();
+        let error = serde_json::to_value(error).unwrap();
         assert_eq!(error["id"], 1);
         assert!(error["message"].as_str().unwrap().contains("超时"));
         assert_eq!(error["upload_active"], false);
         drop(files);
         for _ in 0..20 {
-            let error = service.connect().submit(list(3)).unwrap();
+            let error = serde_json::to_value(service.connect().submit(list(3)).unwrap()).unwrap();
             assert!(error["message"].as_str().unwrap().contains("等待系统响应"));
         }
         release.send(()).unwrap();
@@ -259,7 +271,7 @@ mod tests {
         drop(permit);
         let mut files = service.connect();
         assert!(files.submit(list(4)).is_none());
-        let response = files.response().await;
+        let response = serde_json::to_value(files.response().await).unwrap();
         assert_eq!(response["type"], "directory");
         assert_eq!(response["id"], 4); // No late result from the cancelled request.
     }
@@ -278,20 +290,29 @@ mod tests {
         );
         assert_eq!(files.pending.as_ref().unwrap().deadline, deadline);
         release.send(()).unwrap();
-        assert_eq!(files.response().await["id"], 1);
+        assert_eq!(
+            serde_json::to_value(files.response().await).unwrap()["id"],
+            1
+        );
     }
 
     #[tokio::test]
     async fn file_error_does_not_poison_following_requests() {
         let mut files = service().connect();
-        files.submit(FileRequest::Message(ClientMessage::ListDirectory {
+        files.submit(FileRequest::Message(FileCommand::ListDirectory {
             cursor: String::new(),
             id: 1,
             path: "..".into(),
         }));
-        assert_eq!(files.response().await["type"], "file_error");
+        assert_eq!(
+            serde_json::to_value(files.response().await).unwrap()["type"],
+            "file_error"
+        );
         files.submit(list(2));
-        assert_eq!(files.response().await["type"], "directory");
+        assert_eq!(
+            serde_json::to_value(files.response().await).unwrap()["type"],
+            "directory"
+        );
     }
 
     #[tokio::test]
@@ -303,15 +324,21 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let service = FileService::new(HomeFiles::open(&root).unwrap());
         let mut files = service.connect();
-        files.submit(FileRequest::Message(ClientMessage::UploadStart {
+        files.submit(FileRequest::Message(FileCommand::UploadStart {
             id: 1,
             path: String::new(),
             name: "partial.txt".into(),
             size: 10,
         }));
-        assert_eq!(files.response().await["type"], "upload_ready");
+        assert_eq!(
+            serde_json::to_value(files.response().await).unwrap()["type"],
+            "upload_ready"
+        );
         files.submit(FileRequest::Chunk(vec![1, 2]));
-        assert_eq!(files.response().await["written"], 2);
+        assert_eq!(
+            serde_json::to_value(files.response().await).unwrap()["written"],
+            2
+        );
         drop(files);
         let permit = tokio::time::timeout(Duration::from_secs(1), service.slots.acquire())
             .await

@@ -3,9 +3,10 @@ use super::{
     desktop::{Desktop, checked},
     service,
 };
+use crate::platform::InputEvent;
 use crate::{
     platform::{Capabilities, DesktopControl, FileBackend, FileSession, Shared},
-    protocol::{ClientMessage, MAX_TEXT_BYTES, pointer_position},
+    protocol::{MAX_TEXT_BYTES, pointer_position},
 };
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::future::BoxFuture;
@@ -185,13 +186,13 @@ impl Input {
         }
         Ok(())
     }
-    fn apply(&mut self, message: ClientMessage) -> Result<()> {
+    fn apply(&mut self, message: InputEvent) -> Result<()> {
         if self.desktop.sync()? {
             self.release()?;
         }
         match message {
-            ClientMessage::ReleaseAll => self.release(),
-            ClientMessage::Pointer { x, y } => {
+            InputEvent::ReleaseAll => self.release(),
+            InputEvent::Pointer { x, y } => {
                 let m = capture::monitor(self.shared.display.load(Ordering::Acquire))?;
                 let (x, y) = pointer_position(x, y, m.width as i32, m.height as i32)?;
                 unsafe {
@@ -210,7 +211,7 @@ impl Input {
                     )])
                 }
             }
-            ClientMessage::Button { button: b, down } => {
+            InputEvent::Button { button: b, down } => {
                 // Track before injecting: even a partial SendInput must be released.
                 let flags = button(b, down)?;
                 if down {
@@ -222,7 +223,7 @@ impl Input {
                 }
                 Ok(())
             }
-            ClientMessage::Wheel { x, y } => {
+            InputEvent::Wheel { x, y } => {
                 ensure!(
                     (-10..=10).contains(&x) && (-10..=10).contains(&y),
                     "滚动幅度无效"
@@ -235,7 +236,7 @@ impl Input {
                 }
                 Ok(())
             }
-            ClientMessage::Key { key, down } => {
+            InputEvent::Key { key, down } => {
                 let code = key_code(&key)?;
                 if down {
                     self.keys.insert(code);
@@ -246,8 +247,7 @@ impl Input {
                 }
                 Ok(())
             }
-            ClientMessage::Text { text } | ClientMessage::PasteText { text } => self.text(&text),
-            _ => bail!("无效的 Windows 输入消息"),
+            InputEvent::Text { text } => self.text(&text),
         }
     }
     fn clipboard(&mut self, copy: bool) -> Result<String> {
@@ -256,11 +256,11 @@ impl Input {
             self.release()?;
             let sequence = unsafe { GetClipboardSequenceNumber() };
             let pressed = (|| {
-                self.apply(ClientMessage::Key {
+                self.apply(InputEvent::Key {
                     key: "Control".into(),
                     down: true,
                 })?;
-                self.apply(ClientMessage::Key {
+                self.apply(InputEvent::Key {
                     key: "c".into(),
                     down: true,
                 })
@@ -317,7 +317,7 @@ impl Input {
     }
 }
 enum Command {
-    Input(ClientMessage),
+    Input(InputEvent),
     Clipboard(bool),
 }
 struct Job {
@@ -328,11 +328,10 @@ pub struct WindowsControl {
     shared: Arc<Shared>,
     sender: mpsc::SyncSender<Job>,
     restore: Arc<AtomicBool>,
-    key: String,
     worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 impl WindowsControl {
-    pub fn new(shared: Arc<Shared>, key: String) -> Result<Self> {
+    pub fn new(shared: Arc<Shared>) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel::<Job>(32);
         let restore = Arc::new(AtomicBool::new(false));
         let release = restore.clone();
@@ -349,7 +348,7 @@ impl WindowsControl {
                 let mut last_failure = None;
                 loop {
                     if release.swap(false, Ordering::AcqRel)
-                        && input.apply(ClientMessage::ReleaseAll).is_err()
+                        && input.apply(InputEvent::ReleaseAll).is_err()
                     {
                         release.store(true, Ordering::Release);
                     }
@@ -363,12 +362,9 @@ impl WindowsControl {
                             }
                             let can_recover = match &job.command {
                                 Command::Clipboard(false) => false,
-                                Command::Input(ClientMessage::ReleaseAll) => false,
-                                Command::Input(
-                                    ClientMessage::Text { text }
-                                    | ClientMessage::PasteText { text },
-                                ) => !text.is_empty(),
-                                Command::Input(ClientMessage::Wheel { x, y }) => *x != 0 || *y != 0,
+                                Command::Input(InputEvent::ReleaseAll) => false,
+                                Command::Input(InputEvent::Text { text }) => !text.is_empty(),
+                                Command::Input(InputEvent::Wheel { x, y }) => *x != 0 || *y != 0,
                                 _ => true,
                             };
                             let result = match job.command {
@@ -402,7 +398,7 @@ impl WindowsControl {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                if let Err(error) = input.apply(ClientMessage::ReleaseAll) {
+                if let Err(error) = input.apply(InputEvent::ReleaseAll) {
                     service::log(&format!("Release input: {error:#}"));
                 }
             })?;
@@ -410,7 +406,6 @@ impl WindowsControl {
             shared,
             sender,
             restore,
-            key,
             worker: std::sync::Mutex::new(Some(worker)),
         })
     }
@@ -444,25 +439,6 @@ impl DesktopControl for WindowsControl {
             virtual_display: true,
         }
     }
-    fn requires_access_key(&self) -> bool {
-        true
-    }
-    fn authorize(&self, key: Option<&str>) -> Result<()> {
-        let supplied = key.unwrap_or("").as_bytes();
-        let expected = self.key.as_bytes();
-        let difference = supplied.len() ^ expected.len();
-        let difference = expected
-            .iter()
-            .enumerate()
-            .fold(difference, |diff, (i, byte)| {
-                diff | usize::from(byte ^ supplied.get(i).copied().unwrap_or(0))
-            });
-        ensure!(
-            difference == 0,
-            "内部通信认证失败，请通过 LanDeskClient 连接"
-        );
-        Ok(())
-    }
     fn supports_files(&self) -> bool {
         false
     }
@@ -471,13 +447,13 @@ impl DesktopControl for WindowsControl {
     }
     fn begin_input(&self, display_id: u32) -> BoxFuture<'_, Result<()>> {
         self.shared.display.store(display_id, Ordering::Release);
-        self.input(ClientMessage::ReleaseAll)
+        self.input(InputEvent::ReleaseAll)
     }
-    fn input(&self, message: ClientMessage) -> BoxFuture<'_, Result<()>> {
+    fn input(&self, message: InputEvent) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move { self.call(Command::Input(message)).await.map(|_| ()) })
     }
     fn paste_text(&self, text: String) -> BoxFuture<'_, Result<()>> {
-        self.input(ClientMessage::PasteText { text })
+        self.input(InputEvent::Text { text })
     }
     fn paste_image(&self, _png: Vec<u8>) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { bail!("Windows 暂未接入图片剪贴板，请使用文字输入") })
@@ -489,7 +465,7 @@ impl DesktopControl for WindowsControl {
         self.call(Command::Clipboard(false))
     }
     fn end_session(&self) -> BoxFuture<'_, Result<()>> {
-        self.input(ClientMessage::ReleaseAll)
+        self.input(InputEvent::ReleaseAll)
     }
     fn restore(&self) {
         self.restore.store(true, Ordering::Release);
@@ -507,18 +483,19 @@ impl FileBackend for NoFiles {
     }
 }
 impl FileSession for NoFiles {
-    fn message(&mut self, message: ClientMessage) -> serde_json::Value {
-        let id = match message {
-            ClientMessage::ListDirectory { id, .. }
-            | ClientMessage::UploadStart { id, .. }
-            | ClientMessage::UploadFinish { id }
-            | ClientMessage::UploadCancel { id } => id,
-            _ => 0,
-        };
-        serde_json::json!({"type":"file_error","id":id,"message":"Windows 桌面服务不提供 SYSTEM 文件访问"})
+    fn message(&mut self, message: crate::platform::FileCommand) -> crate::platform::FileResponse {
+        crate::platform::FileResponse::FileError {
+            id: message.id(),
+            message: "Windows 桌面服务不提供 SYSTEM 文件访问".into(),
+            upload_active: false,
+        }
     }
-    fn chunk(&mut self, _: &[u8]) -> serde_json::Value {
-        serde_json::json!({"type":"file_error","message":"Windows 桌面服务不提供文件上传"})
+    fn chunk(&mut self, _: &[u8]) -> crate::platform::FileResponse {
+        crate::platform::FileResponse::FileError {
+            id: 0,
+            message: "Windows 桌面服务不提供文件上传".into(),
+            upload_active: false,
+        }
     }
 }
 
@@ -531,30 +508,5 @@ mod tests {
         assert_eq!(key_code("Meta").unwrap(), VK_LWIN);
         assert_eq!(key_code("c").unwrap(), b'C' as u16);
         assert!(key_code("Unknown").is_err());
-    }
-    #[test]
-    fn access_key_requires_the_entire_secret() {
-        let (sender, _receiver) = mpsc::sync_channel(1);
-        let control = WindowsControl {
-            shared: Arc::new(Shared::default()),
-            sender,
-            restore: Arc::new(AtomicBool::new(false)),
-            key: "ab".repeat(32),
-            worker: std::sync::Mutex::new(None),
-        };
-        assert!(control.authorize(Some(&"ab".repeat(32))).is_ok());
-        for supplied in [None, Some(""), Some("ab"), Some("wrong")] {
-            assert!(control.authorize(supplied).is_err());
-        }
-        assert!(
-            control
-                .authorize(Some(&format!("{}00", "ab".repeat(32))))
-                .is_err()
-        );
-        assert!(
-            control
-                .authorize(Some(&format!("{}00", "ab".repeat(31))))
-                .is_err()
-        );
     }
 }

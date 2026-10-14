@@ -2,8 +2,8 @@ use anyhow::{Result, bail};
 use landesk::{
     capture::{CaptureService, Change, FrameEvent},
     platform::{
-        CaptureBackend, DisplayTarget, FrameSource, VirtualDisplay, VirtualDisplayProvider,
-        VirtualDisplaySpec, VirtualDisplays,
+        CaptureBackend, CaptureInfo, DisplayTarget, FrameSource, VirtualDisplay,
+        VirtualDisplayProvider, VirtualDisplaySpec, VirtualDisplays,
     },
 };
 use std::{cell::Cell, rc::Rc, sync::Arc};
@@ -92,8 +92,13 @@ impl FrameSource for Source {
     fn frames_mut(&mut self) -> &mut watch::Receiver<Option<FrameEvent>> {
         &mut self.rx
     }
-    fn info(&self, _: Option<u32>) -> serde_json::Value {
-        serde_json::json!({"display_id":self.id,"width":1920,"height":1080})
+    fn info(&self, _: Option<u32>) -> CaptureInfo {
+        CaptureInfo {
+            display_id: self.id,
+            width: 1920,
+            height: 1080,
+            ..CaptureInfo::default()
+        }
     }
     fn display_id(&self) -> u32 {
         self.id
@@ -142,7 +147,7 @@ async fn capture_switch_failure_preserves_session_and_reconnect_uses_selected_so
         .wait_for(|frame| frame.is_some())
         .await
         .unwrap();
-    assert_eq!(session.info.borrow()["display_id"], 1);
+    assert_eq!(session.info.borrow().display_id, 1);
     assert!(
         session
             .configure(Change::Source(DisplayTarget::Virtual {
@@ -152,7 +157,7 @@ async fn capture_switch_failure_preserves_session_and_reconnect_uses_selected_so
             .await
             .is_err()
     );
-    assert_eq!(session.info.borrow()["display_id"], 1);
+    assert_eq!(session.info.borrow().display_id, 1);
     let info = session
         .configure(Change::Source(DisplayTarget::Virtual {
             width: 1920,
@@ -160,10 +165,10 @@ async fn capture_switch_failure_preserves_session_and_reconnect_uses_selected_so
         }))
         .await
         .unwrap();
-    assert_eq!(info["display_id"], 42);
+    assert_eq!(info.display_id, 42);
     drop(session);
     let next = service.start(None).await.unwrap();
-    assert_eq!(next.info.borrow()["display_id"], 42);
+    assert_eq!(next.info.borrow().display_id, 42);
 }
 
 #[test]

@@ -268,6 +268,7 @@ fn report(state: u32, error: u32) {
             0
         },
         dwWin32ExitCode: error,
+        dwServiceSpecificExitCode: u32::from(error == ERROR_SERVICE_SPECIFIC_ERROR),
         dwWaitHint: if state == SERVICE_STOP_PENDING {
             10000
         } else {
@@ -455,15 +456,33 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     }
     STATUS.store(handle, Ordering::Release);
     report(SERVICE_START_PENDING, 0);
-    match if TRANSPORT.load(Ordering::Relaxed) {
-        serve_transport()
-    } else {
-        serve()
-    } {
+    let result = (|| {
+        let mode = if TRANSPORT.load(Ordering::Relaxed) {
+            "--transport-service"
+        } else {
+            "--service"
+        };
+        super::bootstrap::initialize_logging(&[mode.into()])
+            .context("服务日志初始化失败，请在设置中修复日志并启动")?;
+        if TRANSPORT.load(Ordering::Relaxed) {
+            serve_transport()
+        } else {
+            serve()
+        }
+    })();
+    match result {
         Ok(()) => report(SERVICE_STOPPED, 0),
         Err(error) => {
             log(&format!("Service stopped: {error:#}"));
-            report(SERVICE_STOPPED, ERROR_SERVICE_SPECIFIC_ERROR);
+            let code = error.chain().find_map(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(std::io::Error::raw_os_error)
+            });
+            report(
+                SERVICE_STOPPED,
+                code.map_or(ERROR_SERVICE_SPECIFIC_ERROR, |code| code as u32),
+            );
         }
     }
 }
@@ -475,6 +494,7 @@ fn read_transport() -> Result<crate::transport::Config> {
 }
 fn serve_transport() -> Result<()> {
     let config = read_transport()?;
+    let _ = config.recover_password()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -482,9 +502,10 @@ fn serve_transport() -> Result<()> {
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port))
             .await
             .context("内置 SSH 端口被占用")?;
+        let password_pipe = super::password_pipe::Listener::new()?;
         log(&format!("SSH ready on port {}", config.port));
         report(SERVICE_RUNNING, 0);
-        crate::transport::run(
+        let transport = crate::transport::run(
             listener,
             config,
             transport_path()?,
@@ -499,8 +520,11 @@ fn serve_transport() -> Result<()> {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             },
-        )
-        .await
+        );
+        tokio::select! {
+            result = transport => result,
+            result = password_pipe.serve(transport_path()?) => result,
+        }
     });
     runtime.shutdown_timeout(Duration::from_secs(3));
     result
@@ -532,12 +556,12 @@ fn worker(stop_name: &str) -> Result<()> {
     )?;
     let key = read_transport()?.backend_key;
     let shared = Arc::new(Shared::default());
-    let native = Arc::new(WindowsControl::new(shared.clone(), key)?);
+    let native = Arc::new(WindowsControl::new(shared.clone())?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        let state = AppState { native, shared: shared.clone(), capture: CaptureService::new(|| Box::new(WindowsCapture::default()))?, files: FileService::new(NoFiles) };
+        let state = AppState { transport_key: crate::server_auth::TransportKey::new(key)?, native, shared: shared.clone(), capture: CaptureService::new(|| Box::new(WindowsCapture::default()))?, files: FileService::new(NoFiles) };
         let server = super::pipe::serve(state);
         tokio::pin!(server);
         loop {
@@ -558,7 +582,10 @@ fn worker(stop_name: &str) -> Result<()> {
 }
 pub fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if let Err(error) = super::bootstrap::initialize_logging(&args) {
+    let service_mode = args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "--service" | "--transport-service"));
+    if !service_mode && let Err(error) = super::bootstrap::initialize_logging(&args) {
         if args.is_empty()
             || args.first().is_some_and(|arg| {
                 matches!(
@@ -570,6 +597,11 @@ pub fn run() -> Result<()> {
                         | "--prepare-uninstall"
                         | "--run-uninstall"
                         | "--export-logs"
+                        | "--start-background"
+                        | "--repair-runtime"
+                        | "--change-password"
+                        | "--regenerate-password"
+                        | "--set-startup"
                 )
             })
         {
@@ -618,7 +650,10 @@ pub fn run() -> Result<()> {
                 Ok(())
             }
             [mode] if mode == "--start-background" => super::ui::start_background(),
-            [mode] if mode == "--install-integrated" => super::bootstrap::install(),
+            [mode] if mode == "--repair-runtime" => super::setup::repair_runtime(),
+            [mode, launcher] if mode == "--install-integrated" => {
+                super::bootstrap::install(launcher.parse().context("安装启动进程参数无效")?)
+            }
             [mode] if mode == "--prepare-uninstall" => super::bootstrap::prepare_uninstall(),
             [mode, parent] if mode == "--run-uninstall" => {
                 super::setup::run_uninstall(parent.parse().context("卸载进程参数无效")?)
@@ -633,7 +668,8 @@ pub fn run() -> Result<()> {
                 Ok(())
             }
             [mode] if mode == "--export-logs" => super::bootstrap::export(),
-            [mode] if mode == "--change-password" => super::setup::change_password(),
+            [mode] if mode == "--change-password" => super::setup::change_password(false),
+            [mode] if mode == "--regenerate-password" => super::setup::change_password(true),
             [] => super::ui::run(false),
             [mode] if mode == "--settings" => super::ui::run(true),
             [mode] if mode == "--startup-ui" => super::ui::run(false),
@@ -652,6 +688,18 @@ pub fn run() -> Result<()> {
     })();
     if let Err(error) = &result {
         log(&format!("LanDeskServer failed: {error:#}"));
+        if args.first().is_some_and(|mode| {
+            matches!(
+                mode.as_str(),
+                "--start-background"
+                    | "--repair-runtime"
+                    | "--change-password"
+                    | "--regenerate-password"
+                    | "--set-startup"
+            )
+        }) {
+            super::ui::error_box(null_mut(), format!("{error:#}"));
+        }
     }
     result
 }

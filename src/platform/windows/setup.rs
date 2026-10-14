@@ -56,42 +56,45 @@ impl Lock {
             "创建安装互斥锁",
         )?;
         let wait = unsafe { WaitForSingleObject(handle.0, 0) };
-        ensure!(
-            wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED,
-            "另一个 LanDesk 安装或卸载正在运行"
-        );
+        match wait {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => {}
+            WAIT_TIMEOUT => {
+                anyhow::bail!("另一个 LanDesk 维护操作正在运行，请稍后重试")
+            }
+            WAIT_FAILED => {
+                return Err(std::io::Error::last_os_error()).context("等待维护互斥锁失败");
+            }
+            other => anyhow::bail!("维护互斥锁返回未知状态 {other}"),
+        }
         Ok(Self(handle))
     }
 }
 impl Drop for Lock {
     fn drop(&mut self) {
         unsafe {
-            ReleaseMutex(self.0.0);
+            if ReleaseMutex(self.0.0) == 0 {
+                crate::diagnostics::log(&format!(
+                    "释放维护锁失败: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
         }
     }
 }
 
-pub(super) fn change_password() -> Result<()> {
+pub(super) fn change_password(randomize: bool) -> Result<()> {
+    let password = if randomize {
+        crate::connection_password::generate()?
+    } else {
+        dialog::password()?
+    };
     let _lock = Lock::new()?;
     let directory = os::environment("ProgramData")?.join("LanDeskServer/transport");
     os::ensure_directory(&directory, os::TRANSPORT_ACL, &["S-1-5-19"])?;
     let path = directory.join("config.json");
     os::plain(&path)?;
-    let mut password = dialog::password(None)?;
-    if password.is_empty() {
-        password = crate::connection_password::generate()?;
-        let _ = dialog::password(Some(&password))?;
-    }
-    crate::transport::Config::change_password(&path, &password)?;
+    crate::transport::Config::change_stored_password(&path, &password)?;
     crate::diagnostics::log("Connection password changed; existing sessions retained");
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
-            null_mut(),
-            wide("连接密码已保存。下次连接请使用新密码；当前连接不受影响。").as_ptr(),
-            wide("LanDeskServer").as_ptr(),
-            windows_sys::Win32::UI::WindowsAndMessaging::MB_OK,
-        );
-    }
     Ok(())
 }
 struct Payload(PathBuf);
@@ -164,9 +167,28 @@ impl Paths {
             data,
         })
     }
-    fn logs(&self, role: &str) -> Result<()> {
+    fn prepare_logs(&self) -> Result<()> {
         os::ensure_directory(&self.data, os::PRIVATE, &[])?;
         os::ensure_directory(&self.logs, os::LOGS, &["S-1-5-32-545"])?;
+        for name in ["transport.log", "transport.previous.log"] {
+            let file = self.logs.join(name);
+            if file.exists() {
+                os::plain(&file)?;
+            } else {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&file)?;
+            }
+            os::protect(
+                &file,
+                "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;LS)(A;;GR;;;BU)",
+            )?;
+        }
+        Ok(())
+    }
+    fn logs(&self, role: &str) -> Result<()> {
+        self.prepare_logs()?;
         let file = self.logs.join(format!("{role}.log"));
         if file.exists() {
             os::plain(&file)?;
@@ -181,32 +203,38 @@ impl Paths {
         crate::diagnostics::log("Native Windows setup started");
         Ok(())
     }
-    fn transport(&self, existing: bool) -> Result<crate::transport::Config> {
+    fn transport(&self) -> Result<crate::transport::Config> {
+        self.prepare_logs()?;
         os::ensure_directory(&self.transport, os::TRANSPORT_ACL, &["S-1-5-19"])?;
         let path = self.transport.join("config.json");
-        if !path.exists() {
-            ensure!(!existing, "已安装服务缺少连接配置，未生成新身份");
-            let mut password = dialog::password(None)?;
-            if password.is_empty() {
-                password = crate::connection_password::generate()?;
-                let _ = dialog::password(Some(&password))?;
-            }
-            crate::transport::Config::create(&password, 2222)?.write_new(&path)?;
-        }
+        ensure!(!path.exists(), "全新安装前连接配置未清理");
+        let password = crate::connection_password::generate()?;
+        crate::transport::Config::create_stored(&password, 2222)?.write_new(&path)?;
         os::plain(&path)?;
         let config = crate::transport::Config::read(&path)?;
-        for name in ["transport.log", "transport.previous.log"] {
-            let file = self.logs.join(name);
-            if !file.exists() {
-                fs::write(&file, [])?;
-            }
-            os::protect(
-                &file,
-                "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;LS)(A;;GR;;;BU)",
-            )?;
-        }
+        let _ = config.recover_password()?;
         Ok(config)
     }
+}
+
+/// Explicit maintenance only: never regenerate credentials or device identity.
+pub(super) fn repair_runtime() -> Result<()> {
+    let _lock = Lock::new()?;
+    let paths = Paths::new()?;
+    scm::assert_owned(&paths.exe)?;
+    ensure!(
+        scm::open(scm::SERVER)?.is_some() && scm::open(scm::TRANSPORT)?.is_some(),
+        "后台服务未完整安装，请运行安装程序"
+    );
+    os::owned(&paths.data, &[])?;
+    os::owned(&paths.transport, &["S-1-5-19"])?;
+    let config = paths.transport.join("config.json");
+    os::plain(&config)?;
+    crate::transport::Config::read(&config)?;
+    paths
+        .prepare_logs()
+        .context("修复日志目录或权限失败，连接配置未更改")?;
+    super::ui::start_background()
 }
 fn desktop_ready(config: &crate::transport::Config) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -445,102 +473,141 @@ fn prepare_application(paths: &Paths, transaction: &mut Transaction) -> Result<O
     )?;
     Ok(backup)
 }
-fn update(
+/// Shared removal path for uninstall and fresh installation. No old connection
+/// configuration is deserialized: missing, legacy and damaged files are removed
+/// in exactly the same way after validating the managed resources.
+fn remove_installation(
     paths: &Paths,
-    progress: &dialog::Progress,
-    config: &crate::transport::Config,
-) -> Result<()> {
-    os::owned(&paths.app, &["S-1-5-19", "S-1-5-32-545"])?;
+    remove_display: bool,
+    clear_connection: bool,
+    launcher: u32,
+    stage: impl Fn(&str) -> Result<()>,
+) -> Result<bool> {
     scm::assert_owned(&paths.exe)?;
-    let server = scm::open(scm::SERVER)?.context("安装不完整: LanDeskServer 缺失")?;
-    let transport = scm::open(scm::TRANSPORT)?.context("安装不完整: LanDeskTransport 缺失")?;
-    let was_server = scm::status(&server)?.dwCurrentState
-        != windows_sys::Win32::System::Services::SERVICE_STOPPED;
-    let was_transport = scm::status(&transport)?.dwCurrentState
-        != windows_sys::Win32::System::Services::SERVICE_STOPPED;
-    drop(server);
-    drop(transport);
-    progress.stage("更新后台程序，保留密码、设备和启动设置…")?;
-    let snapshot = os::uninstall_snapshot(&paths.app)?;
-    let mut tx = Transaction::new();
-    let exe = paths.exe.clone();
-    tx.record("原服务运行状态", move || {
-        scm::stop(scm::SERVER)?;
-        scm::stop(scm::TRANSPORT)?;
-        if was_server {
-            scm::start(scm::SERVER)?;
-        } else if was_transport {
-            scm::start(scm::TRANSPORT)?;
-        }
-        Ok(())
-    });
-    let result = (|| -> Result<Option<PathBuf>> {
-        scm::stop(scm::SERVER)?;
-        scm::stop(scm::TRANSPORT)?;
-        os::close_installed_processes(&exe)?;
-        let backup = prepare_application(paths, &mut tx)?;
-        // A later failed health check must stop the new binary before restoring the old file.
-        tx.record("停止更新后服务", || {
-            scm::stop(scm::SERVER)?;
-            scm::stop(scm::TRANSPORT)
-        });
-        if was_server {
-            scm::start(scm::SERVER)?;
-            desktop_ready(config)?;
-        } else if was_transport {
-            scm::start(scm::TRANSPORT)?;
-        }
-        tx.record("卸载入口", move || snapshot.restore());
-        os::register_uninstall(&paths.app)?;
-        Ok(backup)
-    })();
-    match result {
-        Ok(backup) => {
-            if let Some(backup) = backup {
-                fs::remove_file(backup).context("更新成功，旧程序备份清理失败")?;
-            }
-            Ok(())
-        }
-        Err(error) => Err(tx.rollback(error)),
+    let marker = paths.app.join("landesk-owner.txt");
+    let owned_app = marker.exists();
+    if owned_app {
+        os::owned(&paths.app, &["S-1-5-19", "S-1-5-32-545"])?;
     }
+    if paths.exe.exists() {
+        os::plain(&paths.exe)?;
+        ensure!(
+            owned_app || fs::read(&paths.exe)? == fs::read(std::env::current_exe()?)?,
+            "同名程序没有 LanDesk 归属标记，未删除"
+        );
+    }
+    let _ = os::uninstall_snapshot(&paths.app)?;
+    let firewall = os::firewall(&paths.exe)?.is_some();
+    let shortcut = os::shortcut_path()?;
+    if shortcut.exists() {
+        os::shortcut_owned(&shortcut, &paths.exe)?;
+    }
+    let startup = os::read(os::RUN, scm::SERVER)?;
+    ensure!(
+        startup.is_none()
+            || startup
+                == Some(os::text(&format!(
+                    "\"{}\" --startup-ui",
+                    paths.exe.display()
+                ))),
+        "启动入口不属于 LanDesk"
+    );
+    let connection = paths.transport.join("config.json");
+    if clear_connection && paths.transport.exists() {
+        os::owned(&paths.transport, &["S-1-5-19"])?;
+        if connection.exists() {
+            os::plain(&connection)?;
+        }
+    }
+    stage("停止旧后台服务和管理界面…")?;
+    scm::stop(scm::SERVER)?;
+    scm::stop(scm::TRANSPORT)?;
+    os::close_installed_processes(&paths.exe, launcher)?;
+    stage("删除旧服务，等待 Windows 释放服务条目…")?;
+    scm::delete(scm::SERVER)?;
+    scm::delete(scm::TRANSPORT)?;
+    stage("移除旧启动入口、快捷方式和防火墙规则…")?;
+    if startup.is_some() {
+        os::put(os::RUN, scm::SERVER, None)?;
+    }
+    if shortcut.exists() {
+        fs::remove_file(shortcut)?;
+    }
+    if firewall {
+        os::remove_firewall()?;
+    }
+    restore_policy(&paths.data)?;
+    let mut reboot = false;
+    if remove_display {
+        stage("移除 LanDesk 自建虚拟显示设备…")?;
+        let result = display::uninstall()?;
+        reboot = result["reboot_required"] == true;
+        crate::diagnostics::log(&format!("Display uninstall: {result}"));
+    }
+    if clear_connection {
+        stage("清理旧连接配置，重新生成密码及设备身份…")?;
+        if connection.exists() {
+            fs::remove_file(&connection)?;
+        }
+        if os::read(os::OPTIONS, "MinimizeOnStart")?.is_some() {
+            os::put(os::OPTIONS, "MinimizeOnStart", None)?;
+        }
+    }
+    stage("移除旧程序和应用列表入口…")?;
+    // A manually invoked installer may itself be in Program Files. That image
+    // is already the new EXE; keep it and its launcher while removing services.
+    if paths.exe.exists()
+        && fs::canonicalize(&paths.exe)? != fs::canonicalize(std::env::current_exe()?)?
+    {
+        fs::remove_file(&paths.exe)?;
+    }
+    if owned_app && !paths.exe.exists() {
+        fs::remove_file(marker)?;
+    }
+    if paths.app.exists() && fs::read_dir(&paths.app)?.next().is_none() {
+        fs::remove_dir(&paths.app)?;
+    }
+    os::delete_key(os::UNINSTALL)?;
+    Ok(reboot)
 }
-pub(super) fn install() -> Result<()> {
+pub(super) fn install(launcher: u32) -> Result<()> {
     let _lock = Lock::new()?;
     let paths = Paths::new()?;
     paths.logs("install")?;
     let result = (|| {
         let _com = os::Com::new()?;
         let progress = dialog::Progress::new("正在安装 LanDeskServer")?;
-        progress.stage("配置加密连接…")?;
-        let existing = scm::open(scm::SERVER)?.is_some() || scm::open(scm::TRANSPORT)?.is_some();
-        scm::assert_owned(&paths.exe)?;
-        let config = paths.transport(existing)?;
-        if existing {
-            update(&paths, &progress, &config)?;
-            progress.stage("更新完成")?;
-            return Ok(());
-        }
-        let payload = Payload::new()?;
-        let shortcut = os::shortcut_path()?;
-        ensure!(
-            os::firewall(&paths.exe)?.is_none(),
-            "LanDesk 防火墙规则已存在，请检查安装状态"
-        );
-        ensure!(!shortcut.exists(), "LanDesk 快捷方式已存在，请检查安装状态");
-        ensure!(
-            os::read(os::RUN, scm::SERVER)?.is_none(),
-            "LanDesk 启动入口已存在，请检查安装状态"
-        );
-        let uninstall = os::uninstall_snapshot(&paths.app)?;
-        let policy = os::read(os::POLICY, os::SAS)?;
-        if let Some(value) = &policy {
-            ensure!(
-                *value == os::number(1) || *value == os::number(3),
-                "已有策略禁止服务生成 Ctrl+Alt+Delete"
-            );
-        }
+        remove_installation(&paths, false, true, launcher, |text| progress.stage(text))
+            .context("旧安装清理未完成，新版尚未安装；请保留日志并重新运行安装程序")?;
+        progress.stage("旧安装已清理，开始全新安装…")?;
         let mut tx = Transaction::new();
+        let connection = paths.transport.join("config.json");
+        tx.record("本次连接配置", move || {
+            if connection.exists() {
+                os::plain(&connection)?;
+                fs::remove_file(&connection)?;
+            }
+            Ok(())
+        });
         let result = (|| -> Result<(bool, Option<PathBuf>)> {
+            progress.stage("生成并保存新的加密连接密码…")?;
+            let config = paths.transport()?;
+            let payload = Payload::new()?;
+            let shortcut = os::shortcut_path()?;
+            ensure!(os::firewall(&paths.exe)?.is_none(), "旧防火墙规则未清理");
+            ensure!(!shortcut.exists(), "旧快捷方式未清理");
+            ensure!(
+                os::read(os::RUN, scm::SERVER)?.is_none(),
+                "旧启动入口未清理"
+            );
+            let uninstall = os::uninstall_snapshot(&paths.app)?;
+            let policy = os::read(os::POLICY, os::SAS)?;
+            if let Some(value) = &policy {
+                ensure!(
+                    *value == os::number(1) || *value == os::number(3),
+                    "已有策略禁止服务生成 Ctrl+Alt+Delete"
+                );
+            }
             progress.stage("安装或复用虚拟显示器…")?;
             let reboot = install_display(&payload, &mut tx)?;
             progress.stage("准备服务端程序…")?;
@@ -607,20 +674,19 @@ pub(super) fn install() -> Result<()> {
                     fs::remove_file(backup).context("安装成功，旧程序备份清理失败")?;
                 }
                 progress.stage("安装完成")?;
-                if reboot {
-                    dialog::complete(
-                        "安装完成。Windows 要求重启以启用虚拟显示驱动，请重启后连接。",
-                    );
-                }
-                Ok(())
+                Ok(reboot)
             }
-            Err(error) => Err(tx.rollback(error)),
+            Err(error) => Err(tx.rollback(error)).context("旧安装已清理，新版安装未完成；已尝试回滚本次创建的组件，详情见日志；可重新运行 EXE"),
         }
     })();
     if let Err(error) = &result {
         crate::diagnostics::log(&format!("Native installation FAILED: {error:#}"));
     }
-    result
+    drop(_lock);
+    if result? {
+        dialog::complete("安装完成。Windows 要求重启以启用虚拟显示驱动，请重启后连接。");
+    }
+    Ok(())
 }
 
 pub(super) fn prepare_uninstall() -> Result<()> {
@@ -683,61 +749,21 @@ pub(super) fn run_uninstall(parent: u32) -> Result<()> {
                 "读取卸载启动进程失败"
             );
         }
-        let _lock = Lock::new()?;
-        let paths = Paths::new()?;
-        paths.logs("uninstall")?;
         let Some(remove_display) = dialog::uninstall_choice()? else {
             crate::diagnostics::log("卸载已取消");
             return Ok(());
         };
+        let _lock = Lock::new()?;
+        let paths = Paths::new()?;
+        paths.logs("uninstall")?;
         let _com = os::Com::new()?;
         let progress = dialog::Progress::new("正在卸载 LanDeskServer")?;
-        os::owned(&paths.app, &["S-1-5-19", "S-1-5-32-545"])?;
-        scm::assert_owned(&paths.exe)?;
-        let _ = os::uninstall_snapshot(&paths.app)?;
-        let firewall = os::firewall(&paths.exe)?.is_some();
-        let shortcut = os::shortcut_path()?;
-        if shortcut.exists() {
-            os::shortcut_owned(&shortcut, &paths.exe)?;
-        }
-        let startup = os::read(os::RUN, scm::SERVER)?;
-        let expected_startup = os::text(&format!("\"{}\" --startup-ui", paths.exe.display()));
-        ensure!(
-            startup.is_none() || startup == Some(expected_startup),
-            "启动入口不属于 LanDesk"
-        );
-        progress.stage("停止后台服务及管理界面…")?;
-        scm::stop(scm::SERVER)?;
-        scm::stop(scm::TRANSPORT)?;
-        os::close_installed_processes(&paths.exe)?;
-        progress.stage("移除服务、开机入口与防火墙规则…")?;
-        scm::delete(scm::SERVER)?;
-        scm::delete(scm::TRANSPORT)?;
-        if startup.is_some() {
-            os::put(os::RUN, scm::SERVER, None)?;
-        }
-        if shortcut.exists() {
-            fs::remove_file(shortcut)?;
-        }
-        if firewall {
-            os::remove_firewall()?;
-        }
-        restore_policy(&paths.data)?;
-        let mut reboot = false;
-        if remove_display {
-            progress.stage("移除 LanDesk 自建虚拟显示设备…")?;
-            let result = display::uninstall()?;
-            reboot = result["reboot_required"] == true;
-            crate::diagnostics::log(&format!("Display uninstall: {result}"));
-        }
-        progress.stage("移除程序及应用列表入口…")?;
-        fs::remove_file(&paths.exe)?;
-        fs::remove_file(paths.app.join("landesk-owner.txt"))?;
-        if fs::read_dir(&paths.app)?.next().is_none() {
-            fs::remove_dir(&paths.app)?;
-        }
-        os::delete_key(os::UNINSTALL)?;
+        let reboot = remove_installation(&paths, remove_display, false, 0, |text| {
+            progress.stage(text)
+        })
+        .context("卸载未完成，部分组件可能已移除；详情见日志")?;
         progress.stage("卸载完成，密码配置、日志和其他文件已保留")?;
+        drop(_lock);
         dialog::complete(if reboot {
             "卸载完成。配置和日志已保留。Windows 要求重启以完成显示设备移除。"
         } else {
@@ -746,36 +772,48 @@ pub(super) fn run_uninstall(parent: u32) -> Result<()> {
         Ok(())
     })();
     if let Err(error) = &result {
-        crate::diagnostics::log(&format!(
-            "Native uninstall FAILED (some components may already be removed): {error:#}"
-        ));
-        super::ui::error_box(
-            null_mut(),
-            format!("卸载未完成：{error:#}。部分组件可能已移除，请保留日志。"),
-        );
+        crate::diagnostics::log(&format!("Native uninstall FAILED: {error:#}"));
+        super::ui::error_box(null_mut(), format!("卸载未完成：{error:#}。请保留日志。"));
     }
     // The EXE itself stays queued for deletion at the next reboot; no external cleanup script.
     result
 }
 pub(super) fn export() -> Result<()> {
-    let _lock = Lock::new()?;
     let paths = Paths::new()?;
+    let path = export_at(&paths)?;
+    crate::diagnostics::log(&format!("日志已导出: {}", path.display()));
+    Ok(())
+}
+fn export_at(paths: &Paths) -> Result<PathBuf> {
     os::owned(&paths.data, &[])?;
-    os::owned(&paths.logs, &["S-1-5-32-545"])?;
-    let exports = paths.logs.join("exports");
-    if !exports.exists() {
-        os::create_directory(&exports, os::LOGS)?;
-    } else {
-        os::plain_chain(&exports)?;
-    }
     let mut entries = Vec::new();
-    for entry in fs::read_dir(&paths.logs)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if crate::setup::diagnostic_name(&name) {
-            os::plain(&entry.path())?;
-            entries.push((name, fs::read(entry.path())?));
+    let mut errors = Vec::new();
+    // Diagnostics remain available while maintenance owns the mutex. A snapshot
+    // may span log rotation; failed reads are reported, never replaced by other data.
+    let snapshot = (|| -> Result<()> {
+        os::owned(&paths.logs, &["S-1-5-32-545"])?;
+        for entry in fs::read_dir(&paths.logs)? {
+            let result = (|| -> Result<()> {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if crate::setup::diagnostic_name(&name) {
+                    os::plain(&entry.path())?;
+                    entries.push((
+                        name,
+                        fs::read(entry.path())
+                            .with_context(|| entry.path().display().to_string())?,
+                    ));
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                errors.push(format!("{error:#}"));
+            }
         }
+        Ok(())
+    })();
+    if let Err(error) = snapshot {
+        errors.push(format!("{error:#}"));
     }
     let mut windows = OSVERSIONINFOW {
         dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
@@ -785,8 +823,12 @@ pub(super) fn export() -> Result<()> {
         unsafe { windows_sys::Wdk::System::SystemServices::RtlGetVersion(&mut windows) } == 0,
         "读取 Windows 版本失败"
     );
-    let status = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"windows":{"major":windows.dwMajorVersion,"minor":windows.dwMinorVersion,"build":windows.dwBuildNumber},"services":scm::report().unwrap_or_else(|error|serde_json::json!({"error":format!("{error:#}")})),"display":display::status().unwrap_or_else(|error|serde_json::json!({"error":format!("{error:#}")})),"interactive":super::interactive::report()});
+    let status = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"log_errors":errors,"windows":{"major":windows.dwMajorVersion,"minor":windows.dwMinorVersion,"build":windows.dwBuildNumber},"services":scm::report().unwrap_or_else(|error|serde_json::json!({"error":format!("{error:#}")})),"display":display::status().unwrap_or_else(|error|serde_json::json!({"error":format!("{error:#}")})),"interactive":super::interactive::report()});
     entries.push(("status.json".into(), serde_json::to_vec_pretty(&status)?));
+    // Keep exports outside the runtime log directory: missing logs remain a
+    // visible fault until the explicit repair operation provisions them.
+    let exports = paths.data.join("diagnostics");
+    os::ensure_directory(&exports, os::LOGS, &["S-1-5-32-545"])?;
     let path = exports.join(format!("LanDeskServer-diagnostics-{}.zip", unique()?));
     let result: Result<()> = (|| {
         let file = fs::OpenOptions::new()
@@ -801,8 +843,7 @@ pub(super) fn export() -> Result<()> {
         fs::remove_file(&path).context("导出失败后的文件清理失败")?;
     }
     result?;
-    crate::diagnostics::log(&format!("日志已导出: {}", path.display()));
-    Ok(())
+    Ok(path)
 }
 
 pub(super) fn status() -> Result<serde_json::Value> {
@@ -814,6 +855,195 @@ pub(super) fn status() -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn isolated_paths(payload: &Payload) -> Paths {
+        let data = payload.0.join("data");
+        let app = payload.0.join("app");
+        Paths {
+            exe: app.join("LanDeskServer.exe"),
+            transport: data.join("transport"),
+            logs: data.join("logs"),
+            app,
+            data,
+        }
+    }
+    #[test]
+    #[ignore = "Requires Windows administrator; uses isolated directories and the maintenance mutex, never changes services"]
+    fn native_setup_log_repair_preserves_config_and_export_works_while_locked() -> Result<()> {
+        let payload = Payload::new()?;
+        let paths = isolated_paths(&payload);
+        os::ensure_directory(&paths.data, os::PRIVATE, &[])?;
+        os::ensure_directory(&paths.transport, os::TRANSPORT_ACL, &["S-1-5-19"])?;
+        let config = paths.transport.join("config.json");
+        // Repair must not even parse or rewrite this file.
+        fs::write(&config, b"existing identity and ciphertext")?;
+        let lock = Lock::new()?;
+        // Use another thread: Windows mutexes are recursive on the owning thread.
+        let export_paths = isolated_paths(&payload);
+        let archive = std::thread::spawn(move || export_at(&export_paths))
+            .join()
+            .map_err(|_| anyhow::anyhow!("Export test panicked"))??;
+        ensure!(!paths.logs.exists(), "Export silently created runtime logs");
+        let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
+        let status: serde_json::Value = serde_json::from_reader(zip.by_name("status.json")?)?;
+        ensure!(
+            !status["log_errors"].as_array().unwrap().is_empty(),
+            "Missing log directory was not reported"
+        );
+        ensure!(
+            zip.len() == 1,
+            "Credentials or unrelated files were exported"
+        );
+        drop(zip);
+        paths.prepare_logs()?;
+        fs::write(paths.logs.join("transport.log"), b"existing log")?;
+        paths.prepare_logs()?;
+        ensure!(
+            fs::read(&config)? == b"existing identity and ciphertext",
+            "Repair changed connection configuration"
+        );
+        ensure!(
+            fs::read(paths.logs.join("transport.log"))? == b"existing log",
+            "Repair truncated logs"
+        );
+        ensure!(
+            paths.logs.join("transport.previous.log").is_file(),
+            "Rotation target missing"
+        );
+        drop(lock);
+        Ok(())
+    }
+    #[test]
+    #[ignore = "Requires Windows administrator; only acquires the maintenance mutex"]
+    fn native_setup_maintenance_lock_reports_contention_and_releases() -> Result<()> {
+        let lock = Lock::new()?;
+        let error = std::thread::spawn(|| Lock::new().err().map(|error| error.to_string()))
+            .join()
+            .unwrap()
+            .context("Concurrent maintenance unexpectedly acquired the lock")?;
+        ensure!(
+            error.contains("维护操作正在运行"),
+            "Wrong contention error: {error}"
+        );
+        drop(lock);
+        std::thread::spawn(|| Lock::new().map(drop)).join().unwrap()
+    }
+    #[test]
+    #[ignore = "Requires Windows administrator and a clean machine; creates stopped test services and managed entries, never installs a driver"]
+    fn native_setup_fresh_install_removes_legacy_or_missing_config_and_reuses_service_names()
+    -> Result<()> {
+        let _com = os::Com::new()?;
+        for legacy_config_exists in [true, false] {
+            let payload = Payload::new()?;
+            let app = payload.0.join("app");
+            let data = payload.0.join("data");
+            let paths = Paths {
+                exe: app.join("LanDeskServer.exe"),
+                transport: data.join("transport"),
+                logs: data.join("logs"),
+                app,
+                data,
+            };
+            let shortcut = os::shortcut_path()?;
+            // Refuse to touch a developer's actual installation or settings.
+            ensure!(
+                scm::open(scm::SERVER)?.is_none() && scm::open(scm::TRANSPORT)?.is_none(),
+                "Real LanDesk services exist; test refused"
+            );
+            ensure!(
+                os::firewall(&paths.exe)?.is_none() && !shortcut.exists(),
+                "Real LanDesk firewall/shortcut exists; test refused"
+            );
+            ensure!(
+                os::read(os::RUN, scm::SERVER)?.is_none()
+                    && os::read(os::OPTIONS, "MinimizeOnStart")?.is_none(),
+                "Real LanDesk settings exist; test refused"
+            );
+            let _ = os::uninstall_snapshot(&paths.app)?;
+            os::ensure_directory(&paths.app, os::APP, &["S-1-5-19", "S-1-5-32-545"])?;
+            os::ensure_directory(&paths.data, os::PRIVATE, &[])?;
+            os::ensure_directory(&paths.transport, os::TRANSPORT_ACL, &["S-1-5-19"])?;
+            fs::write(&paths.exe, b"owned old test executable")?;
+            fs::write(paths.app.join("aad-user-file"), b"keep unrelated contents")?;
+            let driver = paths.app.join("virtual-display-25.7.23");
+            fs::create_dir(&driver)?;
+            fs::write(driver.join("existing-driver"), b"keep display contents")?;
+            let config_path = paths.transport.join("config.json");
+            if legacy_config_exists {
+                fs::write(&config_path, br#"{"port":2222,"password_hash":"legacy"}"#)?;
+            }
+            let result = (|| -> Result<()> {
+                drop(scm::create(&paths.exe, scm::TRANSPORT, true, None)?);
+                drop(scm::create(
+                    &paths.exe,
+                    scm::SERVER,
+                    false,
+                    Some(scm::TRANSPORT),
+                )?);
+                os::add_firewall(&paths.exe, 2222)?;
+                os::create_shortcut(&shortcut, &paths.exe)?;
+                os::put(
+                    os::RUN,
+                    scm::SERVER,
+                    Some(&os::text(&format!(
+                        "\"{}\" --startup-ui",
+                        paths.exe.display()
+                    ))),
+                )?;
+                os::put(os::OPTIONS, "MinimizeOnStart", Some(&os::number(1)))?;
+                os::register_uninstall(&paths.app)?;
+                remove_installation(&paths, false, true, 0, |_| Ok(()))?;
+                ensure!(
+                    scm::open(scm::SERVER)?.is_none() && scm::open(scm::TRANSPORT)?.is_none(),
+                    "Old services remain"
+                );
+                ensure!(
+                    !config_path.exists() && !paths.exe.exists(),
+                    "Old configuration/executable remains"
+                );
+                ensure!(
+                    !shortcut.exists()
+                        && os::firewall(&paths.exe)?.is_none()
+                        && os::read(os::RUN, scm::SERVER)?.is_none(),
+                    "Old managed entries remain"
+                );
+                ensure!(
+                    fs::read(paths.app.join("aad-user-file"))? == b"keep unrelated contents"
+                        && fs::read(driver.join("existing-driver"))? == b"keep display contents",
+                    "Unrelated files or display contents changed"
+                );
+                let config = paths.transport()?;
+                let password = config.recover_password()?;
+                ensure!(
+                    password.len() == 8 && password.bytes().all(|b| b.is_ascii_alphanumeric()),
+                    "Fresh password invalid"
+                );
+                ensure!(
+                    crate::transport::Config::read(&config_path)?
+                        .recover_password()?
+                        .as_str()
+                        == password.as_str(),
+                    "Saved fresh password differs"
+                );
+                // Prove that real SCM names can be registered again immediately.
+                os::ensure_directory(&paths.app, os::APP, &["S-1-5-19", "S-1-5-32-545"])?;
+                fs::write(&paths.exe, b"owned new test executable")?;
+                drop(scm::create(&paths.exe, scm::TRANSPORT, true, None)?);
+                drop(scm::create(
+                    &paths.exe,
+                    scm::SERVER,
+                    false,
+                    Some(scm::TRANSPORT),
+                )?);
+                Ok(())
+            })();
+            let cleanup = remove_installation(&paths, false, true, 0, |_| Ok(())).map(|_| ());
+            if let Err(error) = cleanup {
+                return Err(error).context("Fresh-install native test cleanup failed");
+            }
+            result?;
+        }
+        Ok(())
+    }
     #[test]
     #[ignore = "Requires Windows administrator; writes only its private temporary directory"]
     fn native_setup_application_preserves_residue_and_restores_previous_exe() -> Result<()> {

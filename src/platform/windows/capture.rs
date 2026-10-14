@@ -1,11 +1,11 @@
 use super::desktop::{Desktop, checked, wide};
+use crate::platform::{CaptureInfo, DisplayInfo};
 use crate::{
     capture::FrameEvent,
     platform::{CaptureBackend, DisplayTarget, FrameSource},
 };
 use anyhow::{Context, Result, ensure};
 use image::codecs::jpeg::JpegEncoder;
-use serde_json::{Value, json};
 use std::{
     mem::size_of,
     ptr::{null, null_mut},
@@ -458,11 +458,27 @@ impl FrameSource for Capture {
         self.size.send_replace(dimensions(&self.monitor, width)?);
         Ok(())
     }
-    fn info(&self, requested: Option<u32>) -> Value {
+    fn info(&self, requested: Option<u32>) -> CaptureInfo {
         let (width, height) = *self.size.borrow();
-        json!({"type":"display_state", "width":width,"height":height,"native_width":self.monitor.width,
-            "native_height":self.monitor.height,"requested_width":requested,"display_id":self.monitor.id,
-            "displays":self.displays.iter().map(|m|json!({"id":m.id,"width":m.width,"height":m.height,"main":m.main,"virtual":m.virtual_display})).collect::<Vec<_>>()})
+        CaptureInfo {
+            width,
+            height,
+            native_width: self.monitor.width,
+            native_height: self.monitor.height,
+            requested_width: requested,
+            display_id: self.monitor.id,
+            displays: self
+                .displays
+                .iter()
+                .map(|m| DisplayInfo {
+                    id: m.id,
+                    width: m.width,
+                    height: m.height,
+                    main: m.main,
+                    virtual_display: m.virtual_display,
+                })
+                .collect(),
+        }
     }
 }
 

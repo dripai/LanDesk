@@ -1,7 +1,5 @@
-use crate::{
-    platform::macos::input::Input,
-    protocol::{ClientMessage, MAX_TEXT_BYTES},
-};
+use crate::platform::InputEvent;
+use crate::{platform::macos::input::Input, protocol::MAX_TEXT_BYTES};
 use anyhow::{Result, ensure};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
@@ -24,6 +22,32 @@ use std::{
     time::Instant,
 };
 use tokio::sync::oneshot;
+use zeroize::Zeroizing;
+
+struct PasswordUi {
+    label: Retained<NSTextField>,
+    copy: Retained<NSButton>,
+    password: std::cell::RefCell<Option<Zeroizing<String>>>,
+}
+impl PasswordUi {
+    fn update(&self, password: Option<Zeroizing<String>>) {
+        self.label.setStringValue(&NSString::from_str(
+            &password
+                .as_ref()
+                .map(|p| format!("连接密码：{}", p.as_str()))
+                .unwrap_or_default(),
+        ));
+        self.copy.setEnabled(password.is_some());
+        *self.password.borrow_mut() = password;
+    }
+    fn error(&self, error: anyhow::Error) {
+        let mtm = MainThreadMarker::new().expect("password UI runs on main thread");
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("连接密码操作失败"));
+        alert.setInformativeText(&NSString::from_str(&format!("{error:#}")));
+        alert.runModal();
+    }
+}
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -38,17 +62,34 @@ unsafe extern "C" {
 define_class!(
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
+    #[ivars = PasswordUi]
     struct PermissionActions;
     unsafe impl NSObjectProtocol for PermissionActions {}
     impl PermissionActions {
         #[unsafe(method(changePassword:))]
         fn change_password(&self, _sender: &AnyObject) {
             let mtm = MainThreadMarker::new().expect("password UI runs on main thread");
-            if let Err(error) = super::connection::change_password(mtm) {
-                let alert = NSAlert::new(mtm);
-                alert.setMessageText(&NSString::from_str("连接密码未保存"));
-                alert.setInformativeText(&NSString::from_str(&format!("{error:#}")));
-                alert.runModal();
+            match super::connection::change_password(mtm) {
+                Ok(Some(password)) => self.ivars().update(Some(password)),
+                Ok(None) => {},
+                Err(error) => self.ivars().error(error),
+            }
+        }
+        #[unsafe(method(regeneratePassword:))]
+        fn regenerate_password(&self, _sender: &AnyObject) {
+            match super::connection::regenerate_password() {
+                Ok(password) => self.ivars().update(Some(password)),
+                Err(error) => self.ivars().error(error),
+            }
+        }
+        #[unsafe(method(copyPassword:))]
+        fn copy_password(&self, _sender: &AnyObject) {
+            if let Some(password) = self.ivars().password.borrow().as_ref() {
+                let pasteboard = NSPasteboard::generalPasteboard();
+                pasteboard.clearContents();
+                if !pasteboard.setString_forType(&NSString::from_str(password), unsafe { NSPasteboardTypeString }) {
+                    self.ivars().error(anyhow::anyhow!("无法复制连接密码"));
+                }
             }
         }
         #[unsafe(method(requestCapture:))]
@@ -99,7 +140,7 @@ pub enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     Input {
-        message: ClientMessage,
+        message: InputEvent,
         reply: oneshot::Sender<Result<()>>,
     },
     RestoreSession {
@@ -145,7 +186,7 @@ impl Native {
         self.tx.send(Command::BeginInput { reply })?;
         result.await?
     }
-    pub async fn input(&self, message: ClientMessage) -> Result<()> {
+    pub async fn input(&self, message: InputEvent) -> Result<()> {
         let (reply, result) = oneshot::channel();
         self.tx.send(Command::Input { message, reply })?;
         result.await?
@@ -340,14 +381,19 @@ pub fn initialize_app() -> MainThreadMarker {
     mtm
 }
 
-pub fn run(native: Native, rx: mpsc::Receiver<Command>, port: u16) -> Result<()> {
+pub fn run(
+    native: Native,
+    rx: mpsc::Receiver<Command>,
+    port: u16,
+    password: Zeroizing<String>,
+) -> Result<()> {
     let mtm = MainThreadMarker::new().expect("native UI runs on main thread");
     let app = NSApplication::sharedApplication(mtm);
     // These retained windows never release themselves when closed.
     let panel = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 380.0)),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 420.0)),
             NSWindowStyleMask::Titled
                 | NSWindowStyleMask::Closable
                 | NSWindowStyleMask::Miniaturizable,
@@ -365,34 +411,45 @@ pub fn run(native: Native, rx: mpsc::Receiver<Command>, port: u16) -> Result<()>
     };
     panel.setDelegate(Some(ProtocolObject::from_ref(&*lifecycle)));
     panel.center();
-    label(&panel, mtm, "LanDesk", 324.0, 28.0);
-    label(
-        &panel,
-        mtm,
-        &format!("连接端口：{port} · 使用 LanDesk 连接密码"),
-        278.0,
-        16.0,
-    );
-    let status = label(&panel, mtm, "等待连接", 230.0, 15.0);
-    let permission_label = label(&panel, mtm, "", 180.0, 13.0);
-    let actions: Retained<PermissionActions> =
-        unsafe { msg_send![PermissionActions::alloc(mtm), init] };
-    let password = unsafe {
-        NSButton::buttonWithTitle_target_action(
-            &NSString::from_str("修改连接密码"),
-            Some(&actions),
-            Some(sel!(changePassword:)),
-            mtm,
-        )
+    label(&panel, mtm, "LanDesk", 364.0, 28.0);
+    label(&panel, mtm, &format!("连接端口：{port}"), 320.0, 16.0);
+    let status = label(&panel, mtm, "等待连接", 280.0, 15.0);
+    let password_label = label(&panel, mtm, "", 238.0, 20.0);
+    let copy = NSButton::new(mtm);
+    let actions: Retained<PermissionActions> = unsafe {
+        let actions = PermissionActions::alloc(mtm).set_ivars(PasswordUi {
+            label: password_label,
+            copy: copy.clone(),
+            password: std::cell::RefCell::new(None),
+        });
+        msg_send![super(actions), init]
     };
-    password.setFrame(NSRect::new(
-        NSPoint::new(24.0, 132.0),
-        NSSize::new(250.0, 32.0),
-    ));
-    panel
-        .contentView()
-        .expect("native content view")
-        .addSubview(&password);
+    for (title, action, x) in [
+        ("复制密码", sel!(copyPassword:), 24.0),
+        ("随机更换", sel!(regeneratePassword:), 180.0),
+        ("修改密码", sel!(changePassword:), 336.0),
+    ] {
+        let button = if x == 24.0 {
+            copy.clone()
+        } else {
+            NSButton::new(mtm)
+        };
+        button.setTitle(&NSString::from_str(title));
+        unsafe {
+            button.setTarget(Some(&actions));
+            button.setAction(Some(action));
+        }
+        button.setFrame(NSRect::new(
+            NSPoint::new(x, 190.0),
+            NSSize::new(145.0, 32.0),
+        ));
+        panel
+            .contentView()
+            .expect("native content view")
+            .addSubview(&button);
+    }
+    actions.ivars().update(Some(password));
+    let permission_label = label(&panel, mtm, "", 134.0, 13.0);
     for (title, action, x) in [
         ("授权屏幕录制", sel!(requestCapture:), 24.0),
         ("授权辅助功能", sel!(requestInput:), 290.0),
@@ -492,7 +549,7 @@ impl DesktopControl for Native {
     fn begin_input(&self, display_id: u32) -> BoxFuture<'_, Result<()>> {
         Box::pin(Native::begin_input(self, display_id))
     }
-    fn input(&self, message: ClientMessage) -> BoxFuture<'_, Result<()>> {
+    fn input(&self, message: InputEvent) -> BoxFuture<'_, Result<()>> {
         Box::pin(Native::input(self, message))
     }
     fn paste_text(&self, text: String) -> BoxFuture<'_, Result<()>> {

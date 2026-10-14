@@ -25,6 +25,7 @@ use zeroize::Zeroizing;
 pub const USER: &str = "landesk";
 pub const DEFAULT_PORT: u16 = 2222;
 pub const AUTH_HEADER: &str = "x-landesk-transport-key";
+pub const PASSWORD_PURPOSE: &str = "LanDesk.Server.ConnectionPassword.v1";
 
 pub trait StreamIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> StreamIo for T {}
@@ -37,11 +38,16 @@ pub type Backend = Arc<
 pub struct Config {
     pub port: u16,
     password_hash: String,
+    display_password: crate::secret_storage::Secret,
     host_key: String,
     pub backend_key: String,
 }
 impl Config {
-    pub fn create(password: &str, port: u16) -> Result<Self> {
+    pub fn create(
+        password: &str,
+        port: u16,
+        display_password: crate::secret_storage::Secret,
+    ) -> Result<Self> {
         crate::connection_password::validate(password)?;
         ensure!(port != 0, "SSH 端口无效");
         let password_hash = Argon2::default()
@@ -57,11 +63,40 @@ impl Config {
         Ok(Self {
             port,
             password_hash,
+            display_password,
             host_key: key
                 .to_openssh(russh::keys::ssh_key::LineEnding::LF)?
                 .to_string(),
             backend_key: seed.iter().map(|b| format!("{b:02x}")).collect(),
         })
+    }
+    pub fn create_stored(password: &str, port: u16) -> Result<Self> {
+        Self::create(
+            password,
+            port,
+            crate::secret_storage::Secret::encrypt(password.as_bytes(), PASSWORD_PURPOSE)?,
+        )
+    }
+    /// Only the recoverable connection password can be sent to the local UI.
+    /// Never expose host/backend keys or the entire service configuration.
+    pub fn password_secret(&self) -> crate::secret_storage::Secret {
+        self.display_password.clone()
+    }
+    pub fn recover_password(&self) -> Result<Zeroizing<String>> {
+        let bytes = self.display_password.decrypt(PASSWORD_PURPOSE)?;
+        let password =
+            Zeroizing::new(String::from_utf8(bytes.to_vec()).context("连接密码解密后编码无效")?);
+        crate::connection_password::validate(&password)?;
+        ensure!(
+            Argon2::default()
+                .verify_password(
+                    password.as_bytes(),
+                    &PasswordHash::new(&self.password_hash)?
+                )
+                .is_ok(),
+            "显示密码与连接校验配置不一致"
+        );
+        Ok(password)
     }
     pub fn read(path: &Path) -> Result<Self> {
         let text = Zeroizing::new(
@@ -101,13 +136,34 @@ impl Config {
         Ok(())
     }
     /// Only the hash changes; host identity, port and desktop key stay unchanged.
-    pub fn change_password(path: &Path, password: &str) -> Result<()> {
+    pub fn change_password(
+        path: &Path,
+        password: &str,
+        secret: crate::secret_storage::Secret,
+    ) -> Result<()> {
+        Self::replace_password(path, password, secret)
+    }
+    pub fn change_stored_password(path: &Path, password: &str) -> Result<()> {
+        crate::connection_password::validate(password)?;
+        Self::replace_password(
+            path,
+            password,
+            crate::secret_storage::Secret::encrypt(password.as_bytes(), PASSWORD_PURPOSE)?,
+        )
+    }
+    fn replace_password(
+        path: &Path,
+        password: &str,
+        secret: crate::secret_storage::Secret,
+    ) -> Result<()> {
         use std::io::Write;
         crate::connection_password::validate(password)?;
         let mut config = Self::read(path)?;
         config.password_hash = Argon2::default()
             .hash_password(password.as_bytes())?
             .to_string();
+        config.display_password = secret;
+        // Hash and ciphertext are committed together in this one atomic file.
         let parent = path.parent().context("连接配置路径无效")?;
         let mut stage = tempfile::NamedTempFile::new_in(parent)?;
         stage.write_all(&Zeroizing::new(serde_json::to_vec(&config)?))?;
@@ -387,6 +443,80 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    fn secret(password: &str) -> crate::secret_storage::Secret {
+        crate::secret_storage::Secret::for_test(password.as_bytes(), PASSWORD_PURPOSE)
+    }
+    #[test]
+    fn saved_config_recovers_ciphertext_after_restart_and_commits_rotation_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        Config::create("aB123456", DEFAULT_PORT, secret("aB123456"))
+            .unwrap()
+            .write_new(&path)
+            .unwrap();
+        let first = Config::read(&path).unwrap();
+        assert_eq!(
+            &*first.password_secret().decrypt_for_test(PASSWORD_PURPOSE),
+            b"aB123456"
+        );
+        Config::change_password(&path, "xY987654", secret("xY987654")).unwrap();
+        let restarted = Config::read(&path).unwrap();
+        assert_eq!(
+            &*restarted
+                .password_secret()
+                .decrypt_for_test(PASSWORD_PURPOSE),
+            b"xY987654"
+        );
+        assert_eq!(
+            first.fingerprint().unwrap(),
+            restarted.fingerprint().unwrap()
+        );
+        assert_eq!(first.backend_key, restarted.backend_key);
+        assert!(
+            Argon2::default()
+                .verify_password(
+                    b"xY987654",
+                    &PasswordHash::new(&restarted.password_hash).unwrap()
+                )
+                .is_ok()
+        );
+        let stored = std::fs::read_to_string(&path).unwrap();
+        assert!(!stored.contains("aB123456") && !stored.contains("xY987654"));
+        let mut old_format: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        old_format
+            .as_object_mut()
+            .unwrap()
+            .remove("display_password");
+        std::fs::write(&path, serde_json::to_vec(&old_format).unwrap()).unwrap();
+        assert!(Config::read(&path).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_stored_config_recovers_password_after_restart_and_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        Config::create_stored("aB123456", DEFAULT_PORT)
+            .unwrap()
+            .write_new(&path)
+            .unwrap();
+        assert_eq!(
+            Config::read(&path)
+                .unwrap()
+                .recover_password()
+                .unwrap()
+                .as_str(),
+            "aB123456"
+        );
+        Config::change_stored_password(&path, "xY987654").unwrap();
+        assert_eq!(
+            Config::read(&path)
+                .unwrap()
+                .recover_password()
+                .unwrap()
+                .as_str(),
+            "xY987654"
+        );
+    }
 
     struct Peer(russh::keys::PublicKey);
     impl russh::client::Handler for Peer {
@@ -415,7 +545,12 @@ mod tests {
     }
     #[tokio::test]
     async fn password_tunnel_serves_http_and_websocket_without_exposing_internal_key() {
-        let config = Config::create("测试-access-password", DEFAULT_PORT).unwrap();
+        let config = Config::create(
+            "测试-access-password",
+            DEFAULT_PORT,
+            secret("测试-access-password"),
+        )
+        .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.json");
         config.write_new(&config_path).unwrap();
@@ -567,7 +702,7 @@ mod tests {
             .await
             .unwrap();
         assert!(http(channel, "/").await.contains("desktop page"));
-        Config::change_password(&config_path, "new-pass").unwrap();
+        Config::change_password(&config_path, "new-pass", secret("new-pass")).unwrap();
         let mut old = connect(addr, public_key).await;
         assert!(
             !old.authenticate_password(USER, "测试-access-password")
@@ -597,7 +732,12 @@ mod tests {
 
     #[test]
     fn stored_configuration_hashes_password_and_preserves_host_identity() {
-        let config = Config::create("another-test-password", DEFAULT_PORT).unwrap();
+        let config = Config::create(
+            "another-test-password",
+            DEFAULT_PORT,
+            secret("another-test-password"),
+        )
+        .unwrap();
         let path =
             std::env::temp_dir().join(format!("landesk-ssh-test-{}.json", config.backend_key));
         config.write_new(&path).unwrap();
@@ -606,10 +746,10 @@ mod tests {
         let reread = Config::read(&path).unwrap();
         assert_eq!(config.fingerprint().unwrap(), reread.fingerprint().unwrap());
         assert!(config.write_new(&path).is_err());
-        assert!(Config::create("", DEFAULT_PORT).is_err());
-        assert!(Config::change_password(&path, "").is_err());
+        assert!(Config::create("", DEFAULT_PORT, secret("")).is_err());
+        assert!(Config::change_password(&path, "", secret("")).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), stored);
-        Config::change_password(&path, "abc12345").unwrap();
+        Config::change_password(&path, "abc12345", secret("abc12345")).unwrap();
         let changed = Config::read(&path).unwrap();
         assert_eq!(
             changed.fingerprint().unwrap(),

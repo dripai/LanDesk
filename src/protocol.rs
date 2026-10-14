@@ -81,6 +81,52 @@ pub enum ClientMessage {
     Disconnect,
 }
 
+impl TryFrom<ClientMessage> for crate::platform::InputEvent {
+    type Error = anyhow::Error;
+    fn try_from(message: ClientMessage) -> anyhow::Result<Self> {
+        Ok(match message {
+            ClientMessage::Pointer { x, y } => Self::Pointer { x, y },
+            ClientMessage::Button { button, down } => Self::Button { button, down },
+            ClientMessage::Wheel { x, y } => Self::Wheel { x, y },
+            ClientMessage::Key { key, down } => Self::Key { key, down },
+            ClientMessage::Text { text } => Self::Text { text },
+            ClientMessage::ReleaseAll => Self::ReleaseAll,
+            _ => anyhow::bail!("不是键鼠消息"),
+        })
+    }
+}
+
+impl TryFrom<ClientMessage> for crate::platform::FileCommand {
+    type Error = anyhow::Error;
+    fn try_from(message: ClientMessage) -> anyhow::Result<Self> {
+        Ok(match message {
+            ClientMessage::ListDirectory { id, path, cursor } => {
+                Self::ListDirectory { id, path, cursor }
+            }
+            ClientMessage::UploadStart {
+                id,
+                path,
+                name,
+                size,
+            } => Self::UploadStart {
+                id,
+                path,
+                name,
+                size,
+            },
+            ClientMessage::UploadFinish { id } => Self::UploadFinish { id },
+            ClientMessage::UploadCancel { id } => Self::UploadCancel { id },
+            _ => anyhow::bail!("不是文件消息"),
+        })
+    }
+}
+
+pub fn display_message(info: crate::platform::CaptureInfo) -> anyhow::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(info)?;
+    value["type"] = "display_state".into();
+    Ok(value)
+}
+
 pub fn origin_allowed(origin: &str, host: &str) -> bool {
     [format!("127.0.0.1:{PORT}"), format!("localhost:{PORT}")]
         .iter()
@@ -103,6 +149,49 @@ pub fn pointer_position(x: f64, y: f64, width: i32, height: i32) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_commands_accept_only_their_own_operations() {
+        use crate::platform::{FileCommand, InputEvent};
+        let decode = |text| serde_json::from_str::<ClientMessage>(text).unwrap();
+        assert!(
+            matches!(InputEvent::try_from(decode(r#"{"type":"key","key":"Control","down":true}"#)).unwrap(), InputEvent::Key { key, down: true } if key == "Control")
+        );
+        assert!(matches!(
+            FileCommand::try_from(decode(r#"{"type":"upload_cancel","id":42}"#)).unwrap(),
+            FileCommand::UploadCancel { id: 42 }
+        ));
+        assert!(InputEvent::try_from(ClientMessage::UploadFinish { id: 1 }).is_err());
+        assert!(FileCommand::try_from(ClientMessage::ReleaseAll).is_err());
+        assert!(InputEvent::try_from(ClientMessage::Hello { display: None }).is_err());
+    }
+
+    #[test]
+    fn capture_metadata_keeps_the_browser_wire_shape() {
+        use crate::platform::{CaptureInfo, DisplayInfo};
+        let info = CaptureInfo {
+            width: 1280,
+            height: 720,
+            native_width: 1920,
+            native_height: 1080,
+            requested_width: Some(1280),
+            display_id: 7,
+            displays: vec![DisplayInfo {
+                id: 7,
+                width: 1920,
+                height: 1080,
+                main: false,
+                virtual_display: true,
+            }],
+        };
+        assert_eq!(
+            display_message(info).unwrap(),
+            serde_json::json!({
+                "type":"display_state", "width":1280, "height":720, "native_width":1920, "native_height":1080,
+                "requested_width":1280, "display_id":7,
+                "displays":[{"id":7,"width":1920,"height":1080,"main":false,"virtual":true}]
+            })
+        );
+    }
     #[test]
     fn origin_blocks_foreign_sites_and_rebinding() {
         assert!(origin_allowed("http://127.0.0.1:17890", "127.0.0.1:17890"));

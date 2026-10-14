@@ -1,4 +1,5 @@
-use crate::protocol::{ClientMessage, MAX_TEXT_BYTES, pointer_position};
+use crate::platform::InputEvent;
+use crate::protocol::{MAX_TEXT_BYTES, pointer_position};
 use anyhow::{Result, bail, ensure};
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use std::collections::HashSet;
@@ -82,13 +83,13 @@ impl Input {
             display,
         })
     }
-    pub fn handle(&mut self, message: ClientMessage) -> Result<()> {
+    pub fn handle(&mut self, message: InputEvent) -> Result<()> {
         ensure!(
             objc2::MainThreadMarker::new().is_some(),
             "键鼠操作必须在主线程执行"
         );
         match message {
-            ClientMessage::Pointer { x, y } => {
+            InputEvent::Pointer { x, y } => {
                 let bounds = crate::platform::macos::capture::display_bounds(
                     self.display.load(std::sync::atomic::Ordering::Acquire),
                 );
@@ -104,7 +105,7 @@ impl Input {
                     Coordinate::Abs,
                 )?;
             }
-            ClientMessage::Button { button, down } => {
+            InputEvent::Button { button, down } => {
                 let button = match button {
                     0 => Button::Left,
                     1 => Button::Middle,
@@ -125,7 +126,7 @@ impl Input {
                     self.buttons.remove(&button);
                 }
             }
-            ClientMessage::Wheel { x, y } => {
+            InputEvent::Wheel { x, y } => {
                 ensure!(
                     x.unsigned_abs() <= 100 && y.unsigned_abs() <= 100,
                     "滚动幅度过大"
@@ -137,7 +138,7 @@ impl Input {
                     self.enigo.scroll(y, Axis::Vertical)?;
                 }
             }
-            ClientMessage::Key { key, down } => {
+            InputEvent::Key { key, down } => {
                 let key = map_key(&key)?;
                 self.enigo.key(
                     key,
@@ -153,13 +154,12 @@ impl Input {
                     self.keys.remove(&key);
                 }
             }
-            ClientMessage::Text { text } => {
+            InputEvent::Text { text } => {
                 ensure!(text.len() <= MAX_TEXT_BYTES, "文本不能超过 64 KiB");
                 ensure!(!text.contains('\0'), "文本不能包含空字符");
                 self.enigo.text(&text)?;
             }
-            ClientMessage::ReleaseAll => self.release_all()?,
-            _ => bail!("不是键鼠消息"),
+            InputEvent::ReleaseAll => self.release_all()?,
         }
         Ok(())
     }

@@ -1,12 +1,12 @@
 //! OS-independent contracts. Native objects stay on their platform-owned threads.
-pub mod authenticated;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(windows)]
 pub mod windows;
 
-use crate::protocol::ClientMessage;
+mod commands;
 use anyhow::Result;
+pub use commands::*;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -29,12 +29,6 @@ pub struct Capabilities {
 }
 
 pub trait DesktopControl: Send + Sync {
-    fn requires_access_key(&self) -> bool {
-        false
-    }
-    fn authorize(&self, _key: Option<&str>) -> Result<()> {
-        Ok(())
-    }
     fn supports_files(&self) -> bool {
         true
     }
@@ -44,7 +38,7 @@ pub trait DesktopControl: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     fn check_permissions(&self) -> Result<()>;
     fn begin_input(&self, display_id: u32) -> BoxFuture<'_, Result<()>>;
-    fn input(&self, message: ClientMessage) -> BoxFuture<'_, Result<()>>;
+    fn input(&self, message: InputEvent) -> BoxFuture<'_, Result<()>>;
     fn paste_text(&self, text: String) -> BoxFuture<'_, Result<()>>;
     fn paste_image(&self, png: Vec<u8>) -> BoxFuture<'_, Result<()>>;
     fn copy_text(&self) -> BoxFuture<'_, Result<String>>;
@@ -84,7 +78,7 @@ pub trait FrameSource {
     fn frames_mut(
         &mut self,
     ) -> &mut tokio::sync::watch::Receiver<Option<crate::capture::FrameEvent>>;
-    fn info(&self, requested_width: Option<u32>) -> serde_json::Value;
+    fn info(&self, requested_width: Option<u32>) -> CaptureInfo;
     fn display_id(&self) -> u32;
     fn native_width(&self) -> u32;
     fn geometry(&self) -> [f64; 4];
@@ -141,8 +135,8 @@ impl VirtualDisplays {
 }
 
 pub trait FileSession: Send {
-    fn message(&mut self, message: ClientMessage) -> serde_json::Value;
-    fn chunk(&mut self, bytes: &[u8]) -> serde_json::Value;
+    fn message(&mut self, message: FileCommand) -> FileResponse;
+    fn chunk(&mut self, bytes: &[u8]) -> FileResponse;
 }
 pub trait FileBackend: Send + Sync {
     fn open_session(self: Arc<Self>, cancelled: Arc<AtomicBool>) -> Box<dyn FileSession>;

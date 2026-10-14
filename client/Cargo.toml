@@ -17,6 +17,7 @@ desktop = ["dep:gpui-kit", "dep:raw-window-handle", "dep:tray-icon"]
 
 [dependencies]
 anyhow = "1"
+aes-gcm = { version = "=0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 dirs = "6"
 sha2 = "=0.10.9"
 url = "=2.5.8"

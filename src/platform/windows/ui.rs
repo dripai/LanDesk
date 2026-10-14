@@ -16,7 +16,12 @@ use windows_sys::Win32::{
         Console::FreeConsole, LibraryLoader::GetModuleHandleW, Registry::*, Services::*,
         Threading::*,
     },
-    UI::{Controls::BST_CHECKED, Shell::*, WindowsAndMessaging::*},
+    UI::{
+        Controls::{BST_CHECKED, EM_SETSEL},
+        Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled},
+        Shell::*,
+        WindowsAndMessaging::*,
+    },
 };
 
 const CLASS: &str = "LanDeskServerSettings";
@@ -31,7 +36,11 @@ const EXIT: usize = 105;
 const EXPORT: usize = 106;
 const UNINSTALL: usize = 107;
 const PASSWORD: usize = 108;
+const RANDOM_PASSWORD: usize = 109;
+const COPY_PASSWORD: usize = 110;
+const REPAIR: usize = 111;
 const TRAY: u32 = WM_APP + 1;
+const INITIALIZE: u32 = WM_APP + 2;
 
 pub(super) struct Key(HKEY);
 impl Drop for Key {
@@ -128,35 +137,16 @@ fn minimized() -> Result<bool> {
     }
 }
 fn service(access: u32) -> Result<ServiceHandle> {
-    let manager =
-        ServiceHandle::new(unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) })?;
-    ServiceHandle::new(unsafe { OpenServiceW(manager.0, wide(ENTRY).as_ptr(), access) })
-        .context("LanDeskServer 后台服务未安装或不可访问")
+    super::setup_services::open_access(ENTRY, access)?.context("LanDeskServer 后台服务未安装")
 }
 pub(super) fn configuration(service: &ServiceHandle) -> Result<(u32, PathBuf)> {
-    let mut needed = 0;
-    unsafe {
-        QueryServiceConfigW(service.0, null_mut(), 0, &mut needed);
-    }
-    ensure!(needed > 0 && needed <= 65536, "无法读取后台服务配置");
-    let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
-    checked(
-        unsafe { QueryServiceConfigW(service.0, buffer.as_mut_ptr().cast(), needed, &mut needed) },
-        "读取服务配置",
-    )?;
-    let config = unsafe { &*buffer.as_ptr().cast::<QUERY_SERVICE_CONFIGW>() };
-    let path = unsafe {
-        let mut length = 0;
-        while *config.lpBinaryPathName.add(length) != 0 {
-            length += 1;
-        }
-        String::from_utf16(std::slice::from_raw_parts(config.lpBinaryPathName, length))?
-    };
-    let path = path
+    let config = super::setup_services::configuration(service)?;
+    let path = config
+        .binary
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix("\" --service"))
         .context("服务程序路径格式无效")?;
-    Ok((config.dwStartType, PathBuf::from(path)))
+    Ok((config.start, PathBuf::from(path)))
 }
 
 pub fn set_startup(automatic: bool, minimize: bool) -> Result<()> {
@@ -239,9 +229,75 @@ pub fn set_startup(automatic: bool, minimize: bool) -> Result<()> {
 struct Window {
     auto: HWND,
     minimized: HWND,
+    password: HWND,
+    connection: HWND,
+    status: HWND,
     taskbar: u32,
     icon: NOTIFYICONDATAW,
     tray: std::cell::Cell<bool>,
+}
+fn password_info() -> Result<(u16, zeroize::Zeroizing<String>)> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let info = runtime.block_on(super::password_pipe::read())?;
+    Ok((info.port, info.password()?))
+}
+fn refresh_password(window: &Window) -> Result<()> {
+    // Clear stale text even if the helper committed a change but its response failed.
+    unsafe {
+        SetWindowTextW(window.password, wide("").as_ptr());
+    }
+    let (port, password) = password_info()?;
+    checked(
+        unsafe {
+            SetWindowTextW(
+                window.connection,
+                wide(&format!("连接端口：{port}     连接密码")).as_ptr(),
+            )
+        },
+        "显示连接端口",
+    )?;
+    let text = zeroize::Zeroizing::new(wide(&password));
+    checked(
+        unsafe { SetWindowTextW(window.password, text.as_ptr()) },
+        "显示连接密码",
+    )
+}
+fn refresh_runtime(window: &Window) -> Result<()> {
+    unsafe {
+        SetWindowTextW(window.password, wide("").as_ptr());
+        SetWindowTextW(window.connection, wide("连接密码暂不可用").as_ptr());
+    }
+    for name in [
+        super::setup_services::TRANSPORT,
+        super::setup_services::SERVER,
+    ] {
+        let service = super::setup_services::open_access(name, SERVICE_QUERY_STATUS)?
+            .with_context(|| format!("服务 {name} 未安装"))?;
+        let state = super::setup_services::status(&service)?;
+        ensure!(
+            state.dwCurrentState == SERVICE_RUNNING,
+            "{name} 未运行：state={}，exit={}，service_exit={}。可修复日志并启动，或导出诊断。",
+            state.dwCurrentState,
+            state.dwWin32ExitCode,
+            state.dwServiceSpecificExitCode
+        );
+    }
+    refresh_password(window)
+}
+fn display_result(window: &Window, result: Result<()>) {
+    let text = match result {
+        Ok(()) => "后台服务运行中".to_owned(),
+        Err(error) => {
+            let message = format!("{error:#}");
+            crate::diagnostics::log(&format!("Management status: {message}"));
+            message
+        }
+    };
+    unsafe {
+        SetWindowTextW(window.status, wide(&text).as_ptr());
+    }
 }
 pub(super) fn error_box(hwnd: HWND, error: impl std::fmt::Display) {
     crate::diagnostics::log(&format!("UI error: {error}"));
@@ -274,6 +330,7 @@ fn refresh(window: &Window) -> Result<()> {
     }
     Ok(())
 }
+
 fn apply(hwnd: HWND, window: &Window) -> Result<()> {
     let automatic = unsafe { SendMessageW(window.auto, BM_GETCHECK, 0, 0) } == BST_CHECKED as isize;
     let minimize =
@@ -319,18 +376,80 @@ pub(super) fn elevated(
         "操作后台服务需要管理员权限",
     )?;
     let process = Handle::new(info.hProcess, "服务设置进程")?;
-    ensure!(
-        unsafe { WaitForSingleObject(process.0, if installation { INFINITE } else { 120000 }) }
-            == WAIT_OBJECT_0,
-        "操作超时，请重新打开设置确认服务状态"
-    );
+    wait_for_helper(hwnd, &process, installation)?;
     let mut exit = 1;
     checked(
         unsafe { GetExitCodeProcess(process.0, &mut exit) },
         "读取服务操作结果",
     )?;
-    ensure!(exit == 0, "操作失败，请查看日志");
+    if exit != 0 {
+        let status = super::setup_services::failure_summary();
+        anyhow::bail!("操作失败（进程退出码 {exit}）。具体原因见辅助进程提示。\r\n{status}");
+    }
     Ok(())
+}
+
+fn wait_for_helper(hwnd: HWND, process: &Handle, installation: bool) -> Result<()> {
+    // Keep the owner repainting while UAC/helper dialogs are open, but prevent
+    // reentrant maintenance commands and closing the owner during the wait.
+    struct Disabled(HWND, bool);
+    impl Drop for Disabled {
+        fn drop(&mut self) {
+            if self.1 {
+                unsafe {
+                    EnableWindow(self.0, 1);
+                }
+            }
+        }
+    }
+    let enabled = !hwnd.is_null() && unsafe { IsWindowEnabled(hwnd) } != 0;
+    let _disabled = Disabled(hwnd, enabled);
+    if enabled {
+        unsafe {
+            EnableWindow(hwnd, 0);
+        }
+    }
+    let deadline =
+        (!installation).then(|| std::time::Instant::now() + std::time::Duration::from_secs(120));
+    loop {
+        let remaining = match deadline {
+            Some(end) => {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                ensure!(
+                    !left.is_zero(),
+                    "操作超时，辅助进程可能仍在运行，请检查操作窗口和服务状态"
+                );
+                left.as_millis().min(u32::MAX as u128) as u32
+            }
+            None => INFINITE,
+        };
+        let result = unsafe {
+            MsgWaitForMultipleObjectsEx(1, &process.0, remaining, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+        };
+        match result {
+            WAIT_OBJECT_0 => return Ok(()),
+            WAIT_TIMEOUT => {
+                anyhow::bail!("操作超时，辅助进程可能仍在运行，请检查操作窗口和服务状态")
+            }
+            WAIT_FAILED => return Err(std::io::Error::last_os_error()).context("等待辅助进程失败"),
+            value if value == WAIT_OBJECT_0 + 1 => {
+                let mut message = MSG::default();
+                while unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                    if message.message == WM_QUIT {
+                        unsafe {
+                            PostQuitMessage(message.wParam as i32);
+                        }
+                        anyhow::bail!("界面正在退出，辅助进程结果尚未确认");
+                    }
+                    unsafe {
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                }
+            }
+            value => anyhow::bail!("等待辅助进程返回未知状态 {value}"),
+        }
+    }
 }
 pub fn start_background() -> Result<()> {
     let service = service(SERVICE_START | SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS)?;
@@ -339,29 +458,10 @@ pub fn start_background() -> Result<()> {
         std::fs::canonicalize(std::env::current_exe()?)? == std::fs::canonicalize(executable)?,
         "请启动已安装的 LanDeskServer"
     );
-    if unsafe { StartServiceW(service.0, 0, null()) } == 0 {
-        ensure!(
-            unsafe { GetLastError() } == ERROR_SERVICE_ALREADY_RUNNING,
-            "后台服务启动失败: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-    for _ in 0..200 {
-        let mut status = SERVICE_STATUS::default();
-        checked(
-            unsafe { QueryServiceStatus(service.0, &mut status) },
-            "读取后台状态",
-        )?;
-        if status.dwCurrentState == SERVICE_RUNNING {
-            return Ok(());
-        }
-        ensure!(
-            status.dwCurrentState != SERVICE_STOPPED,
-            "后台服务启动失败，请检查 server.log"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    anyhow::bail!("后台服务启动超时")
+    drop(service);
+    // Start the dependency explicitly so failures name the actual failing service.
+    super::setup_services::start(super::setup_services::TRANSPORT)?;
+    super::setup_services::start(super::setup_services::SERVER)
 }
 
 unsafe extern "system" fn procedure(
@@ -383,8 +483,41 @@ unsafe extern "system" fn procedure(
             return 0;
         }
         match message {
+            INITIALIZE => {
+                let result = (|| -> Result<bool> {
+                    refresh(window)?;
+                    let handle = service(SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG)?;
+                    let state = super::setup_services::status(&handle)?;
+                    let (_, executable) = configuration(&handle)?;
+                    drop(handle);
+                    if state.dwCurrentState == SERVICE_STOPPED {
+                        elevated(hwnd, &executable, "--start-background", false)?;
+                    }
+                    refresh_runtime(window)?;
+                    minimized()
+                })();
+                let hide = matches!(result, Ok(true)) && wparam == 0 && window.tray.get();
+                display_result(window, result.map(|_| ()));
+                if hide {
+                    unsafe {
+                        ShowWindow(hwnd, SW_HIDE);
+                    }
+                }
+                return 0;
+            }
             WM_COMMAND => {
+                if unsafe { IsWindowEnabled(hwnd) } == 0 {
+                    return 0;
+                }
                 match wparam & 0xffff {
+                    REPAIR => {
+                        let result = (|| {
+                            let (_, path) = configuration(&service(SERVICE_QUERY_CONFIG)?)?;
+                            elevated(hwnd, &path, "--repair-runtime", false)
+                        })();
+                        let refreshed = refresh_runtime(window);
+                        display_result(window, result.and(refreshed));
+                    }
                     APPLY => {
                         if let Err(error) = apply(hwnd, window) {
                             error_box(hwnd, format!("{error:#}"));
@@ -394,22 +527,28 @@ unsafe extern "system" fn procedure(
                     EXPORT => {
                         let result = (|| -> Result<()> {
                             elevated(hwnd, &std::env::current_exe()?, "--export-logs", false)?;
-                            super::bootstrap::open_folder(
-                                &super::bootstrap::machine_logs()?.join("exports"),
-                            )
+                            super::bootstrap::open_folder(&super::bootstrap::diagnostic_exports()?)
                         })();
                         if let Err(error) = result {
                             error_box(hwnd, format!("{error:#}"));
                         }
                     }
-                    PASSWORD => {
+                    PASSWORD | RANDOM_PASSWORD => {
+                        let command = if wparam & 0xffff == PASSWORD {
+                            "--change-password"
+                        } else {
+                            "--regenerate-password"
+                        };
                         let result = std::env::current_exe()
                             .map_err(anyhow::Error::from)
-                            .and_then(|path| elevated(hwnd, &path, "--change-password", true));
-                        if let Err(error) = result {
-                            error_box(hwnd, format!("{error:#}"));
-                        }
+                            .and_then(|path| elevated(hwnd, &path, command, true));
+                        let refreshed = refresh_password(window);
+                        display_result(window, result.and(refreshed));
                     }
+                    COPY_PASSWORD => unsafe {
+                        SendMessageW(window.password, EM_SETSEL, 0, -1);
+                        SendMessageW(window.password, WM_COPY, 0, 0);
+                    },
                     UNINSTALL => {
                         if super::bootstrap::request_uninstall().is_ok() {
                             unsafe {
@@ -426,6 +565,9 @@ unsafe extern "system" fn procedure(
                 return 0;
             }
             WM_CLOSE => {
+                if unsafe { IsWindowEnabled(hwnd) } == 0 {
+                    return 0;
+                }
                 unsafe {
                     if window.tray.get() {
                         ShowWindow(hwnd, SW_HIDE);
@@ -506,17 +648,6 @@ fn run_window(force_show: bool) -> Result<()> {
         }
         return Ok(());
     }
-    let service = service(SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS)?;
-    let (automatic, executable) = configuration(&service)?;
-    let mut status = SERVICE_STATUS::default();
-    checked(
-        unsafe { QueryServiceStatus(service.0, &mut status) },
-        "读取后台状态",
-    )?;
-    if status.dwCurrentState == SERVICE_STOPPED {
-        elevated(null_mut(), &executable, "--start-background", false)?;
-    }
-    let minimize = minimized()?;
     let instance = unsafe { GetModuleHandleW(null()) };
     let class = wide(CLASS);
     let wc = WNDCLASSW {
@@ -538,7 +669,7 @@ fn run_window(force_show: bool) -> Result<()> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             440,
-            370,
+            550,
             null_mut(),
             null_mut(),
             instance,
@@ -575,11 +706,38 @@ fn run_window(force_show: bool) -> Result<()> {
             }
             Ok(control)
         };
+    let connection = child("STATIC", "连接密码", 0, 24, 390, 0)?;
+    let password = child(
+        "EDIT",
+        "",
+        WS_BORDER | ES_READONLY as u32 | ES_AUTOHSCROLL as u32 | WS_TABSTOP,
+        60,
+        370,
+        0,
+    )?;
+    for (title, id, x, width) in [
+        ("复制密码", COPY_PASSWORD, 24, 100),
+        ("随机更换", RANDOM_PASSWORD, 134, 110),
+        ("修改密码", PASSWORD, 254, 140),
+    ] {
+        let button = child(
+            "BUTTON",
+            title,
+            BS_PUSHBUTTON as u32 | WS_TABSTOP,
+            104,
+            width,
+            id,
+        )?;
+        checked(
+            unsafe { MoveWindow(button, x, 104, width, 28, 1) },
+            "排列密码按钮",
+        )?;
+    }
     let auto = child(
         "BUTTON",
         "开机启动",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        24,
+        160,
         370,
         AUTO,
     )?;
@@ -587,39 +745,24 @@ fn run_window(force_show: bool) -> Result<()> {
         "BUTTON",
         "启动时最小化到托盘",
         BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        64,
+        200,
         370,
         MINIMIZED,
     )?;
-    child(
-        "STATIC",
-        "未登录也可远控；退出托盘不停止后台服务。",
-        0,
-        105,
-        390,
-        0,
-    )?;
+    child("STATIC", "退出托盘不停止后台服务。", 0, 241, 390, 0)?;
     child(
         "BUTTON",
         "保存",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        145,
+        281,
         90,
         APPLY,
     )?;
     child(
         "BUTTON",
-        "修改连接密码",
-        BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        185,
-        140,
-        PASSWORD,
-    )?;
-    child(
-        "BUTTON",
         "导出日志",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        225,
+        321,
         120,
         EXPORT,
     )?;
@@ -627,19 +770,34 @@ fn run_window(force_show: bool) -> Result<()> {
         "BUTTON",
         "卸载服务",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-        265,
+        361,
         120,
         UNINSTALL,
     )?;
-    unsafe {
-        SendMessageW(
-            auto,
-            BM_SETCHECK,
-            usize::from(automatic == SERVICE_AUTO_START),
-            0,
-        );
-        SendMessageW(min, BM_SETCHECK, usize::from(minimize), 0);
-    }
+    let repair = child(
+        "BUTTON",
+        "修复日志并启动",
+        BS_PUSHBUTTON as u32 | WS_TABSTOP,
+        361,
+        180,
+        REPAIR,
+    )?;
+    checked(
+        unsafe { MoveWindow(repair, 200, 361, 194, 28, 1) },
+        "排列维护按钮",
+    )?;
+    let status = child(
+        "EDIT",
+        "正在读取后台状态…",
+        ES_READONLY as u32 | ES_MULTILINE as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL,
+        404,
+        370,
+        0,
+    )?;
+    checked(
+        unsafe { MoveWindow(status, 24, 404, 370, 90, 1) },
+        "排列服务状态",
+    )?;
     let mut icon = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -656,6 +814,9 @@ fn run_window(force_show: bool) -> Result<()> {
     let mut window = Box::new(Window {
         auto,
         minimized: min,
+        password,
+        connection,
+        status,
         taskbar,
         icon,
         tray: std::cell::Cell::new(false),
@@ -665,8 +826,9 @@ fn run_window(force_show: bool) -> Result<()> {
     }
     let tray = unsafe { Shell_NotifyIconW(NIM_ADD, &window.icon) };
     window.tray.set(tray != 0);
-    if force_show || !minimize || tray == 0 {
-        show(hwnd);
+    show(hwnd);
+    unsafe {
+        PostMessageW(hwnd, INITIALIZE, usize::from(force_show), 0);
     }
     if tray == 0 {
         error_box(hwnd, "托盘图标创建失败，设置窗口保持显示。");
@@ -686,4 +848,80 @@ fn run_window(force_show: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn helper_wait_pumps_messages_and_restores_disabled_owner() -> Result<()> {
+        // A signalled event stands in for a finished helper. Only the window
+        // message can signal it, proving the wait dispatches messages.
+        unsafe extern "system" fn test_window(
+            hwnd: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if message == WM_APP + 90 {
+                unsafe {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, isize::from(IsWindowEnabled(hwnd) == 0));
+                    SetEvent(wparam as HANDLE);
+                }
+                return 0;
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        let instance = unsafe { GetModuleHandleW(null()) };
+        let class_name = wide("LanDeskHelperWaitTest");
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(test_window),
+            hInstance: instance,
+            lpszClassName: class_name.as_ptr(),
+            ..Default::default()
+        };
+        ensure!(
+            unsafe { RegisterClassW(&class) } != 0,
+            "Register test window failed"
+        );
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                wide("").as_ptr(),
+                WS_OVERLAPPED,
+                0,
+                0,
+                10,
+                10,
+                null_mut(),
+                null_mut(),
+                instance,
+                null(),
+            )
+        };
+        ensure!(!hwnd.is_null(), "Create test window failed");
+        let result = (|| {
+            let event = Handle::new(unsafe { CreateEventW(null(), 1, 0, null()) }, "Test event")?;
+            checked(
+                unsafe { PostMessageW(hwnd, WM_APP + 90, event.0 as usize, 0) },
+                "Post test message",
+            )?;
+            wait_for_helper(hwnd, &event, false)?;
+            ensure!(
+                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } == 1,
+                "Owner was not disabled while waiting"
+            );
+            ensure!(
+                unsafe { IsWindowEnabled(hwnd) } != 0,
+                "Owner remained disabled after completion"
+            );
+            Ok(())
+        })();
+        unsafe {
+            DestroyWindow(hwnd);
+            UnregisterClassW(class_name.as_ptr(), instance);
+        }
+        result
+    }
 }

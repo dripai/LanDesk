@@ -7,8 +7,9 @@ mod macos {
     use std::sync::{Arc, mpsc};
 
     pub fn run() -> Result<()> {
-        let mtm = native::initialize_app();
-        let connection = platform::macos::connection::prepare(mtm)?;
+        native::initialize_app();
+        let connection = platform::macos::connection::prepare()?;
+        let password = connection.recover_password()?;
         let port = connection.port;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -23,10 +24,8 @@ mod macos {
         };
         let state = server::AppState {
             shared: native.shared.clone(),
-            native: Arc::new(platform::authenticated::AuthenticatedDesktop::new(
-                Arc::new(native.clone()),
-                connection.backend_key.clone(),
-            )),
+            native: Arc::new(native.clone()),
+            transport_key: landesk::server_auth::TransportKey::new(connection.backend_key.clone())?,
             capture: capture::CaptureService::new(|| {
                 Box::new(mac_capture::MacCaptureBackend::default())
             })?,
@@ -67,7 +66,7 @@ mod macos {
         });
         let handle = runtime.spawn(server::run(listener, state));
         let shutdown = native.shared.clone();
-        let ui_result = native::run(native, rx, port);
+        let ui_result = native::run(native, rx, port, password);
         shutdown
             .shutdown
             .store(true, std::sync::atomic::Ordering::Release);

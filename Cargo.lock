@@ -1286,8 +1286,9 @@ dependencies = [
 
 [[package]]
 name = "landesk"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "argon2",
  "axum",
@@ -1307,6 +1308,7 @@ dependencies = [
  "quick-xml",
  "russh",
  "screencapturekit",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2159,6 +2161,29 @@ dependencies = [
  "hybrid-array",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "security-framework"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
+dependencies = [
+ "bitflags",
+ "core-foundation",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
+
+[[package]]
+name = "security-framework-sys"
+version = "2.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
 ]
 
 [[package]]

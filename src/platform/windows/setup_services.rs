@@ -28,7 +28,7 @@ pub(super) fn open(name: &str) -> Result<Option<ServiceHandle>> {
         SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP | DELETE,
     )
 }
-fn open_access(name: &str, access: u32) -> Result<Option<ServiceHandle>> {
+pub(super) fn open_access(name: &str, access: u32) -> Result<Option<ServiceHandle>> {
     let manager =
         ServiceHandle::new(unsafe { OpenSCManagerW(null(), null(), SC_MANAGER_CONNECT) })?;
     let handle = unsafe { OpenServiceW(manager.0, wide(name).as_ptr(), access) };
@@ -271,12 +271,19 @@ fn wait(service: &ServiceHandle, desired: u32) -> Result<()> {
     }
 }
 pub(super) fn start(name: &str) -> Result<()> {
-    let service = open(name)?.context("服务未安装")?;
-    if status(&service)?.dwCurrentState == SERVICE_RUNNING {
+    let service = open_access(name, SERVICE_START | SERVICE_QUERY_STATUS)?
+        .with_context(|| format!("服务 {name} 未安装"))?;
+    let state = status(&service)?.dwCurrentState;
+    if state == SERVICE_RUNNING {
         return Ok(());
     }
-    checked(unsafe { StartServiceW(service.0, 0, null()) }, "启动服务")?;
-    wait(&service, SERVICE_RUNNING)
+    if state != SERVICE_START_PENDING && unsafe { StartServiceW(service.0, 0, null()) } == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING as i32) {
+            return Err(error).with_context(|| format!("启动服务 {name} 失败"));
+        }
+    }
+    wait(&service, SERVICE_RUNNING).with_context(|| format!("等待服务 {name} 启动失败"))
 }
 pub(super) fn stop(name: &str) -> Result<()> {
     if let Some(service) = open(name)? {
@@ -305,7 +312,31 @@ pub(super) fn delete(name: &str) -> Result<()> {
     if let Some(service) = open(name)? {
         checked(unsafe { DeleteService(service.0) }, "删除服务")?;
     }
-    Ok(())
+    // DeleteService only marks deletion. Drop every handle before waiting for
+    // removal, otherwise an immediate CreateServiceW can fail with error 1072.
+    let manager = manager()?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let raw = unsafe { OpenServiceW(manager.0, wide(name).as_ptr(), SERVICE_QUERY_STATUS) };
+        if raw.is_null() {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_SERVICE_DOES_NOT_EXIST {
+                return Ok(());
+            }
+            ensure!(
+                error == ERROR_SERVICE_MARKED_FOR_DELETE,
+                "等待删除服务 {name} 失败: {}",
+                std::io::Error::from_raw_os_error(error as i32)
+            );
+        } else {
+            drop(ServiceHandle::new(raw)?);
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "服务 {name} 尚未释放，删除等待超时；请关闭 Windows 服务管理窗口后重新运行安装程序"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 pub(super) fn report() -> Result<serde_json::Value> {
     let mut output = Vec::new();
@@ -313,7 +344,7 @@ pub(super) fn report() -> Result<serde_json::Value> {
         let value = match open_access(name, SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS)? {
             Some(service) => {
                 let state = status(&service)?;
-                serde_json::json!({"name":name,"configuration":configuration(&service)?,"state":state.dwCurrentState,"exit_code":state.dwWin32ExitCode,"process_id":state.dwProcessId})
+                serde_json::json!({"name":name,"configuration":configuration(&service)?,"state":state.dwCurrentState,"exit_code":state.dwWin32ExitCode,"service_exit_code":state.dwServiceSpecificExitCode,"process_id":state.dwProcessId})
             }
             None => serde_json::json!({"name":name,"installed":false}),
         };
@@ -321,9 +352,55 @@ pub(super) fn report() -> Result<serde_json::Value> {
     }
     Ok(output.into())
 }
+pub(super) fn failure_summary() -> String {
+    [TRANSPORT, SERVER]
+        .into_iter()
+        .map(|name| {
+            let result = (|| -> Result<String> {
+                let service = open_access(name, SERVICE_QUERY_STATUS)?
+                    .with_context(|| format!("{name} 未安装"))?;
+                let state = status(&service)?;
+                Ok(format!(
+                    "{name}: 状态={}，系统错误={}，服务错误={}",
+                    state.dwCurrentState, state.dwWin32ExitCode, state.dwServiceSpecificExitCode
+                ))
+            })();
+            result.unwrap_or_else(|error| format!("{name}: {error:#}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "Requires Windows administrator; creates one stopped temporary service, never starts it"]
+    fn native_setup_service_deletion_waits_for_handles_and_allows_immediate_recreate() -> Result<()>
+    {
+        let name = format!("LanDeskDeletionTest{}", std::process::id());
+        ensure!(
+            open(&name)?.is_none(),
+            "Test service exists; nothing changed"
+        );
+        let path = Path::new(r"C:\Program Files\LanDesk Native Test\LanDeskServer.exe");
+        let handle = create(path, &name, true, None)?;
+        // This independent holder simulates a service-settings window releasing
+        // its handle after DeleteService. Handles are valid across OS threads.
+        let raw = handle.0 as usize;
+        std::mem::forget(handle);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(ServiceHandle(raw as _));
+        });
+        let result = delete(&name);
+        release
+            .join()
+            .map_err(|_| anyhow::anyhow!("Test handle-release thread failed"))?;
+        result?;
+        ensure!(open(&name)?.is_none(), "Marked service was not removed");
+        drop(create(path, &name, true, None)?);
+        delete(&name)
+    }
     #[test]
     #[ignore = "Requires Windows administrator; creates then deletes two temporary SCM entries, never starts them"]
     fn native_setup_service_registration_preserves_unicode_paths_and_accounts() -> Result<()> {

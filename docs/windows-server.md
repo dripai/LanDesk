@@ -1,6 +1,8 @@
-# Windows 服务端 0.1.11 测试包
+# Windows 服务端 0.1.14 测试包
 
-双击 `LanDeskServer.exe` 即可安装，接受 Windows 管理员授权后设置 LanDesk 连接密码。密码留空会随机生成并显示 8 位数字/大小写字母密码。安装完成打开设置窗口；后续普通启动默认进入托盘。0.1.12 设置窗口新增“修改连接密码”，可手工修改或留空随机生成；确认保存前不改变密码，保存后用于后续连接，当前连接保留。
+双击 `LanDeskServer.exe` 即可安装，接受 Windows 管理员授权后自动生成 8 位数字/大小写字母连接密码，不再弹首次密码设置窗口。安装完成打开主界面，显示原文密码，提供复制、随机更换和手工修改。后续普通启动默认进入托盘，打开界面会解密恢复原密码。改密仍需原生管理员授权，新密码用于后续连接，当前连接保留。
+
+双击不同版本的新 EXE，安装器自动停止并删除旧服务、关闭旧管理界面、移除旧程序和连接配置，再全新安装；不需要先手工卸载或删除文件。旧配置缺少 `display_password`，或者配置已经删除但服务还在，都按同一条清理流程处理，不解析或迁移旧配置。全新安装会生成新密码和 SSH 设备身份，客户端原先记录的主机密钥不会自动覆盖；若提示设备密钥变化，需要清除该目标的旧信任记录。正常打开同一个已安装版本和系统重启不会重装，也不会更换密码。
 
 **安装、更新、卸载、日志导出都在 Rust EXE 内执行，通过 Windows 原生 API 完成。不调用 PowerShell、batch、sc.exe、WinForms，也不要求系统 OpenSSH。只复制这一个 EXE 即可安装，签名驱动和配置模板已嵌入。** 管理员授权和 Windows 驱动签名验证仍然需要。
 
@@ -13,7 +15,7 @@
 | 设置 | 值 |
 |---|---|
 | 主机 | mini 的 IP |
-| SSH 端口 | 2222；重装保留已有配置端口 |
+| SSH 端口 | 2222 |
 | 用户名 | LanDeskClient 0.1.1 桌面模式不需要填写 |
 | 认证 | LanDesk 连接密码 |
 | 密码 | 安装时设置或生成的 LanDesk 密码 |
@@ -24,7 +26,9 @@
 
 0.1.11 在显示会话后才计算画面区域宽度，避免隐藏区域的宽度 0 将工具条居中点推到左边。首次连接与重新连接沿用顶部居中布局；拖动功能保持现有行为。
 
-密码以 Argon2id 散列保存，无法恢复明文。密码、设备密钥和内部管道凭据位于 `%ProgramData%\LanDeskServer\transport\config.json`，普通用户不可读。升级和重装保留原身份及密码，不重新生成已安装服务的身份。
+配置同时保存 Argon2id 校验值和 AES-256-GCM 密文，随机加密密钥通过 Windows DPAPI 的机器范围保护；界面解密显示原密码。密码校验值、密文、设备密钥和内部管道凭据位于 `%ProgramData%\LanDeskServer\transport\config.json`，普通用户不可读。校验值与密文在同一文件中原子更新，改密失败不会显示未保存的新密码。
+
+后台提供仅本机的密码查看管道，允许本机交互登录用户读取加密的连接密码记录；界面先校验管道属于 LocalService，再解密显示。不向界面暴露 SSH 私钥或桌面管道密钥，不通过 SSH/网页提供密码读取接口。机器范围 DPAPI 不隔离拿到密文记录的本机用户。标准算法与系统接口依据：[AES-GCM 0.11.1](https://docs.rs/aes-gcm/0.11.1/aes_gcm/)、[CryptProtectData](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)。
 
 ## 安装与更新
 
@@ -32,11 +36,13 @@
 
 已有运行中的 MttVDD 时直接复用，保留屏幕数量、分辨率、配置和归属；没有设备时保留现有 VDDPATH/XML，在原配置下安装 LanDesk 设备。没有 VDDPATH 使用上游默认 `C:\VirtualDisplayDriver`。新配置提供 1920×1080、60 Hz、SDR 显示器。Windows 提示驱动需要重启时，先重启再验收画面。
 
-安装目录已有字符串文件、驱动目录等内容时保留。已有 LanDesk 程序替换前备份；相同 EXE 直接复用。没有归属标记且内容不同的同名 EXE 会报告冲突，不覆盖。
+安装目录已有字符串文件、驱动目录等内容时保留。旧 LanDesk 程序在清理阶段删除；若安装程序正从安装目录自身运行，则保留该新 EXE。没有归属标记且内容不同的同名 EXE 会报告冲突，不覆盖。旧界面从下载目录运行时，通过与已安装 EXE 的内容一致性确认后关闭，避免其占用旧服务句柄；不会仅凭同名程序结束进程。
 
-双击新版本 EXE 会更新已安装服务，保留密码、设备和启动设置，短暂中断远控。失败时停止新程序、恢复原 EXE、权限、应用列表版本和原服务运行状态；恢复失败会报告具体步骤，保留原程序备份路径。
+安装只有一条全新安装路径：先校验待清理的服务、程序和入口归属，停止旧服务与旧界面，删除服务并等待 Windows 实际释放条目，移除旧启动/防火墙/快捷方式/应用列表入口、旧程序及连接配置，然后安装并检查新服务。已有虚拟显示设备、显示配置、日志和其他文件保留；托盘设置恢复安装默认值。清理步骤失败时明确报告停在哪一步，不继续注册新服务。原生接口依据：[ControlService](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-controlservice)、[DeleteService](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-deleteservice)。
 
-新安装失败时按逆序回滚本次创建的服务、规则、入口、策略和显示设备。某个回滚步骤失败仍继续其余恢复，最终报告所有失败。配置、日志和 Windows 已暂存的共享驱动包可能保留。
+旧版清理完成后，安装新版失败会按逆序回滚本次创建的服务、规则、入口、策略、连接配置和显示设备，逐项记录失败。旧版已被删除，不会恢复旧密码或旧服务；可以重新运行 EXE。日志、安装目录中的其他文件和 Windows 已暂存的共享驱动包可能保留。
+
+0.1.14 已新增 Windows 原生回归测试，覆盖旧格式配置、配置缺失但服务仍在、真实 SCM 服务名删除后重新创建、无关文件及显示目录保留。新增测试需在 Windows 管理员环境执行，本机仅能交叉编译；不能以编译通过代替 Windows 实机验证。
 
 ## 启动与托盘
 
@@ -64,7 +70,11 @@ LanDeskServer.exe --status
 
 ## 日志
 
-设置窗口或托盘菜单点击 **导出日志**，授权后打开 `%ProgramData%\LanDeskServer\logs\exports`。发送最新的 `LanDeskServer-diagnostics-*.zip`，同时说明操作和发生时间。
+设置窗口或托盘菜单点击 **导出日志**，授权后打开 `%ProgramData%\LanDeskServer\diagnostics`。发送最新的 `LanDeskServer-diagnostics-*.zip`，同时说明操作和发生时间。导出不获取安装锁；日志目录缺失或某个日志读取失败时仍导出状态，并在 `status.json` 的 `log_errors` 中记录缺失或失败，文件快照不保证跨日志轮换的一致时间点。
+
+后台启动失败或密码暂时不可读取时，设置窗口保持可用并显示错误。点击 **修复日志并启动**，管理员辅助进程校验安装归属及连接配置，准备日志目录、日志文件与 LocalService 写权限，然后依次启动通信服务和桌面服务；不会重新生成密码、SSH 设备密钥，也不会重装驱动。配置缺失或损坏时明确报错，不自动创建替代配置。此操作可能已修复日志但启动服务仍失败，此时按界面中的服务名称和错误码继续诊断。
+
+服务先连接 SCM，再初始化日志；初始化失败通过 SCM 返回系统错误码，不再在注册服务之前退出。密码输入、卸载确认和完成弹窗不持有维护锁；辅助进程等待期间界面继续处理窗口消息，禁止重复提交维护操作。依据：[Windows 服务入口](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicectrldispatcherw)、[窗口线程等待](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-msgwaitformultipleobjectsex)。这些故障恢复路径的 Windows 实机验收待完成。
 
 - `install.log` / `uninstall.log`：原生安装、卸载步骤、Windows API 错误与回滚结果。
 - `server.log` / `transport.log` / `worker.log`：服务、通信和桌面组件。

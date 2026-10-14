@@ -4,6 +4,7 @@ mod capture;
 mod desktop;
 mod input;
 mod interactive;
+mod password_pipe;
 mod pipe;
 mod service;
 mod setup;

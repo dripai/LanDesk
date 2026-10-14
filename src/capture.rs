@@ -1,4 +1,4 @@
-use crate::platform::{CaptureBackend, DisplayTarget};
+use crate::platform::{CaptureBackend, CaptureInfo, DisplayTarget};
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -16,21 +16,18 @@ pub enum Change {
     Source(DisplayTarget),
 }
 
-type Configuration = (
-    Change,
-    tokio::sync::oneshot::Sender<Result<serde_json::Value>>,
-);
+type Configuration = (Change, tokio::sync::oneshot::Sender<Result<CaptureInfo>>);
 
 pub struct CaptureHandle {
     pub frames: watch::Receiver<Option<FrameEvent>>,
-    pub info: watch::Receiver<serde_json::Value>,
+    pub info: watch::Receiver<CaptureInfo>,
     commands: std::sync::mpsc::Sender<Configuration>,
 }
 impl CaptureHandle {
     pub fn configure(
         &self,
         change: Change,
-    ) -> futures_util::future::BoxFuture<'static, Result<serde_json::Value>> {
+    ) -> futures_util::future::BoxFuture<'static, Result<CaptureInfo>> {
         let commands = self.commands.clone();
         Box::pin(async move {
             let (reply, response) = tokio::sync::oneshot::channel();

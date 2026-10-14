@@ -3,6 +3,7 @@ use crate::capture::FrameEvent;
 use crate::platform::{
     CaptureBackend, DisplayTarget, FrameSource, VirtualDisplay, VirtualDisplaySpec, VirtualDisplays,
 };
+use crate::platform::{CaptureInfo, DisplayInfo};
 use anyhow::{Context, Result, ensure};
 use image::codecs::jpeg::JpegEncoder;
 use screencapturekit::{cm::CMSampleBufferExt, cv::CVPixelBufferLockFlags, prelude::*};
@@ -61,7 +62,7 @@ pub struct Capture {
     native_width: u32,
     native_height: u32,
     pub display_id: u32,
-    pub displays: Vec<serde_json::Value>,
+    pub displays: Vec<DisplayInfo>,
 }
 
 fn resolution_dimensions(
@@ -212,10 +213,16 @@ impl Capture {
             native_width: width,
             native_height: height,
             display_id,
-            displays: displays.iter().map(|display| serde_json::json!({
-                "id":display.display_id(), "width":display.width(), "height":display.height(),
-                "main":display.display_id() == unsafe { CGMainDisplayID() },
-            })).collect(),
+            displays: displays
+                .iter()
+                .map(|display| DisplayInfo {
+                    id: display.display_id(),
+                    width: display.width(),
+                    height: display.height(),
+                    main: display.display_id() == unsafe { CGMainDisplayID() },
+                    virtual_display: false,
+                })
+                .collect(),
         })
     }
     pub fn set_resolution(&mut self, requested_width: Option<u32>) -> Result<()> {
@@ -231,10 +238,16 @@ impl Capture {
 }
 
 impl Capture {
-    fn info(&self, requested: Option<u32>) -> serde_json::Value {
-        serde_json::json!({"type":"display_state", "width":self.width,"height":self.height,
-            "native_width":self.native_width,"native_height":self.native_height,
-            "requested_width":requested,"display_id":self.display_id,"displays":self.displays})
+    fn info(&self, requested: Option<u32>) -> CaptureInfo {
+        CaptureInfo {
+            width: self.width,
+            height: self.height,
+            native_width: self.native_width,
+            native_height: self.native_height,
+            requested_width: requested,
+            display_id: self.display_id,
+            displays: self.displays.clone(),
+        }
     }
 }
 
@@ -253,7 +266,7 @@ impl FrameSource for Capture {
     fn frames_mut(&mut self) -> &mut watch::Receiver<Option<FrameEvent>> {
         &mut self.frames
     }
-    fn info(&self, requested: Option<u32>) -> serde_json::Value {
+    fn info(&self, requested: Option<u32>) -> CaptureInfo {
         Capture::info(self, requested)
     }
     fn display_id(&self) -> u32 {
@@ -303,13 +316,12 @@ impl CaptureBackend for MacCaptureBackend {
         {
             // The old stream still owns this display until the caller
             // swaps streams; omit the device that is about to disappear.
-            capture.displays.retain(|display| display["id"] != previous);
+            capture.displays.retain(|display| display.id != previous);
         }
         for display in &mut capture.displays {
-            let id = display["id"].as_u64().unwrap_or(0) as u32;
-            display["virtual"] = (self.virtuals.find(id).is_some()
-                || lease.as_ref().is_some_and(|d| d.id() == id))
-            .into();
+            let id = display.id;
+            display.virtual_display =
+                self.virtuals.find(id).is_some() || lease.as_ref().is_some_and(|d| d.id() == id);
         }
         capture._virtual_display = lease.clone();
         if let (Some(spec), Some(display)) = (spec, lease) {

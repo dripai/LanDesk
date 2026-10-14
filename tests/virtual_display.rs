@@ -107,11 +107,11 @@ fn main() {
                 .unwrap();
             assert_ne!(replacement.display_id(), original_id);
             assert!(
-                replacement.info(None)["displays"]
-                    .as_array()
-                    .unwrap()
+                replacement
+                    .info(None)
+                    .displays
                     .iter()
-                    .all(|display| display["id"] != original_id)
+                    .all(|display| display.id != original_id)
             );
             drop(capture);
             wait_for(|| replacement.frames().borrow().is_some());

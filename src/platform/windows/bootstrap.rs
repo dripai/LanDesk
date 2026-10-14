@@ -19,6 +19,12 @@ pub fn user_logs() -> Result<PathBuf> {
             .join("LanDeskServer/logs"),
     )
 }
+pub fn diagnostic_exports() -> Result<PathBuf> {
+    Ok(
+        PathBuf::from(std::env::var_os("ProgramData").context("ProgramData missing")?)
+            .join("LanDeskServer/diagnostics"),
+    )
+}
 pub fn log_locations() -> String {
     format!(
         "运行/安装日志：{}\n界面日志：{}",
@@ -45,7 +51,9 @@ pub fn initialize_logging(args: &[String]) -> Result<()> {
     } else {
         machine_logs()?
     };
-    crate::diagnostics::initialize(directory.join(filename))?;
+    let path = directory.join(filename);
+    crate::diagnostics::initialize(path.clone())
+        .with_context(|| format!("无法打开日志 {}", path.display()))?;
     crate::diagnostics::log(&format!(
         "Process started; mode={mode}; arch={}",
         std::env::consts::ARCH
@@ -85,8 +93,8 @@ fn installed_executable() -> Result<Option<PathBuf>> {
     Ok(Some(ui::configuration(&service)?.1))
 }
 
-pub fn install() -> Result<()> {
-    let result = super::setup::install();
+pub fn install(launcher: u32) -> Result<()> {
+    let result = super::setup::install(launcher);
     if let Err(error) = &result {
         ui::error_box(null_mut(), format!("安装失败：{error:#}"));
     }
@@ -124,6 +132,12 @@ pub fn export() -> Result<()> {
 pub fn install_if_needed() -> Result<bool> {
     let executable = std::env::current_exe()?;
     if let Some(installed) = installed_executable()?
+        && super::setup_support::read(super::setup_support::UNINSTALL, "DisplayVersion")?
+            .map(|value| super::setup_support::decode(&value))
+            .transpose()?
+            .as_deref()
+            == Some(env!("CARGO_PKG_VERSION"))
+        && installed.is_file()
         && (std::fs::canonicalize(&installed)? == std::fs::canonicalize(&executable)?
             || std::fs::read(&installed)? == std::fs::read(&executable)?)
     {
@@ -132,7 +146,7 @@ pub fn install_if_needed() -> Result<bool> {
     ui::elevated(
         null_mut(),
         &std::env::current_exe()?,
-        "--install-integrated",
+        &format!("--install-integrated {}", std::process::id()),
         true,
     )?;
     ensure!(

@@ -54,18 +54,18 @@ fn prompt(mtm: MainThreadMarker) -> Result<Option<Zeroizing<String>>> {
     }
 }
 
-pub fn prepare(mtm: MainThreadMarker) -> Result<crate::transport::Config> {
+pub fn prepare() -> Result<crate::transport::Config> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let path = path();
     if !path.exists() {
-        let password = prompt(mtm)?.context("连接密码设置已取消")?;
+        let password = crate::connection_password::generate()?;
         let directory = path.parent().context("连接配置目录无效")?;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(directory)?;
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
-        crate::transport::Config::create(&password, crate::transport::DEFAULT_PORT)?
+        crate::transport::Config::create_stored(&password, crate::transport::DEFAULT_PORT)?
             .write_new(&path)?;
     }
     let metadata = std::fs::symlink_metadata(&path)?;
@@ -76,15 +76,15 @@ pub fn prepare(mtm: MainThreadMarker) -> Result<crate::transport::Config> {
     crate::transport::Config::read(&path)
 }
 
-pub fn change_password(mtm: MainThreadMarker) -> Result<()> {
+pub fn change_password(mtm: MainThreadMarker) -> Result<Option<Zeroizing<String>>> {
     if let Some(password) = prompt(mtm)? {
-        crate::transport::Config::change_password(&path(), &password)?;
-        let alert = NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str("连接密码已保存"));
-        alert.setInformativeText(&NSString::from_str(
-            "下次连接请使用新密码；当前连接不受影响。",
-        ));
-        alert.runModal();
+        crate::transport::Config::change_stored_password(&path(), &password)?;
+        return Ok(Some(password));
     }
-    Ok(())
+    Ok(None)
+}
+pub fn regenerate_password() -> Result<Zeroizing<String>> {
+    let password = crate::connection_password::generate()?;
+    crate::transport::Config::change_stored_password(&path(), &password)?;
+    Ok(password)
 }

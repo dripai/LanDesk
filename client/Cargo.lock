@@ -4375,6 +4375,7 @@ dependencies = [
 name = "landesk-client"
 version = "0.1.1"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "dirs 6.0.0",
  "futures-util",

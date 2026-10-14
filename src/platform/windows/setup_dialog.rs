@@ -160,7 +160,7 @@ impl Drop for Window {
         }
     }
 }
-pub(super) fn password(generated: Option<&str>) -> Result<zeroize::Zeroizing<String>> {
+pub(super) fn password() -> Result<zeroize::Zeroizing<String>> {
     let state = State {
         done: Cell::new(false),
         accepted: Cell::new(false),
@@ -170,11 +170,7 @@ pub(super) fn password(generated: Option<&str>) -> Result<zeroize::Zeroizing<Str
     control(
         window.0,
         "STATIC",
-        if generated.is_some() {
-            "请复制并保存新密码，确认后生效。"
-        } else {
-            "设置 LanDesk 连接密码（不是 Windows 登录密码）。\r\n留空会随机生成 8 位字母数字密码。"
-        },
+        "设置新的 LanDesk 连接密码。",
         0,
         (20, 18, 450, 50),
         0,
@@ -182,15 +178,8 @@ pub(super) fn password(generated: Option<&str>) -> Result<zeroize::Zeroizing<Str
     let edit = control(
         window.0,
         "EDIT",
-        generated.unwrap_or(""),
-        WS_BORDER
-            | WS_TABSTOP
-            | ES_AUTOHSCROLL as u32
-            | if generated.is_some() {
-                ES_READONLY as u32
-            } else {
-                ES_PASSWORD as u32
-            },
+        "",
+        WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
         (20, 78, 450, 28),
         2,
     )?;
@@ -200,11 +189,7 @@ pub(super) fn password(generated: Option<&str>) -> Result<zeroize::Zeroizing<Str
     control(
         window.0,
         "BUTTON",
-        if generated.is_some() {
-            "确认使用"
-        } else {
-            "保存"
-        },
+        "保存",
         WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
         (340, 130, 130, 30),
         ACCEPT,
@@ -220,7 +205,7 @@ pub(super) fn password(generated: Option<&str>) -> Result<zeroize::Zeroizing<Str
     unsafe {
         SetWindowTextW(edit, wide("").as_ptr());
     }
-    ensure!(password.len() <= 1024, "连接密码过长");
+    crate::connection_password::validate(&password)?;
     Ok(password)
 }
 pub(super) fn uninstall_choice() -> Result<Option<bool>> {
