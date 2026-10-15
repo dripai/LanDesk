@@ -135,6 +135,8 @@ LanDeskServer.exe --status
 
 服务先注册 SCM 再初始化日志；初始化失败通过 SCM 报错。维护操作的密码输入、确认与完成弹窗不占维护锁；等待辅助进程时继续处理窗口消息。
 
+维护辅助进程以 `SW_SHOWNORMAL` 启动，并通过 `SEE_MASK_NO_CONSOLE` 避免新建控制台。不能使用 `SW_HIDE` 隐藏控制台：Windows 会将启动显示参数应用到第一次 `ShowWindow`，导致密码窗口隐藏、主窗口一直等待用户完成不可见的对话框。原生回归测试通过实际提权启动路径，在新进程中检查首次窗口可见及可关闭；不改密码或安装状态。依据：[ShowWindow 启动参数规则](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)、[ShellExecuteEx 参数](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)。
+
 ## 构建与验证
 
 ```sh
@@ -180,6 +182,7 @@ cargo build --manifest-path client/Cargo.toml --locked --release --bin LanDeskCl
 - Mac arm64 Server 优化构建及 Client 调试构建完成，均采用 ad-hoc 签名。Client 已更新到 `/Applications/LanDeskClient.app` 并验证界面可操作；旧 Server 仍占用 `127.0.0.1:17890` 时，新 Client 使用系统分配的端口正常启动。当前运行的旧 Server 未被替换，新 Server 构建产物尚未实机启动验收。
 - 既有实测：Mac 真实画面、键鼠、中文、文件操作、复制/粘贴按钮；Mac 虚拟屏创建、尺寸、复用、释放和真实 JPEG 首帧。用户曾验证 Win10 mini 无实体屏冷启动后通过网页登录、操作主屏与登录后的虚拟副屏。
 - 尚未验证：本轮新协议在真实 Windows 设备的部署、三机嵌套完整操作、Mac Intel/旧系统兼容性、Win11/UAC/锁屏全面场景。历史实测不代表本轮版本已通过相同验收。
+- 2026-10-16，Server 0.3.1：修复 Windows 修改密码辅助窗口被隐藏的问题；Windows x64 交叉编译、原生回归测试程序编译和 Clippy 通过。新增窗口可见性回归测试纳入既有 `native_setup_` CI 步骤，尚未在 Windows 执行；UAC、密码输入和保存仍需实机验收。此补丁不改变通信协议，配套 Client 仍为 0.3.0。
 
 官方及实现依据：
 

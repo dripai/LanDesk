@@ -363,12 +363,17 @@ pub(super) fn elevated(
     let verb = wide("runas");
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOCLOSEPROCESS,
+        // Suppress a new console independently of the helper's GUI windows.
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE,
         hwnd,
         lpVerb: verb.as_ptr(),
         lpFile: path.as_ptr(),
         lpParameters: parameters.as_ptr(),
-        nShow: SW_HIDE,
+        // The helper may open a password/setup/error dialog. Windows applies
+        // this startup value to its first ShowWindow call, even if that call
+        // requests SW_SHOW. SW_HIDE leaves an invisible modal dialog while
+        // the owner is disabled waiting for the helper to exit.
+        nShow: SW_SHOWNORMAL,
         ..Default::default()
     };
     checked(
@@ -853,6 +858,26 @@ fn run_window(force_show: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an administrator Windows desktop; opens only a disposable test window"]
+    fn native_setup_helper_first_dialog_is_visible() {
+        assert_ne!(
+            unsafe { IsUserAnAdmin() },
+            0,
+            "requires administrator runner"
+        );
+        // Use the production ShellExecuteEx/runas path and a fresh process:
+        // testing ShowWindow in this process would miss STARTUPINFO behavior.
+        elevated(
+            null_mut(),
+            &std::env::current_exe().unwrap(),
+            "--exact platform::windows::setup_dialog::tests::password_dialog_first_show_child --ignored --nocapture",
+            false,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn helper_wait_pumps_messages_and_restores_disabled_owner() -> Result<()> {
         // A signalled event stands in for a finished helper. Only the window

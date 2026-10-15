@@ -300,3 +300,32 @@ pub(super) fn complete(message: &str) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "child probe launched by native_setup_helper_first_dialog_is_visible"]
+    fn password_dialog_first_show_child() {
+        let state = State {
+            done: Cell::new(false),
+            accepted: Cell::new(false),
+            progress: false,
+        };
+        // Same initially hidden window and first-show path as password().
+        // No credentials, services or installed configuration are touched.
+        let dialog = Window(window("LanDesk dialog visibility test", 215, &state).unwrap());
+        show(dialog.0);
+        assert_ne!(
+            unsafe { IsWindowVisible(dialog.0) },
+            0,
+            "helper dialog is hidden"
+        );
+        unsafe {
+            SendMessageW(dialog.0, WM_CLOSE, 0, 0);
+        }
+        assert!(state.done.get(), "dialog cannot be closed");
+        assert!(!state.accepted.get(), "closing must not save a password");
+    }
+}
