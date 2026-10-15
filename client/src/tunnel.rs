@@ -19,7 +19,20 @@ use tokio::net::TcpListener;
 use tokio::{sync::oneshot, task::JoinSet, time::timeout};
 use zeroize::Zeroizing;
 
-const PORT: u16 = 17890;
+async fn desktop_channel(session: &client::Handle<Handler>) -> Result<russh::Channel<client::Msg>> {
+    timeout(Duration::from_secs(10), async {
+        let mut channel = session.channel_open_session().await?;
+        channel
+            .request_subsystem(true, crate::desktop_protocol::SUBSYSTEM)
+            .await?;
+        match channel.wait().await {
+            Some(russh::ChannelMsg::Success) => Ok(channel),
+            _ => bail!("服务器拒绝 LanDesk 子系统或桌面服务未就绪"),
+        }
+    })
+    .await
+    .context("LanDesk 子系统连接超时")?
+}
 
 pub enum Event {
     Status(String),
@@ -131,7 +144,7 @@ pub async fn run(
         ensure!(!password.is_empty(), "请输入 SSH 密码");
     }
     let (sender, receiver) = tokio::sync::mpsc::channel(32);
-    let registration = Registration::new(settings.id(), routes, sender);
+    let registration = Registration::new(settings.id(), routes, sender)?;
     run_bound(
         settings,
         password,
@@ -177,7 +190,7 @@ async fn run_bound(
             let handle = Arc::get_mut(&mut session).context("SSH 认证期间会话已被占用")?;
             timeout(Duration::from_secs(20), authenticate(handle, &settings, password)).await.context("SSH 认证超时")??;
             if settings.mode == ConnectionMode::Desktop {
-                let probe = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("Mac 服务检查超时")?.context("无法访问 Mac LanDesk，请先启动 Mac 应用")?;
+                let probe = desktop_channel(&session).await?;
                 probe.close().await?;
             }
             let terminal = if settings.mode == ConnectionMode::Terminal {
@@ -221,7 +234,7 @@ async fn run_bound(
                             if let Some(page) = terminal {
                                 return terminal::serve(socket, session, activity, page).await;
                             }
-                            let channel = timeout(Duration::from_secs(10), session.channel_open_direct_tcpip("127.0.0.1", PORT.into(), "127.0.0.1", 0)).await.context("转发通道打开超时")??;
+                            let channel = desktop_channel(&session).await?;
                             viewer::forward(socket, channel.into_stream(), activity).await
                         });
                     }
@@ -287,7 +300,10 @@ mod tests {
     use russh::keys::{Algorithm, PrivateKey};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    struct EchoServer(u16);
+    struct EchoServer(
+        u16,
+        std::collections::HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+    );
     impl russh::server::Handler for EchoServer {
         type Error = anyhow::Error;
         async fn auth_password(
@@ -301,21 +317,25 @@ mod tests {
                 russh::server::Auth::reject()
             })
         }
-        async fn channel_open_direct_tcpip(
+        async fn channel_open_session(
             &mut self,
             channel: russh::Channel<russh::server::Msg>,
-            host: &str,
-            port: u32,
-            _: &str,
-            _: u32,
             reply: russh::server::ChannelOpenHandle,
             _: &mut russh::server::Session,
         ) -> Result<()> {
-            ensure!(
-                host == "127.0.0.1" && port == u32::from(PORT),
-                "unexpected forwarding destination"
-            );
+            self.1.insert(channel.id(), channel);
             reply.accept().await;
+            Ok(())
+        }
+        async fn subsystem_request(
+            &mut self,
+            id: russh::ChannelId,
+            name: &str,
+            session: &mut russh::server::Session,
+        ) -> Result<()> {
+            ensure!(name == "landesk", "unexpected subsystem");
+            let channel = self.1.remove(&id).unwrap();
+            session.channel_success(id)?;
             let label = self.0;
             tokio::spawn(async move {
                 let mut stream = channel.into_stream();
@@ -397,10 +417,14 @@ mod tests {
             });
             let server = tokio::spawn(async move {
                 let (socket, _) = ssh_listener.accept().await.unwrap();
-                let _ = russh::server::run_stream(config, socket, EchoServer(ssh_port))
-                    .await
-                    .unwrap()
-                    .await;
+                let _ = russh::server::run_stream(
+                    config,
+                    socket,
+                    EchoServer(ssh_port, Default::default()),
+                )
+                .await
+                .unwrap()
+                .await;
             });
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -458,11 +482,11 @@ mod tests {
             let mut socket = tokio::net::TcpStream::connect(self.address).await.unwrap();
             // Reuse a keep-alive HTTP connection for the upgrade, as browsers may do.
             socket
-                .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:17890\r\n\r\n")
+                .write_all(b"GET / HTTP/1.1\r\nHost: landesk.internal\r\n\r\n")
                 .await
                 .unwrap();
             assert!(read_headers(&mut socket).await.unwrap().contains("200 OK"));
-            socket.write_all(b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1:17890\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nOrigin: http://127.0.0.1:17890\r\n\r\n").await.unwrap();
+            socket.write_all(b"GET /ws HTTP/1.1\r\nHost: landesk.internal\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nOrigin: http://landesk.internal\r\n\r\n").await.unwrap();
             assert!(
                 read_headers(&mut socket)
                     .await
@@ -513,7 +537,7 @@ mod tests {
         let mut socket = tokio::net::TcpStream::connect(fixture.address)
             .await
             .unwrap();
-        socket.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:17890\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").await.unwrap();
+        socket.write_all(b"GET / HTTP/1.1\r\nHost: landesk.internal\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").await.unwrap();
         assert!(read_headers(&mut socket).await.unwrap().contains("200 OK"));
         fixture.assert_closed().await;
         assert_eq!(socket.read(&mut [0]).await.unwrap(), 0);
@@ -548,12 +572,13 @@ mod tests {
         address: std::net::SocketAddr,
         path: &str,
         origin: Option<&str>,
+        cookie: &str,
     ) -> (String, String) {
         let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
         let origin = origin
             .map(|s| format!("Origin: {s}\r\n"))
             .unwrap_or_default();
-        socket.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:17890\r\n{origin}Connection: close\r\n\r\n").as_bytes()).await.unwrap();
+        socket.write_all(format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nCookie: {cookie}\r\n{origin}Connection: close\r\n\r\n").as_bytes()).await.unwrap();
         let headers = read_headers(&mut socket).await.unwrap();
         let length: usize = headers
             .lines()
@@ -578,26 +603,28 @@ mod tests {
             let address = listener.local_addr().unwrap();
             let (stop, stopped) = oneshot::channel();
             let gateway = tokio::spawn(crate::gateway::run(listener, routes.clone(), stopped));
+            let first_cookie = crate::gateway::test_cookie(&routes, &first.id, address.port());
+            let second_cookie = crate::gateway::test_cookie(&routes, &second.id, address.port());
             let first_path = format!("/s/{}/probe?file=first", first.id);
             let second_path = format!("/s/{}/probe?file=second", second.id);
-            let (a, b) = tokio::join!(http(address, &first_path, None), http(address, &second_path, None));
+            let (a, b) = tokio::join!(http(address, &first_path, None, &first_cookie), http(address, &second_path, None, &second_cookie));
             assert!(a.0.contains("200 OK")); assert!(a.1.starts_with(&first.ssh_port.to_string())); assert!(a.1.contains("GET /probe?file=first HTTP/1.1"));
             assert!(b.1.starts_with(&second.ssh_port.to_string()));
-            assert!(http(address, &first_path, Some("http://evil.example")).await.0.contains("403"));
-            assert!(http(address, "/s/invalid/probe", None).await.0.contains("404"));
+            assert!(http(address, &first_path, Some("http://evil.example"), &first_cookie).await.0.contains("403"));
+            assert!(http(address, "/s/invalid/probe", None, "").await.0.contains("404"));
             let mut ws = tokio::net::TcpStream::connect(address).await.unwrap();
-            ws.write_all(format!("GET /s/{}/ws HTTP/1.1\r\nHost: 127.0.0.1:17890\r\nOrigin: http://127.0.0.1:17890\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", second.id).as_bytes()).await.unwrap();
+            ws.write_all(format!("GET /s/{}/ws HTTP/1.1\r\nHost: {address}\r\nCookie: {second_cookie}\r\nOrigin: http://{address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n", second.id).as_bytes()).await.unwrap();
             assert!(read_headers(&mut ws).await.unwrap().contains("101"));
             ws.write_all(b"server-two").await.unwrap(); let mut bytes = [0; 10]; ws.read_exact(&mut bytes).await.unwrap(); assert_eq!(&bytes, b"server-two");
             first.cancel.take().unwrap().send(()).unwrap(); (&mut first.task).await.unwrap().unwrap();
-            assert!(http(address, &first_path, None).await.0.contains("409"));
-            assert!(http(address, &second_path, None).await.1.starts_with(&second.ssh_port.to_string()));
+            assert!(http(address, &first_path, None, &first_cookie).await.0.contains("409"));
+            assert!(http(address, &second_path, None, &second_cookie).await.1.starts_with(&second.ssh_port.to_string()));
             ws.write_all(b"still-live").await.unwrap(); ws.read_exact(&mut bytes).await.unwrap(); assert_eq!(&bytes, b"still-live");
             assert_eq!(routes.read().unwrap().len(), 1);
             second.cancel.take().unwrap().send(()).unwrap(); (&mut second.task).await.unwrap().unwrap();
             assert_eq!(ws.read(&mut [0]).await.unwrap(), 0);
             assert!(routes.read().unwrap().is_empty());
-            assert!(http(address, &second_path, None).await.0.contains("409"));
+            assert!(http(address, &second_path, None, &second_cookie).await.0.contains("409"));
             stop.send(()).unwrap(); gateway.await.unwrap().unwrap();
         }).await.unwrap();
     }

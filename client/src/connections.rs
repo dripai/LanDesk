@@ -50,7 +50,10 @@ enum Update {
         generation: u64,
         event: Event,
     },
-    Gateway(String),
+    Gateway {
+        epoch: u64,
+        error: String,
+    },
 }
 
 pub enum Notification {
@@ -66,6 +69,8 @@ pub struct ConnectionManager {
     sessions: HashMap<String, Session>,
     routes: gateway::Routes,
     gateway_stop: Option<oneshot::Sender<()>>,
+    endpoint: Option<gateway::Endpoint>,
+    gateway_epoch: u64,
     generation: u64,
     closing: bool,
     failed: bool,
@@ -80,6 +85,8 @@ impl ConnectionManager {
             sessions: HashMap::new(),
             routes: gateway::Routes::default(),
             gateway_stop: None,
+            endpoint: None,
+            gateway_epoch: 0,
             generation: 0,
             closing: false,
             failed: false,
@@ -87,15 +94,20 @@ impl ConnectionManager {
     }
     pub fn start_gateway(&mut self) -> Result<()> {
         ensure!(
-            !self.closing && !self.failed && self.gateway_stop.is_none(),
+            !self.closing && self.is_idle() && self.gateway_stop.is_none(),
             "网页入口不可重复启动"
         );
         let listener = self
             .runtime
-            .block_on(tokio::net::TcpListener::bind(("127.0.0.1", gateway::PORT)))
-            .map_err(|error| {
-                anyhow::anyhow!("本机 17890 端口不可用，请关闭旧客户端或连接脚本：{error}")
-            })?;
+            .block_on(tokio::net::TcpListener::bind(("127.0.0.1", 0)))?;
+        let endpoint = gateway::Endpoint::new(listener.local_addr()?)?;
+        self.gateway_epoch = self
+            .gateway_epoch
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("网页入口编号已耗尽"))?;
+        let epoch = self.gateway_epoch;
+        self.endpoint = Some(endpoint);
+        self.failed = false;
         let (stop, cancelled) = oneshot::channel();
         self.gateway_stop = Some(stop);
         let routes = self.routes.clone();
@@ -107,9 +119,18 @@ impl ConnectionManager {
                 Ok(()) => "网页入口已停止".into(),
                 Err(error) => format!("网页入口已停止：{error:#}"),
             };
-            let _ = events.send(Update::Gateway(message));
+            let _ = events.send(Update::Gateway {
+                epoch,
+                error: message,
+            });
         });
         Ok(())
+    }
+    pub fn viewer_url(&self, settings: &Settings) -> Result<String> {
+        self.endpoint
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("网页入口未启动"))?
+            .viewer_url(&self.routes, settings)
     }
     pub fn get(&self, id: &str) -> Option<&Session> {
         self.sessions.get(id)
@@ -204,7 +225,11 @@ impl ConnectionManager {
     }
     fn apply(&mut self, update: Update) -> Option<Notification> {
         match update {
-            Update::Gateway(error) => {
+            Update::Gateway { epoch, error } => {
+                if epoch != self.gateway_epoch {
+                    return None;
+                }
+                self.endpoint = None;
                 self.failed = true;
                 self.gateway_stop = None;
                 self.disconnect_all();
@@ -336,7 +361,10 @@ mod tests {
         let (b, mut stop_b) = manager.begin("b".into()).unwrap();
         event(&mut manager, "a", a, Event::Ready);
         assert!(!manager.get("b").unwrap().is_ready());
-        manager.apply(Update::Gateway("failed".into()));
+        manager.apply(Update::Gateway {
+            epoch: manager.gateway_epoch,
+            error: "failed".into(),
+        });
         assert!(stop_a.try_recv().is_ok());
         assert!(stop_b.try_recv().is_ok());
         assert!(manager.begin("c".into()).is_err());
@@ -382,6 +410,33 @@ mod tests {
         let (_, mut cancelled) = manager.begin("a".into()).unwrap();
         drop(manager);
         assert!(cancelled.try_recv().is_ok());
+    }
+
+    #[test]
+    fn gateways_coexist_and_retry_ignores_old_failure_events() {
+        let mut first = manager();
+        let mut second = manager();
+        first.start_gateway().unwrap();
+        second.start_gateway().unwrap();
+        let old_epoch = first.gateway_epoch;
+        // Dropping cancellation sender terminates the old listener once its runtime polls.
+        first.apply(Update::Gateway {
+            epoch: old_epoch,
+            error: "test failure".into(),
+        });
+        assert!(first.failed);
+        first.start_gateway().unwrap();
+        assert!(!first.failed);
+        assert!(
+            first
+                .apply(Update::Gateway {
+                    epoch: old_epoch,
+                    error: "late".into()
+                })
+                .is_none()
+        );
+        assert!(!first.failed);
+        assert!(first.gateway_stop.is_some() && second.gateway_stop.is_some());
     }
 
     #[test]

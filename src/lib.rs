@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod clipboard_image;
 pub mod connection_password;
+pub mod desktop_protocol;
 pub mod diagnostics;
 pub mod encryption;
 pub mod file_worker;

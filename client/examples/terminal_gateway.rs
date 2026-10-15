@@ -33,10 +33,10 @@ async fn main() -> Result<()> {
     };
     settings.validate()?;
     let secret = Zeroizing::new(std::env::var("LANDESK_SSH_SECRET").unwrap_or_default());
-    // IPv6 loopback lets this diagnostic run alongside the Mac desktop service.
-    let listener = tokio::net::TcpListener::bind("[::1]:17890")
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .context("无法监听 IPv6 本机端口 17890")?;
+        .context("无法启动本机网页入口")?;
+    let endpoint = gateway::Endpoint::new(listener.local_addr()?)?;
     let routes = gateway::Routes::default();
     let (stop, stopped) = oneshot::channel();
     let gateway = tokio::spawn(gateway::run(listener, routes.clone(), stopped));
@@ -47,14 +47,13 @@ async fn main() -> Result<()> {
         let _ = cancel.send(());
     });
     let (events, receiver) = mpsc::channel();
-    let url = settings.viewer_url().replacen("127.0.0.1", "localhost", 1);
     let task = tunnel::run(
-        settings,
+        settings.clone(),
         secret,
         PathBuf::from(&args[4]),
         events,
         cancelled,
-        routes,
+        routes.clone(),
     );
     tokio::pin!(task);
     let mut tick = tokio::time::interval(Duration::from_millis(30));
@@ -62,7 +61,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             result = &mut task => break result,
             _ = tick.tick() => while let Ok(event) = receiver.try_recv() {
-                match event { tunnel::Event::Ready => println!("{url}"), tunnel::Event::Status(status) => eprintln!("{status}"), _ => {} }
+                match event { tunnel::Event::Ready => println!("{}", endpoint.viewer_url(&routes, &settings)?), tunnel::Event::Status(status) => eprintln!("{status}"), _ => {} }
             }
         }
     };

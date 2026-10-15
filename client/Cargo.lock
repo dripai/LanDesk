@@ -4373,7 +4373,7 @@ dependencies = [
 
 [[package]]
 name = "landesk-client"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4384,10 +4384,14 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "rand 0.10.3",
  "raw-window-handle",
  "russh",
  "russh-sftp",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",

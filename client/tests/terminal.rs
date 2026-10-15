@@ -144,6 +144,7 @@ struct Fixture {
     _events: mpsc::Receiver<tunnel::Event>,
     addr: std::net::SocketAddr,
     id: String,
+    cookie: String,
     observed: Arc<Mutex<Observed>>,
     cancel: Option<oneshot::Sender<()>>,
     stop: Option<oneshot::Sender<()>>,
@@ -227,6 +228,8 @@ impl Fixture {
         let (cancel, cancelled) = oneshot::channel();
         let (tx, rx) = mpsc::channel();
         let id = profile.id();
+        let url_profile = profile.clone();
+        let url_routes = routes.clone();
         let client_task = tokio::spawn(async move {
             let result = tunnel::run(
                 profile,
@@ -250,11 +253,24 @@ impl Fixture {
         })
         .await
         .unwrap();
+        let url = gateway::Endpoint::new(addr)
+            .unwrap()
+            .viewer_url(&url_routes, &url_profile)
+            .unwrap();
+        let url = url::Url::parse(&url).unwrap();
+        let token = url
+            .query_pairs()
+            .find(|(name, _)| name == "access")
+            .unwrap()
+            .1
+            .into_owned();
+        let cookie = format!("landesk_{}={token}", addr.port());
         Self {
             _dir: dir,
             _events: rx,
             addr,
             id,
+            cookie,
             observed,
             cancel: Some(cancel),
             stop: Some(stop),
@@ -272,7 +288,8 @@ impl Fixture {
         let task = tokio::spawn(connection);
         let request = hyper::Request::builder()
             .uri(format!("/s/{}/", self.id))
-            .header("host", "127.0.0.1:17890")
+            .header("host", self.addr.to_string())
+            .header("cookie", &self.cookie)
             .body(http_body_util::Empty::new())
             .unwrap();
         let response = sender.send_request(request).await.unwrap();
@@ -304,14 +321,17 @@ impl Fixture {
             .unwrap();
         request
             .headers_mut()
-            .insert("host", "127.0.0.1:17890".parse().unwrap());
+            .insert("host", self.addr.to_string().parse().unwrap());
+        request
+            .headers_mut()
+            .insert("cookie", self.cookie.parse().unwrap());
         request
             .headers_mut()
             .insert("origin", origin.parse().unwrap());
         request
     }
     async fn socket(&self, token: &str) -> Ws {
-        let (mut ws, _) = connect_async(self.request("http://127.0.0.1:17890"))
+        let (mut ws, _) = connect_async(self.request(&format!("http://{}", self.addr)))
             .await
             .unwrap();
         ws.send(Message::Text(
@@ -506,7 +526,7 @@ async fn sftp_checks_origin_token_and_rejection_does_not_close_terminal() {
             .is_err()
     );
     for credential in ["wrong-token", token.as_str()] {
-        let (mut files, _) = connect_async(request("http://127.0.0.1:17890"))
+        let (mut files, _) = connect_async(request(&format!("http://{}", fixture.addr)))
             .await
             .unwrap();
         files

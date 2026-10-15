@@ -1,17 +1,17 @@
 # LanDeskClient
 
-Windows 10 / 11 x64 客户端，使用 GPUI Kit 0.7.1（GPUI / gpui-component）管理多台服务器。0.1.1 提供 **远程桌面**（Mac / Windows LanDeskServer）和 **SSH 终端** 两种连接模式。服务端 0.1.13 的密码显示和加密存储不改变 SSH 连接协议，现有 0.1.1 客户端可继续使用；重新初始化服务端会改变设备密钥，需要清除对应的旧信任记录后重新连接。
+Windows 10 / 11 x64 与 macOS 客户端，使用 GPUI Kit 0.7.1 管理多台服务器，提供远程桌面和 SSH 终端两种模式。桌面模式使用 SSH `landesk` subsystem，需要本轮配套的 Server 构建。完整通信与平台设计见 [架构设计](../docs/architecture.md)。
 
 ## 使用
 
-1. 从本仓库 Actions 的 **Windows client** 成功构建下载 `LanDeskClient-windows-x64`，解压运行 `LanDeskClient.exe`。SSH 终端功能需使用包含本次修改的新构建；历史构建不含此功能。
-2. 左侧点 `+` 添加服务器。远程桌面填写名称、地址、连接端口（默认 2222）和 LanDesk 连接密码，不填写用户名；Mac 需运行 LanDeskServer 并授予屏幕录制和辅助功能权限，不需要系统远程登录。服务端 0.1.13 首次自动生成密码，可在服务端主界面查看和修改。SSH 终端继续填写系统 SSH 用户名、端口和密码/私钥，目标必须提供 SSH、PTY 和 Shell。保存后点击“连接”，SSH 就绪后自动打开网页。
+1. Windows 从本仓库 Actions 的 **Windows client** 成功构建下载 `LanDeskClient-windows-x64`，解压运行 `LanDeskClient.exe`。Mac 打开 `LanDeskClient.app`。
+2. 左侧点 `+` 添加服务器。远程桌面填写名称、地址、连接端口（默认 2222）和 LanDesk 连接密码，不填写用户名；Mac 需运行 LanDeskServer 并授予屏幕录制和辅助功能权限，不需要系统远程登录。服务端首次自动生成密码，可在服务端主界面查看和修改。SSH 终端继续填写系统 SSH 用户名、端口和密码/私钥，目标必须提供 SSH、PTY 和 Shell。保存后点击“连接”，SSH 就绪后自动打开网页。
 3. 单击左侧条目查看连接信息；“编辑”后可保存或取消。编辑期间先完成或取消编辑，再切换条目。连接中禁止编辑或删除该条目；断开后可删除，删除同时移除它保存的密码。
-4. SSH 密码下方可勾选“记住密码”，保存或连接时生效。密码保存到 Windows 凭据管理器，不写入 JSON。未记住密码时，每次连接需要输入；取消勾选并连接或保存会删除此条目的已存密码。
-   私钥认证填写 Windows 本机私钥的绝对路径（例如 `C:\Users\Alice\.ssh\id_ed25519`），不展开 `~`。未加密私钥的口令留空，加密私钥每次连接输入口令；口令不保存，私钥内容不复制进配置或网页。切换为私钥并保存会删除原先记住的密码。
-5. 每台服务器使用独立 SSH 会话、浏览器标签、连接状态和 30 秒无远控连接计时。切换列表不会断开连接；右侧“断开”只影响当前服务器。托盘菜单可“断开全部连接”或“退出”。
+4. SSH 密码下方可勾选“记住密码”，保存或连接时生效。密码保存到 Windows 凭据管理器或 macOS 钥匙串，不写入 JSON。未记住密码时，每次连接需要输入；取消勾选并连接或保存会删除此条目的已存密码。
+   私钥认证填写本机私钥的绝对路径（Windows 例如 `C:\Users\Alice\.ssh\id_ed25519`，Mac 例如 `/Users/alice/.ssh/id_ed25519`），不展开 `~`。未加密私钥的口令留空，加密私钥每次连接输入口令；口令不保存，私钥内容不复制进配置或网页。切换为私钥并保存会删除原先记住的密码。
+5. 每台服务器使用独立 SSH 会话、浏览器标签、连接状态和 30 秒无远控连接计时。切换列表不会断开连接；右侧“断开”只影响当前服务器。Windows 托盘菜单可“断开全部连接”或“退出”。
 6. 首次 SSH 就绪后未打开网页会话，或最后一个桌面/终端 WebSocket 关闭后，连续 30 秒没有网页会话会自动关闭该 SSH。终端开着但没有输入不算无会话。宽限期内刷新或重连会取消倒计时。HTTP 保活和资源请求不会延长时间。网络异常识别依赖底层 TCP/SSH 心跳。
-7. 超时后必须回客户端点击“连接”；统一网页入口保留，旧标签刷新会提示重新连接，不会自动创建 SSH。关闭整个客户端会结束全部 SSH 及网页入口。最小化或关窗口默认留在托盘，可在界面关闭此偏好。
+7. 超时后必须回客户端点击“连接”；统一网页入口保留，旧标签刷新会提示重新连接，不会自动创建 SSH。关闭整个客户端会结束全部 SSH 及网页入口。Windows 最小化或关窗口默认留在托盘，可在界面关闭此偏好。Mac 最小化到 Dock，关闭窗口保留连接，点击 Dock 图标恢复；通过应用菜单或 `⌘Q` 断开全部连接并退出，不创建菜单栏状态图标。
 
 ## Linux 网页终端
 
@@ -31,11 +31,11 @@ Windows 10 / 11 x64 客户端，使用 GPUI Kit 0.7.1（GPUI / gpui-component）
 
 ## 地址与隔离
 
-统一入口只监听 `127.0.0.1:17890`，页面地址为 `/s/<完整 SHA-256>/`。哈希输入为 UTF-8 JSON 二元组 `[规范化地址, SSH端口]`：IP 使用标准格式，主机名转小写并移除末尾点。用户名、名称和密码不参与计算。同一地址和 SSH 端口只能保存一条连接；主机名与其解析到的 IP 不合并，不进行隐式 DNS 去重。
+统一入口使用系统分配的 `127.0.0.1:<动态端口>`，页面地址为 `/s/<完整 SHA-256>/`。客户端自动打开携带随机会话凭证的启动 URL，验证后跳转到无凭证参数的地址，使用 HttpOnly Cookie 访问资源及 WebSocket；启动 URL 不要分享。每次重连更换凭证，旧凭证失效，连接 ID 不提供授权。哈希输入为 UTF-8 JSON 二元组 `[规范化地址, SSH端口]`：IP 使用标准格式，主机名转小写并移除末尾点。用户名、名称和密码不参与计算。同一地址和 SSH 端口只能保存一条连接；主机名与其解析到的 IP 不合并，不进行隐式 DNS 去重。
 
 哈希标识连接地址，不是设备硬件身份，也不是凭据。SSH 主机密钥负责识别主机：首次自动记录，后续变化拒绝，不显示指纹确认，也不覆盖旧记录。首次使用信任无法验证第一次连接的主机身份。
 
-入口根据完整哈希路径分流，通过进程内独立通道连接对应 SSH；没有每服务器的公开本地端口。关闭路由后，已有引用无法转接到另一台机器。网页模块及 WebSocket 使用相对路径，标签标题显示服务器名称。入口验证 Host/Origin，终端与文件通道还验证每次 SSH 连接随机生成的会话凭据；凭据不放在 URL 中，SSH 重连后旧凭据失效。每个 Mac 仍限制一个远控控制会话；多个不同 Mac 可同时连接。
+入口根据完整哈希路径分流，通过进程内独立通道连接对应 SSH；没有每服务器的公开本地端口。关闭路由后，已有引用无法转接到另一台机器。网页模块及 WebSocket 使用相对路径，标签标题显示服务器名称。入口验证 Host/Origin，终端与文件通道另有每次 SSH 连接随机生成的 hello token；这个 token 不放在 URL 中，SSH 重连后失效。每个 Server 限制一个远控控制会话；多个不同 Server 可同时连接。
 
 各路径共享浏览器同源，哈希和会话凭据不构成同源网页之间的安全隔离；只连接自己信任的服务器。密码、私钥和私钥口令不会传给网页。
 
@@ -47,15 +47,23 @@ Windows 10 / 11 x64 客户端，使用 GPUI Kit 0.7.1（GPUI / gpui-component）
 
 SSH 主机信任文件仍为同目录 `known_hosts`，同进程并发更新加锁并原子写入。删除连接保留主机信任记录，以便以后重新添加时仍能检查密钥变化。支持密码认证和 russh 可解析的私钥文件认证，不支持 SSH Agent、跳板机、keyboard-interactive 或主机证书。认证失败直接报错，不自动切换认证方式。
 
-旧配置未指定连接模式和认证方式时继续使用桌面和密码认证。旧 Mac 桌面条目需要编辑为新版服务端口（默认 2222）并输入 LanDesk 连接密码；不会自动改端口、尝试系统 SSH 或使用系统登录密码。已保存的 Linux SSH 终端配置保持原认证方式。
-
-固定网页端口冲突会明确报错；不能与旧的 `scripts/LanDesk.cmd` 同时占用端口。该脚本仍是独立单服务器转发，不具备客户端的自动关闭逻辑。
+网页入口与服务端完全独立，可在同机共存。入口失败不禁用配置编辑，界面提供重试；其他目标认证失败不影响已有连接。不支持旧固定端口转发脚本。
 
 连接任务由 `src/connections.rs` 的 `ConnectionManager` 管理，UI 负责表单和展示。连接状态明确区分连接中、已连接、断开中和已停止；断开后的迟到就绪事件不会重新打开网页，旧连接事件不能覆盖新连接。退出时先取消所有连接，等待任务停止后关闭网页入口。
 
 ## 构建与验证
 
-使用 Rust stable MSVC、Visual Studio C++ 工具链、Windows SDK 和 CMake：
+macOS 本机构建需要 Rust 和 Xcode Command Line Tools，使用锁定的 GPUI Kit 0.7.1：
+
+```sh
+python3 scripts/bundle_macos_client.py --debug  # 本机开发验证
+# 正式优化构建省略 --debug
+open client/target/bundle/macos/LanDeskClient.app
+```
+
+脚本生成当前 Mac 架构的 `.app`，采用本地临时签名，未做 Apple Developer ID 签名或公证。配置位于 `~/Library/Application Support/LanDeskClient/`，密码使用系统钥匙串。网页入口动态分配，仅绑定回环地址，可以和本机 LanDesk 服务端同时运行。
+
+Windows 构建使用 Rust stable MSVC、Visual Studio C++ 工具链、Windows SDK 和 CMake：
 
 ```sh
 cargo fmt --manifest-path client/Cargo.toml --check
@@ -69,18 +77,18 @@ cargo build --manifest-path client/Cargo.toml --locked --release
 
 本机连接核心测试覆盖：地址规范化/去重，配置迁移及增删改，真实双 SSH 服务的同端口路由隔离，WebSocket 64 KiB 往返，单台断开不影响另一台，HTTP 保活不续命，30 秒无会话关闭，重连宽限期及端口释放。终端集成测试使用真实本地 SSH/HTTP/WebSocket，覆盖密码和加密私钥、UTF-8/控制字节、尺寸变化、退出码、多标签隔离、PTY 拒绝和初始化中断、来源与令牌校验，以及 512 KiB 输出在慢速渲染下暂停/恢复不丢失。
 
-2026-10-14：本机终端核心与网页协议测试通过；Mac 诊断入口连接真实 Ubuntu 24.04.5 服务器，已验证私钥登录、中文、Shell 命令、top 显示、多标签独立关闭、退出码及网页重连。2026-10-15：抽出的连接管理器通过取消、重连事件隔离、入口故障和退出顺序回归测试；Windows 客户端完整 UI 已通过 x64 交叉编译检查。Windows 快捷键/剪贴板、发布包和真实桌面仍需 Windows 环境验收。
-
 开发时可在 Mac/Linux 运行相同核心的诊断入口：
 
 ```sh
 cargo run --manifest-path client/Cargo.toml --locked --no-default-features --example terminal_gateway -- example.com alice 22 /absolute/path/id_ed25519 /absolute/path/known_hosts
 ```
 
-入口监听 `[::1]:17890` 并打印 `localhost` 网页地址，要求本机启用 IPv6 回环；与 Windows 正式客户端的 IPv4 入口不同。按回车退出，30 秒无网页会话也会退出。加密私钥的口令通过 `LANDESK_SSH_SECRET` 环境变量提供；私钥路径用 `-` 时改用该变量中的 SSH 密码。不要把真实凭据写入源码或命令历史。
+入口与正式客户端一致，监听动态 IPv4 回环地址，打印带会话凭证的启动 URL，勿分享或收集到日志。按回车退出，30 秒无网页会话也会退出。加密私钥的口令通过 `LANDESK_SSH_SECRET` 环境变量提供；私钥路径用 `-` 时改用该变量中的 SSH 密码。不要把真实凭据写入源码或命令历史。
 
 官方依据：[GPUI Kit](https://gpui-kit.com/docs/installation/)、[russh 0.64.1 Channel](https://docs.rs/russh/0.64.1/russh/struct.Channel.html)、[Hyper HTTP Upgrade](https://docs.rs/hyper/1.12.0/hyper/upgrade/index.html)、[xterm.js API](https://xtermjs.org/docs/api/terminal/classes/terminal/)、[xterm.js 安全建议](https://xtermjs.org/docs/guides/security/)、[Windows 凭据](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew)。实现核对了锁定的 GPUI Kit 0.7.1、Hyper 1.12.0、russh 0.64.1 源码。
 
 文件功能依据：[russh-sftp 3.0.0](https://docs.rs/russh-sftp/3.0.0/russh_sftp/client/struct.RawSftpSession.html)、[SFTP v3 文件创建和重命名语义](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02#section-6.5)。布局核对了内嵌 addon-fit 0.11.0 的 `proposeDimensions`：测量容器不能带额外内边距，否则终端行数可能超过实际可用高度。
 
-本轮验证：37 项公共库测试、客户端核心/SSH 集成测试及 25 项网页测试通过；新增 SFTP 来源与令牌校验、子系统拒绝不影响终端、目录切换期间禁用上传等回归。Mac Chrome 连接真实 Ubuntu 服务器，验证 963×340、600×500、1200×720 下终端底部可见且页面不溢出，以及工具条拖动/收起、文件面板开关、目录浏览、UTF-8 文件上传后 SHA-256 一致、同名拒绝、空文件上传和断开清理；临时文件已删除。Windows 浏览器及新 EXE 尚未验证。
+Mac 凭据依据：[security-framework 3.7.0](https://docs.rs/security-framework/3.7.0/security_framework/passwords/index.html)。窗口关闭与恢复使用锁定 GPUI 的 `on_reopen` 及 AppKit `NSWindow`，不使用 Windows 托盘机制。
+
+本轮验证及待验收项统一记录在 [架构设计](../docs/architecture.md#版本依据与验证记录)。

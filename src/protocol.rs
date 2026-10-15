@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-pub const PORT: u16 = 17890;
+pub use crate::desktop_protocol::INTERNAL_HOST;
 pub const MAX_TEXT_BYTES: usize = 65_536;
 pub const UPLOAD_CHUNK_BYTES: usize = 65_536;
 
@@ -128,9 +128,7 @@ pub fn display_message(info: crate::platform::CaptureInfo) -> anyhow::Result<ser
 }
 
 pub fn origin_allowed(origin: &str, host: &str) -> bool {
-    [format!("127.0.0.1:{PORT}"), format!("localhost:{PORT}")]
-        .iter()
-        .any(|allowed| host == allowed && origin == format!("http://{allowed}"))
+    host == INTERNAL_HOST && origin == crate::desktop_protocol::INTERNAL_ORIGIN
 }
 
 pub fn pointer_position(x: f64, y: f64, width: i32, height: i32) -> anyhow::Result<(i32, i32)> {
@@ -194,13 +192,16 @@ mod tests {
     }
     #[test]
     fn origin_blocks_foreign_sites_and_rebinding() {
-        assert!(origin_allowed("http://127.0.0.1:17890", "127.0.0.1:17890"));
-        assert!(!origin_allowed("http://evil.example", "127.0.0.1:17890"));
+        assert!(origin_allowed(
+            "http://landesk.internal",
+            "landesk.internal"
+        ));
+        assert!(!origin_allowed("http://evil.example", "landesk.internal"));
         assert!(!origin_allowed(
             "http://evil.example:17890",
             "evil.example:17890"
         ));
-        assert!(!origin_allowed("null", "127.0.0.1:17890"));
+        assert!(!origin_allowed("null", "landesk.internal"));
     }
     #[test]
     fn pointer_edges_are_inside_display() {

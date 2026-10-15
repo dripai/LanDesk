@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 mod macos {
-    use landesk::{capture, file_worker, platform, protocol, server};
+    use landesk::{capture, file_worker, platform, server};
     use platform::macos::{capture as mac_capture, files, native};
 
     use anyhow::Result;
@@ -14,9 +14,6 @@ mod macos {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        // Bind before displaying a successful status: collisions are explicit errors.
-        let listener =
-            runtime.block_on(tokio::net::TcpListener::bind(("127.0.0.1", protocol::PORT)))?;
         let (tx, rx) = mpsc::channel();
         let native = native::Native {
             tx,
@@ -42,12 +39,18 @@ mod macos {
                 transport_listener,
                 connection,
                 platform::macos::connection::path(),
-                Arc::new(|| {
-                    Box::pin(async {
-                        Ok(Box::new(
-                            tokio::net::TcpStream::connect(("127.0.0.1", protocol::PORT)).await?,
-                        )
-                            as Box<dyn landesk::transport::StreamIo>)
+                Arc::new(move || {
+                    let state = state.clone();
+                    Box::pin(async move {
+                        let (transport, desktop) = tokio::io::duplex(65536);
+                        tokio::spawn(async move {
+                            if let Err(error) = server::serve_stream(desktop, state).await {
+                                landesk::diagnostics::log(&format!(
+                                    "Desktop stream closed: {error:#}"
+                                ));
+                            }
+                        });
+                        Ok(Box::new(transport) as Box<dyn landesk::transport::StreamIo>)
                     })
                 }),
                 async move {
@@ -64,20 +67,12 @@ mod macos {
             }
             result
         });
-        let handle = runtime.spawn(server::run(listener, state));
         let shutdown = native.shared.clone();
         let ui_result = native::run(native, rx, port, password);
         shutdown
             .shutdown
             .store(true, std::sync::atomic::Ordering::Release);
-        let server_result = runtime.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(5), handle).await
-        });
         ui_result?;
-        match server_result {
-            Ok(result) => result??,
-            Err(_) => anyhow::bail!("连接未在规定时间内关闭"),
-        }
         runtime.block_on(async {
             tokio::time::timeout(std::time::Duration::from_secs(5), transport).await
         })???;

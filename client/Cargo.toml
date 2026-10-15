@@ -1,10 +1,10 @@
 [package]
 name = "landesk-client"
-version = "0.1.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
-description = "LanDesk Windows SSH connection client"
+description = "LanDesk desktop SSH connection client"
 
 [[bin]]
 name = "LanDeskClient"
@@ -35,9 +35,17 @@ futures-util = "0.3"
 getrandom = "0.3"
 tokio-tungstenite = "=0.29.0"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 gpui-kit = { version = "=0.7.1", optional = true }
 raw-window-handle = { version = "=0.6.2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "=3.7.0"
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", features = ["NSAlert", "NSView", "NSWindow"] }
+objc2-foundation = "=0.3.2"
+
+[target.'cfg(windows)'.dependencies]
 tray-icon = { version = "=0.21.2", optional = true }
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Security_Credentials"] }
 

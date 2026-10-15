@@ -2,7 +2,7 @@ use crate::{
     capture::{CaptureService, Change, FrameEvent},
     file_worker::{FileChannel, FileRequest, FileService},
     platform::{CaptureInfo, DesktopControl, InputEvent, Shared},
-    protocol::{ClientMessage, PORT, origin_allowed},
+    protocol::{ClientMessage, origin_allowed},
 };
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
@@ -565,15 +565,18 @@ async fn control_commands(
     Ok(())
 }
 
-pub async fn run(listener: tokio::net::TcpListener, state: AppState) -> Result<()> {
-    let shared = state.shared.clone();
-    println!("LanDesk 已启动，仅监听 http://127.0.0.1:{PORT}");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async move {
-            while !shared.shutdown.load(Ordering::Acquire) {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
+/// Serve one authenticated internal stream; production never binds a desktop TCP port.
+pub async fn serve_stream<S>(stream: S, state: AppState) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use hyper_util::{rt::TokioIo, service::TowerToHyperService};
+    hyper::server::conn::http1::Builder::new()
+        .serve_connection(
+            TokioIo::new(stream),
+            TowerToHyperService::new(router(state)),
+        )
+        .with_upgrades()
         .await?;
     Ok(())
 }
@@ -678,6 +681,83 @@ mod access_tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "build client desktop_probe and set LANDESK_CLIENT_PROBE to its executable"]
+    async fn actual_client_crosses_subsystem_memory_backend_and_browser_authentication() {
+        let probe = std::env::var_os("LANDESK_CLIENT_PROBE").expect("set LANDESK_CLIENT_PROBE");
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let password = "integration-only";
+        let config = crate::transport::Config::create(
+            password,
+            address.port(),
+            crate::secret_storage::Secret::for_test(
+                password.as_bytes(),
+                crate::transport::PASSWORD_PURPOSE,
+            ),
+        )
+        .unwrap();
+        let path = directory.path().join("connection.json");
+        config.write_new(&path).unwrap();
+        let state = AppState {
+            native: Arc::new(Gate {
+                permissions: AtomicUsize::new(0),
+                restored: AtomicUsize::new(0),
+            }),
+            transport_key: crate::server_auth::TransportKey::new(config.backend_key.clone())
+                .unwrap(),
+            shared: Arc::new(Shared::default()),
+            capture: CaptureService::new(|| Box::new(NoCapture)).unwrap(),
+            files: FileService::new(NoFiles),
+        };
+        let backend: crate::transport::Backend = Arc::new(move || {
+            let state = state.clone();
+            Box::pin(async move {
+                let (client, server) = tokio::io::duplex(65536);
+                tokio::spawn(serve_stream(server, state));
+                Ok(Box::new(client) as Box<dyn crate::transport::StreamIo>)
+            })
+        });
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let service = tokio::spawn(crate::transport::run(
+            listener,
+            config,
+            path,
+            backend,
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        let result = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut child = std::process::Command::new(probe)
+                .args(["127.0.0.1", &address.port().to_string()])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(password.as_bytes())
+                .unwrap();
+            child.wait_with_output().unwrap()
+        })
+        .await
+        .unwrap();
+        let _ = stop.send(());
+        service.await.unwrap().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("PASS:"));
+    }
+
     #[tokio::test]
     async fn access_key_is_checked_before_ownership_permissions_capture_and_input() {
         let shared = Arc::new(Shared::default());
@@ -705,7 +785,7 @@ mod access_tests {
             socket
                 .write_all(
                     format!(
-                        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:17890\r\nConnection: close\r\n\r\n"
+                        "GET {path} HTTP/1.1\r\nHost: landesk.internal\r\nConnection: close\r\n\r\n"
                     )
                     .as_bytes(),
                 )
@@ -725,10 +805,10 @@ mod access_tests {
             let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
             request
                 .headers_mut()
-                .insert("host", "127.0.0.1:17890".parse().unwrap());
+                .insert("host", "landesk.internal".parse().unwrap());
             request
                 .headers_mut()
-                .insert("origin", "http://127.0.0.1:17890".parse().unwrap());
+                .insert("origin", "http://landesk.internal".parse().unwrap());
             if let Some(key) = key {
                 request
                     .headers_mut()
@@ -816,7 +896,7 @@ mod tests {
         let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
         request
             .headers_mut()
-            .insert("host", "127.0.0.1:17890".parse().unwrap());
+            .insert("host", "landesk.internal".parse().unwrap());
         request
             .headers_mut()
             .insert("origin", origin.parse().unwrap());
@@ -835,7 +915,7 @@ mod tests {
             serde_json::json!({"type":"read_clipboard","id":1}),
             serde_json::json!({"type":"paste_image_chunk","id":1,"offset":0,"total":1,"data":"AA=="}),
         ] {
-            let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+            let (mut ws, _) = connect_async(request(addr, "http://landesk.internal"))
                 .await
                 .unwrap();
             ws.send(WsMessage::Text(command.to_string().into()))
@@ -851,14 +931,14 @@ mod tests {
         let (state, _rx) = state();
         let (addr, handle) = serve(state).await;
         for (host, origin) in [
-            ("127.0.0.1:17890", Some("http://foreign.example")),
-            ("127.0.0.1:17890", Some("http://localhost:17890")),
+            ("landesk.internal", Some("http://foreign.example")),
+            ("landesk.internal", Some("http://localhost:17890")),
             (
                 "foreign.example:17890",
                 Some("http://foreign.example:17890"),
             ),
-            ("127.0.0.1:17890", Some("null")),
-            ("127.0.0.1:17890", None),
+            ("landesk.internal", Some("null")),
+            ("landesk.internal", None),
         ] {
             let mut request = request(addr, origin.unwrap_or(""));
             request.headers_mut().insert("host", host.parse().unwrap());
@@ -876,7 +956,7 @@ mod tests {
         state.shared.active.store(true, Ordering::Release);
         let shared = state.shared.clone();
         let (addr, handle) = serve(state).await;
-        let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+        let (mut ws, _) = connect_async(request(addr, "http://landesk.internal"))
             .await
             .unwrap();
         ws.send(WsMessage::Text(r#"{"type":"hello"}"#.into()))
@@ -961,7 +1041,7 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+        let (mut ws, _) = connect_async(request(addr, "http://landesk.internal"))
             .await
             .unwrap();
         ws.send(WsMessage::Text(
@@ -1080,7 +1160,7 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+        let (mut ws, _) = connect_async(request(addr, "http://landesk.internal"))
             .await
             .unwrap();
         ws.send(WsMessage::Text(
@@ -1156,7 +1236,7 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+        let (mut ws, _) = connect_async(request(addr, "http://landesk.internal"))
             .await
             .unwrap();
         async fn reply(commands: &std::sync::mpsc::Receiver<Command>, success: bool) {
@@ -1327,7 +1407,7 @@ mod tests {
         let (state, _commands) = state();
         state.shared.active.store(true, Ordering::Release);
         let (addr, server) = serve(state).await;
-        let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+        let (mut ws, _) = connect_async(request(addr, "http://landesk.internal"))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(8200)).await;
@@ -1395,7 +1475,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
-            let (mut ws, _) = connect_async(request(addr, "http://127.0.0.1:17890"))
+            let (mut ws, _) = connect_async(request(addr, "http://landesk.internal"))
                 .await
                 .unwrap();
             ready.await.unwrap();

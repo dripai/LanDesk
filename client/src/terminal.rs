@@ -72,7 +72,7 @@ where
                 .headers()
                 .get("origin")
                 .and_then(|v| v.to_str().ok());
-            let allowed = matches!(host, "127.0.0.1:17890" | "localhost:17890");
+            let allowed = host == crate::gateway::INTERNAL_HOST;
             let result = if !allowed || origin.is_some_and(|v| v != format!("http://{host}")) {
                 response(
                     StatusCode::FORBIDDEN,

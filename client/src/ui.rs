@@ -1,4 +1,7 @@
+#[cfg(windows)]
 use crate::tray::{self, Action, Tray};
+#[cfg(target_os = "macos")]
+actions!(landesk_client, [Quit]);
 use gpui_kit::component::{
     button::*,
     checkbox::Checkbox,
@@ -31,10 +34,12 @@ struct Client {
     delete_pending: bool,
     remember_password: bool,
     settings_path: Option<PathBuf>,
-    startup_error: Option<String>,
+    config_error: Option<String>,
+    gateway_error: Option<String>,
     connections: ConnectionManager,
     quitting: bool,
     status: String,
+    #[cfg(windows)]
     tray: Option<Tray>,
 }
 fn input(
@@ -62,27 +67,39 @@ impl Client {
             }
             Ok((config, path))
         });
-        let (config, settings_path, mut startup_error) = match loaded {
+        let (config, settings_path, config_error) = match loaded {
             Ok((config, path)) => (config, Some(path), None),
             Err(error) => (Connections::default(), None, Some(format!("{error:#}"))),
         };
-        let (tray, tray_error) = match Tray::new() {
-            Ok(tray) => (Some(tray), None),
-            Err(error) => (None, Some(format!("托盘初始化失败：{error:#}"))),
+        let mut status = config_error.clone().unwrap_or_default();
+        #[cfg(windows)]
+        let tray = {
+            let (tray, tray_error) = match Tray::new() {
+                Ok(tray) => (Some(tray), None),
+                Err(error) => (None, Some(format!("托盘初始化失败：{error:#}"))),
+            };
+            if let Some(error) = tray_error {
+                status = error;
+            }
+            tray
         };
-        startup_error = startup_error.or(tray_error);
         let mut connections = ConnectionManager::new(runtime);
-        if startup_error.is_none()
-            && let Err(error) = connections.start_gateway()
-        {
-            startup_error = Some(format!("{error:#}"));
-        }
+        let gateway_error = connections
+            .start_gateway()
+            .err()
+            .map(|error| format!("网页入口启动失败：{error:#}"));
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |this, cx| {
                 if this.quitting {
                     return true;
                 }
+                #[cfg(target_os = "macos")]
+                if let Err(error) = crate::macos::hide(window) {
+                    this.status = error.to_string();
+                    cx.notify();
+                }
+                #[cfg(windows)]
                 if this.config.minimize_to_tray && this.tray.is_some() {
                     if let Err(error) = tray::hide(window) {
                         this.status = error.to_string();
@@ -95,6 +112,15 @@ impl Client {
             })
             .unwrap_or(true)
         });
+        #[cfg(target_os = "macos")]
+        {
+            let weak = cx.weak_entity();
+            App::on_action(cx, move |_: &Quit, cx| {
+                if let Err(error) = weak.update(cx, |this, cx| this.quit(cx)) {
+                    fatal(&error.to_string());
+                }
+            });
+        }
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -118,7 +144,7 @@ impl Client {
         let remember_password = match remembered {
             Ok(saved) => saved.flatten().is_some_and(|saved| saved.matches(&initial)),
             Err(error) => {
-                startup_error = Some(format!("{error:#}"));
+                status = format!("{error:#}");
                 false
             }
         };
@@ -145,12 +171,14 @@ impl Client {
             selected,
             delete_pending: false,
             remember_password,
-            status: startup_error.clone().unwrap_or_else(|| "".into()),
+            status,
             config,
             settings_path,
-            startup_error,
+            config_error,
+            gateway_error,
             connections,
             quitting: false,
+            #[cfg(windows)]
             tray,
         }
     }
@@ -167,13 +195,12 @@ impl Client {
             .cloned()
             .unwrap_or_default();
         let remembered = id.as_ref().map(|id| credentials::read(id)).transpose();
-        let remember = match remembered {
-            Ok(saved) => saved.flatten().is_some_and(|saved| saved.matches(&profile)),
-            Err(error) => {
-                self.status = format!("{error:#}");
-                cx.notify();
-                return;
-            }
+        let (remember, credential_error) = match remembered {
+            Ok(saved) => (
+                saved.flatten().is_some_and(|saved| saved.matches(&profile)),
+                None,
+            ),
+            Err(error) => (false, Some(format!("{error:#}"))),
         };
         self.mode = profile.mode;
         self.use_key = profile.mode == ConnectionMode::Terminal
@@ -196,7 +223,7 @@ impl Client {
         self.editing = id.is_none();
         self.selected = id;
         self.delete_pending = false;
-        self.status.clear();
+        self.status = credential_error.unwrap_or_default();
         cx.notify();
     }
     fn read_settings(&self, cx: &App) -> anyhow::Result<Settings> {
@@ -283,7 +310,11 @@ impl Client {
         Ok(())
     }
     fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.current_busy() || self.startup_error.is_some() || self.editing {
+        if self.current_busy()
+            || self.config_error.is_some()
+            || self.gateway_error.is_some()
+            || self.editing
+        {
             return;
         }
         let Some(id) = self.selected.clone() else {
@@ -328,6 +359,7 @@ impl Client {
     fn disconnect_id(&mut self, id: &str) {
         self.connections.disconnect(id);
     }
+    #[cfg(windows)]
     fn disconnect_all(&mut self) {
         self.connections.disconnect_all();
     }
@@ -367,16 +399,18 @@ impl Client {
             }
         }
     }
-    fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn poll(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         for update in self.connections.poll() {
             match update {
                 Notification::GatewayFailed(error) => {
-                    self.startup_error = Some(error.clone());
-                    self.status = error;
+                    self.gateway_error = Some(error);
                 }
                 Notification::Ready(id) => {
                     if let Some(profile) = self.config.profiles.iter().find(|p| p.id() == id) {
-                        cx.open_url(&profile.viewer_url());
+                        match self.connections.viewer_url(profile) {
+                            Ok(url) => cx.open_url(&url),
+                            Err(error) => self.status = format!("{error:#}"),
+                        }
                     }
                 }
                 Notification::Changed => {}
@@ -385,43 +419,48 @@ impl Client {
         }
         if self.quitting && self.connections.is_idle() {
             self.quit(cx);
+            #[cfg(windows)]
             return;
         }
-        while let Some(action) = self.tray.as_ref().and_then(Tray::next) {
-            match action {
-                Action::Show => {
-                    if let Err(error) = tray::show(window) {
-                        self.status = error.to_string();
+        #[cfg(windows)]
+        {
+            let window = _window;
+            while let Some(action) = self.tray.as_ref().and_then(Tray::next) {
+                match action {
+                    Action::Show => {
+                        if let Err(error) = tray::show(window) {
+                            self.status = error.to_string();
+                            cx.notify();
+                        }
+                    }
+                    Action::Disconnect => {
+                        self.disconnect_all();
                         cx.notify();
                     }
+                    Action::Quit => self.quit(cx),
                 }
-                Action::Disconnect => {
-                    self.disconnect_all();
-                    cx.notify();
-                }
-                Action::Quit => self.quit(cx),
             }
-        }
-        if self.config.minimize_to_tray
-            && self.tray.is_some()
-            && let Err(error) = tray::minimized(window).and_then(|minimized| {
-                if minimized {
-                    tray::hide(window)
-                } else {
-                    Ok(())
-                }
-            })
-        {
-            self.config.minimize_to_tray = false;
-            self.status = error.to_string();
-            cx.notify();
+            if self.config.minimize_to_tray
+                && self.tray.is_some()
+                && let Err(error) = tray::minimized(window).and_then(|minimized| {
+                    if minimized {
+                        tray::hide(window)
+                    } else {
+                        Ok(())
+                    }
+                })
+            {
+                self.config.minimize_to_tray = false;
+                self.status = error.to_string();
+                cx.notify();
+            }
         }
     }
 }
 impl Render for Client {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.current_busy();
-        let blocked = self.startup_error.is_some() || self.quitting;
+        let blocked = self.config_error.is_some() || self.quitting;
 
         let mut sidebar = div()
             .v_flex()
@@ -626,7 +665,7 @@ impl Render for Client {
                     Button::new("connect")
                         .primary()
                         .label("连接")
-                        .disabled(blocked || busy)
+                        .disabled(blocked || busy || self.gateway_error.is_some())
                         .on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))),
                 )
                 .child(
@@ -693,23 +732,42 @@ impl Render for Client {
                 .map(|s| s.status.clone())
                 .unwrap_or_else(|| "未连接".into())
         };
-        detail = detail.child(div().text_sm().child(status)).child(
-            div().mt_4().child(
-                Checkbox::new("tray")
-                    .label("最小化或关闭窗口时留在托盘")
-                    .checked(self.config.minimize_to_tray)
-                    .disabled(blocked)
-                    .on_click(cx.listener(|this, checked, _, cx| {
-                        let mut next = this.config.clone();
-                        next.minimize_to_tray = *checked;
-                        match next.save(this.settings_path.as_deref().unwrap()) {
-                            Ok(()) => this.config = next,
-                            Err(error) => this.status = format!("{error:#}"),
-                        }
+        detail = detail.child(div().text_sm().child(status));
+        if let Some(error) = &self.gateway_error {
+            detail = detail.child(div().text_sm().child(error.clone())).child(
+                Button::new("retry-gateway")
+                    .label("重试网页入口")
+                    .disabled(self.quitting || !self.connections.is_idle())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.gateway_error = this
+                            .connections
+                            .start_gateway()
+                            .err()
+                            .map(|error| format!("网页入口启动失败：{error:#}"));
                         cx.notify();
                     })),
-            ),
-        );
+            );
+        }
+        #[cfg(windows)]
+        {
+            detail = detail.child(
+                div().mt_4().child(
+                    Checkbox::new("tray")
+                        .label("最小化或关闭窗口时留在托盘")
+                        .checked(self.config.minimize_to_tray)
+                        .disabled(blocked)
+                        .on_click(cx.listener(|this, checked, _, cx| {
+                            let mut next = this.config.clone();
+                            next.minimize_to_tray = *checked;
+                            match next.save(this.settings_path.as_deref().unwrap()) {
+                                Ok(()) => this.config = next,
+                                Err(error) => this.status = format!("{error:#}"),
+                            }
+                            cx.notify();
+                        })),
+                ),
+            );
+        }
         div()
             .h_flex()
             .size_full()
@@ -747,33 +805,52 @@ pub fn run() {
             return;
         }
     };
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            let options = WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    title: Some("LanDeskClient".into()),
-                    ..Default::default()
-                }),
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(880.), px(540.)),
-                    cx,
-                ))),
-                window_min_size: Some(size(px(820.), px(520.))),
-                ..Default::default()
-            };
-            if let Err(error) = gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| Client::new(runtime.clone(), window, cx))
-            }) {
+    let application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    #[cfg(target_os = "macos")]
+    application.on_reopen(|cx| {
+        cx.activate(true);
+        for handle in cx.windows() {
+            if let Err(error) = handle
+                .update(cx, |_, window, _| crate::macos::show(window))
+                .and_then(|result| result)
+            {
                 fatal(&error.to_string());
-                cx.quit();
             }
-            cx.activate(true);
-        });
+        }
+    });
+    application.run(move |cx| {
+        gpui_kit::init(cx);
+        #[cfg(target_os = "macos")]
+        {
+            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+            cx.set_menus([
+                Menu::new("LanDeskClient").items([MenuItem::action("退出 LanDeskClient", Quit)])
+            ]);
+        }
+        let options = WindowOptions {
+            titlebar: Some(TitlebarOptions {
+                title: Some("LanDeskClient".into()),
+                ..Default::default()
+            }),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(880.), px(540.)),
+                cx,
+            ))),
+            window_min_size: Some(size(px(820.), px(520.))),
+            ..Default::default()
+        };
+        if let Err(error) = gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| Client::new(runtime.clone(), window, cx))
+        }) {
+            fatal(&error.to_string());
+            cx.quit();
+        }
+        cx.activate(true);
+    });
 }
 
+#[cfg(windows)]
 fn fatal(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     let title: Vec<u16> = "LanDeskClient\0".encode_utf16().collect();
@@ -786,4 +863,16 @@ fn fatal(message: &str) {
             MB_ICONERROR | MB_OK,
         );
     }
+}
+
+#[cfg(target_os = "macos")]
+fn fatal(message: &str) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSAlert;
+    use objc2_foundation::NSString;
+    let mtm = MainThreadMarker::new().expect("client UI runs on the main thread");
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("LanDeskClient"));
+    alert.setInformativeText(&NSString::from_str(message));
+    alert.runModal();
 }

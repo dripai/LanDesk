@@ -81,12 +81,6 @@ impl Settings {
             &self.name
         }
     }
-    pub fn viewer_url(&self) -> String {
-        let name = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("name", self.label())
-            .finish();
-        format!("http://127.0.0.1:17890/s/{}/#{name}", self.id())
-    }
     pub fn directory() -> Result<PathBuf> {
         Ok(dirs::config_dir()
             .context("无法找到当前用户配置目录")?

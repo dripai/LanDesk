@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "landesk"
-version = "0.1.14"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

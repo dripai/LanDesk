@@ -1,4 +1,4 @@
-//! Embedded SSH transport. Only the LanDesk HTTP endpoint is forwarded; no shell
+//! Embedded SSH transport. Only the LanDesk subsystem is accepted; no shell
 //! or OS-account login is involved. Shared across platforms for protocol tests.
 use anyhow::{Context, Result, ensure};
 use argon2::{
@@ -9,11 +9,12 @@ use http_body_util::BodyExt;
 use hyper::{Request, body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
 use russh::{
-    Channel,
+    Channel, ChannelId,
     server::{self, ChannelOpenHandle, Msg, Server as _, Session},
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -22,6 +23,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use zeroize::Zeroizing;
 
+pub use crate::desktop_protocol::SUBSYSTEM;
 pub const USER: &str = "landesk";
 pub const DEFAULT_PORT: u16 = 2222;
 pub const AUTH_HEADER: &str = "x-landesk-transport-key";
@@ -253,6 +255,7 @@ impl server::Server for Transport {
             backend: self.backend.clone(),
             hashing: self.hashing.clone(),
             channels: JoinSet::new(),
+            pending: HashMap::new(),
         }
     }
     fn handle_session_error(&mut self, _: anyhow::Error) {
@@ -266,6 +269,7 @@ struct Client {
     backend: Backend,
     hashing: Arc<Semaphore>,
     channels: JoinSet<()>,
+    pending: HashMap<ChannelId, Channel<Msg>>,
 }
 fn password_rejected() -> server::Auth {
     server::Auth::Reject {
@@ -311,40 +315,71 @@ impl server::Handler for Client {
             password_rejected()
         })
     }
-    async fn channel_open_direct_tcpip(
+    async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
-        host: &str,
-        port: u32,
-        _: &str,
-        _: u32,
         reply: ChannelOpenHandle,
         _: &mut Session,
     ) -> Result<()> {
-        if host != "127.0.0.1" || port != u32::from(crate::protocol::PORT) {
-            return Ok(()); // Dropping the reply rejects the channel.
+        while self.channels.try_join_next().is_some() {}
+        if self.pending.len() + self.channels.len() >= 32 {
+            return Ok(());
         }
-        // The existing client probes this channel before opening its browser.
+        self.pending.insert(channel.id(), channel);
+        reply.accept().await;
+        Ok(())
+    }
+    async fn channel_close(&mut self, channel: ChannelId, _: &mut Session) -> Result<()> {
+        self.pending.remove(&channel);
+        Ok(())
+    }
+    async fn subsystem_request(
+        &mut self,
+        id: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<()> {
+        let channel = self.pending.remove(&id);
+        if name != SUBSYSTEM || channel.is_none() {
+            session.channel_failure(id)?;
+            session.close(id)?;
+            return Ok(());
+        }
         let socket = match timeout(Duration::from_secs(10), (self.backend)()).await {
             Ok(Ok(socket)) => socket,
-            Ok(Err(error)) => {
-                crate::diagnostics::log(&format!("Desktop backend unavailable: {error:#}"));
-                return Ok(());
-            }
-            Err(_) => {
-                crate::diagnostics::log("Desktop backend connection timed out");
+            result => {
+                crate::diagnostics::log(&format!(
+                    "Desktop backend unavailable: {}",
+                    match result {
+                        Ok(Err(error)) => format!("{error:#}"),
+                        _ => "connection timed out".into(),
+                    }
+                ));
+                session.channel_failure(id)?;
+                session.close(id)?;
                 return Ok(());
             }
         };
-        while self.channels.try_join_next().is_some() {}
+        session.channel_success(id)?;
         let key = self.config.backend_key.clone();
-        reply.accept().await;
         self.channels.spawn(async move {
-            if proxy(channel.into_stream(), socket, key).await.is_err() {
-                crate::diagnostics::log("Desktop forwarding channel closed with an error");
+            if proxy(channel.unwrap().into_stream(), socket, key)
+                .await
+                .is_err()
+            {
+                crate::diagnostics::log("Desktop subsystem channel closed with an error");
             }
         });
         Ok(())
+    }
+    async fn shell_request(&mut self, id: ChannelId, session: &mut Session) -> Result<()> {
+        self.pending.remove(&id);
+        session.channel_failure(id)?;
+        session.close(id)?;
+        Ok(())
+    }
+    async fn exec_request(&mut self, id: ChannelId, _: &[u8], session: &mut Session) -> Result<()> {
+        self.shell_request(id, session).await
     }
 }
 
@@ -397,6 +432,16 @@ async fn proxy(
         async move {
             // Overwrite peer-supplied values. This key never leaves the two local services.
             request.headers_mut().insert(AUTH_HEADER, key.parse()?);
+            request
+                .headers_mut()
+                .insert(hyper::header::HOST, crate::protocol::INTERNAL_HOST.parse()?);
+            if request.headers().contains_key(hyper::header::ORIGIN) {
+                request.headers_mut().insert(
+                    hyper::header::ORIGIN,
+                    crate::desktop_protocol::INTERNAL_ORIGIN.parse()?,
+                );
+            }
+            request.headers_mut().remove(hyper::header::COOKIE);
             let local_upgrade = request
                 .headers()
                 .contains_key(hyper::header::UPGRADE)
@@ -533,9 +578,18 @@ mod tests {
             .await
             .unwrap()
     }
+    async fn open_desktop(peer: &russh::client::Handle<Peer>) -> Channel<russh::client::Msg> {
+        let mut channel = peer.channel_open_session().await.unwrap();
+        channel.request_subsystem(true, SUBSYSTEM).await.unwrap();
+        assert!(matches!(
+            channel.wait().await,
+            Some(russh::ChannelMsg::Success)
+        ));
+        channel
+    }
     async fn http(channel: Channel<russh::client::Msg>, path: &str) -> String {
         let mut stream = channel.into_stream();
-        stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:17890\r\nConnection: close\r\nx-landesk-transport-key: forged\r\n\r\n").as_bytes()).await.unwrap();
+        stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: landesk.internal\r\nConnection: close\r\nx-landesk-transport-key: forged\r\n\r\n").as_bytes()).await.unwrap();
         let mut output = String::new();
         timeout(Duration::from_secs(5), stream.read_to_string(&mut output))
             .await
@@ -633,46 +687,41 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        assert!(peer.channel_open_session().await.is_err());
+        let mut unsupported = peer.channel_open_session().await.unwrap();
+        unsupported.request_subsystem(true, "sftp").await.unwrap();
+        assert!(matches!(
+            unsupported.wait().await,
+            Some(russh::ChannelMsg::Failure)
+        ));
+        let mut shell = peer.channel_open_session().await.unwrap();
+        shell.request_shell(true).await.unwrap();
+        assert!(matches!(
+            shell.wait().await,
+            Some(russh::ChannelMsg::Failure)
+        ));
         assert!(
             peer.channel_open_direct_tcpip("127.0.0.1", 22, "127.0.0.1", 0)
                 .await
                 .is_err()
         );
         assert!(
-            peer.channel_open_direct_tcpip(
-                "192.0.2.1",
-                crate::protocol::PORT.into(),
-                "127.0.0.1",
-                0
-            )
-            .await
-            .is_err()
+            peer.channel_open_direct_tcpip("192.0.2.1", 2222, "127.0.0.1", 0)
+                .await
+                .is_err()
         );
         assert!(peer.tcpip_forward("127.0.0.1", 0).await.is_err());
         for _ in 0..3 {
-            let channel = peer
-                .channel_open_direct_tcpip(
-                    "127.0.0.1",
-                    crate::protocol::PORT.into(),
-                    "127.0.0.1",
-                    0,
-                )
-                .await
-                .unwrap();
+            let channel = open_desktop(&peer).await;
             let response = http(channel, "/").await;
             assert!(response.starts_with("HTTP/1.1 200"), "{response}");
             assert!(response.ends_with("desktop page"));
             assert!(!response.contains(&backend_key));
         }
-        let channel = peer
-            .channel_open_direct_tcpip("127.0.0.1", crate::protocol::PORT.into(), "127.0.0.1", 0)
-            .await
-            .unwrap();
-        let mut request = "ws://127.0.0.1:17890/ws".into_client_request().unwrap();
+        let channel = open_desktop(&peer).await;
+        let mut request = "ws://landesk.internal/ws".into_client_request().unwrap();
         request
             .headers_mut()
-            .insert("origin", "http://127.0.0.1:17890".parse().unwrap());
+            .insert("origin", "http://landesk.internal".parse().unwrap());
         let (mut ws, _) = tokio_tungstenite::client_async(request, channel.into_stream())
             .await
             .unwrap();
@@ -697,10 +746,7 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        let channel = second
-            .channel_open_direct_tcpip("127.0.0.1", crate::protocol::PORT.into(), "127.0.0.1", 0)
-            .await
-            .unwrap();
+        let channel = open_desktop(&second).await;
         assert!(http(channel, "/").await.contains("desktop page"));
         Config::change_password(&config_path, "new-pass", secret("new-pass")).unwrap();
         let mut old = connect(addr, public_key).await;
@@ -716,10 +762,7 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        let channel = second
-            .channel_open_direct_tcpip("127.0.0.1", crate::protocol::PORT.into(), "127.0.0.1", 0)
-            .await
-            .unwrap();
+        let channel = open_desktop(&second).await;
         assert!(http(channel, "/").await.contains("desktop page"));
         stop.send(()).unwrap();
         timeout(Duration::from_secs(5), server)

@@ -129,7 +129,7 @@ pub async fn health(key: &str) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut pipe = connect().await?;
-        pipe.write_all(format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:17890\r\n{AUTH_HEADER}: {key}\r\nConnection: close\r\n\r\n").as_bytes()).await?;
+        pipe.write_all(format!("GET / HTTP/1.1\r\nHost: landesk.internal\r\n{AUTH_HEADER}: {key}\r\nConnection: close\r\n\r\n").as_bytes()).await?;
         let mut response = String::new();
         pipe.take(65536).read_to_string(&mut response).await?;
         ensure!(response.starts_with("HTTP/1.1 200") && response.contains("id=\"connect-form\""), "桌面 HTTP 检查失败");

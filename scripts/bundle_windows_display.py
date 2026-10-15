@@ -39,10 +39,7 @@ def main():
     try:
         shutil.copy2(args.server_exe, args.output / "LanDeskServer.exe")
         shutil.copy2(driver / "LICENSE", args.output / "VIRTUAL-DISPLAY-LICENSE")
-        shutil.copy2(root / "docs/windows-server.md", args.output / "README.md")
-        shutil.copy2(root / "docs/windows-virtual-display.md", args.output / "virtual-display.md")
-        display_doc = args.output / "virtual-display.md"
-        display_doc.write_text(display_doc.read_text(encoding="utf-8").replace("(windows-server.md)", "(README.md)"), encoding="utf-8")
+        shutil.copy2(root / "docs/architecture.md", args.output / "README.md")
     except BaseException:
         shutil.rmtree(args.output)
         raise
