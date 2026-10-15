@@ -9,7 +9,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 subprocess.run(["cargo", "build", "--release", "--locked", "--bin", "landesk"], cwd=root, check=True)
 metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=root, text=True, encoding="utf-8"))
-version = next(package["version"] for package in metadata["packages"] if Path(package["manifest_path"]) == root / "Cargo.toml")
+version = next(package["version"] for package in metadata["packages"] if Path(package["manifest_path"]) == root / "apps" / "server" / "Cargo.toml")
 target = Path(metadata["target_directory"]) / "release"
 bundle = target / "bundle" / "macos" / "LanDesk.app"
 macos = bundle / "Contents" / "MacOS"

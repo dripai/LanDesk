@@ -2,7 +2,7 @@
 
 Windows / macOS 远程桌面服务与客户端。Client 通过 SSH 连接目标，使用本机浏览器操作远程桌面；也可连接普通 SSH 服务使用网页终端及 SFTP。Client 与 Server 可以在同一台机器同时运行。
 
-完整设计、平台边界、Windows 安装维护、虚拟显示器和验证记录统一见 [架构设计](docs/architecture.md)。客户端操作见 [LanDeskClient](client/README.md)。
+完整设计、平台边界、Windows 安装维护、虚拟显示器和验证记录统一见 [架构设计](docs/architecture.md)。客户端操作见 [LanDeskClient](apps/client/README.md)。
 
 ## 使用
 
@@ -22,18 +22,20 @@ python3 scripts/bundle.py
 python3 scripts/bundle_macos_client.py --debug
 ```
 
-服务端输出在 Cargo target 的 `release/bundle/macos/LanDesk.app`；客户端输出在 `client/target/bundle/macos/LanDeskClient.app`。客户端省略 `--debug` 可生成优化构建。开发包使用本机临时签名，没有 Developer ID 或公证；系统隐私授权仍需用户授予。
+服务端输出在 Cargo target 的 `release/bundle/macos/LanDesk.app`；客户端输出在 `apps/client/target/bundle/macos/LanDeskClient.app`。客户端省略 `--debug` 可生成优化构建。开发包使用本机临时签名，没有 Developer ID 或公证；系统隐私授权仍需用户授予。
 
 Windows 由 [Server 工作流](.github/workflows/windows-display.yml) 和 [Client 工作流](.github/workflows/windows-client.yml) 在 MSVC 环境构建。编译成功不等于目标设备实机验证通过。
 
 ## 测试
 
 ```sh
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --manifest-path client/Cargo.toml --locked --no-default-features --lib --tests
-cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
-node --test web/*.test.mjs client/web/*.test.mjs
+python3 scripts/check_architecture.py
+cargo fmt --all --check
+cargo test -p landesk-core -p landesk --locked
+cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo test --manifest-path apps/client/Cargo.toml --locked --no-default-features --lib --tests
+cargo clippy --manifest-path apps/client/Cargo.toml --locked --all-targets -- -D warnings
+node --test web/*.test.mjs apps/client/web/*.test.mjs
 ```
 
 硬件测试与 Windows 管理员维护测试需显式执行，见统一架构文档。音频、透明跳板、中继、NAT 穿透和 Linux 图形桌面服务尚未实现。Mac 虚拟显示器为使用未公开 API 的实验功能。

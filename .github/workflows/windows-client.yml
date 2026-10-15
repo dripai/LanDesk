@@ -3,9 +3,9 @@ name: Windows client
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["client/**", "src/encryption.rs", "src/desktop_protocol.rs", "web/**", ".github/workflows/windows-client.yml"]
+    paths: ["apps/client/**", "crates/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "web/**", ".github/workflows/windows-client.yml"]
   pull_request:
-    paths: ["client/**", "src/encryption.rs", "src/desktop_protocol.rs", "web/**", ".github/workflows/windows-client.yml"]
+    paths: ["apps/client/**", "crates/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "web/**", ".github/workflows/windows-client.yml"]
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/client/target
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v7
@@ -27,23 +27,27 @@ jobs:
           rustup default stable
           rustc --version
           cmake --version
+      - name: Architecture boundaries
+        run: python scripts/check_architecture.py
       - name: Format
-        run: cargo fmt --manifest-path client/Cargo.toml --check
+        run: cargo fmt --all --check
+      - name: Shared core tests
+        run: cargo test -p landesk-core --locked
       - name: Test connection core
-        run: cargo test --manifest-path client/Cargo.toml --locked --no-default-features --lib --tests
+        run: cargo test --manifest-path apps/client/Cargo.toml --locked --no-default-features --lib --tests
       - name: Test terminal input protocol
-        run: node --test client/web/*.test.mjs web/*.test.mjs
+        run: node --test apps/client/web/*.test.mjs web/*.test.mjs
       - name: Check client
-        run: cargo clippy --manifest-path client/Cargo.toml --locked --all-targets -- -D warnings
+        run: cargo clippy --manifest-path apps/client/Cargo.toml --locked --all-targets -- -D warnings
       - name: Build Windows x64
-        run: cargo build --manifest-path client/Cargo.toml --locked --release --bin LanDeskClient
+        run: cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanDeskClient
       - uses: actions/upload-artifact@v7
         with:
           name: LanDeskClient-windows-x64
           path: |
-            client/target/release/LanDeskClient.exe
-            client/README.md
-            client/web/vendor/xterm.LICENSE
-            client/web/vendor/addon-fit.LICENSE
+            target/release/LanDeskClient.exe
+            apps/client/README.md
+            apps/client/web/vendor/xterm.LICENSE
+            apps/client/web/vendor/addon-fit.LICENSE
           if-no-files-found: error
           retention-days: 30

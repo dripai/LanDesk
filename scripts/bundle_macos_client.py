@@ -16,7 +16,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="build a development app")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    manifest = root / "client" / "Cargo.toml"
+    manifest = root / "apps" / "client" / "Cargo.toml"
     command = ["cargo", "build", "--manifest-path", str(manifest), "--locked", "--bin", "LanDeskClient"]
     if not args.debug:
         command.append("--release")
@@ -28,7 +28,7 @@ def main():
     version = next(p["version"] for p in metadata["packages"] if Path(p["manifest_path"]) == manifest)
     profile = "debug" if args.debug else "release"
     binary = Path(metadata["target_directory"]) / profile / "LanDeskClient"
-    bundle = root / "client" / "target" / "bundle" / "macos" / "LanDeskClient.app"
+    bundle = root / "apps" / "client" / "target" / "bundle" / "macos" / "LanDeskClient.app"
     executable = bundle / "Contents" / "MacOS" / "LanDeskClient"
     executable.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary, executable)

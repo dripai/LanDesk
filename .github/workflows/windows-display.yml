@@ -3,9 +3,9 @@ name: Windows server
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["src/**", "client/**", "web/**", "Cargo.toml", "Cargo.lock", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
+    paths: ["apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
   pull_request:
-    paths: ["src/**", "client/**", "web/**", "Cargo.toml", "Cargo.lock", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
+    paths: ["apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
   workflow_dispatch:
 
 permissions:
@@ -22,20 +22,24 @@ jobs:
       - uses: actions/checkout@v7
       - name: Prepare Rust
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Architecture boundaries
+        run: python scripts/check_architecture.py
       - name: Format
-        run: cargo +stable fmt --check
+        run: cargo +stable fmt --all --check
       - name: Check Windows component
-        run: cargo +stable clippy --locked --lib --bin LanDeskDisplay --bin LanDeskServer -- -D warnings
+        run: cargo +stable clippy -p landesk --locked --lib --bin LanDeskDisplay --bin LanDeskServer -- -D warnings
+      - name: Shared core tests
+        run: cargo +stable test -p landesk-core --locked
       - name: Windows library tests
-        run: cargo +stable test --locked --lib
+        run: cargo +stable test -p landesk --locked --lib
       - name: Native SCM and setup API tests (administrator runner, no driver installation)
-        run: cargo +stable test --locked --lib native_setup_ -- --ignored --test-threads=1
+        run: cargo +stable test -p landesk --locked --lib native_setup_ -- --ignored --test-threads=1
       - name: Client to server subsystem integration
         run: |
-          cargo +stable build --manifest-path client/Cargo.toml --locked --no-default-features --example desktop_probe
+          cargo +stable build --manifest-path apps/client/Cargo.toml --locked --no-default-features --example desktop_probe
           if ($LASTEXITCODE -ne 0) { throw 'Client probe build failed' }
           $env:LANDESK_CLIENT_PROBE = (Resolve-Path target/debug/examples/desktop_probe.exe).Path
-          cargo +stable test --locked --lib actual_client_crosses_subsystem_memory_backend_and_browser_authentication -- --ignored
+          cargo +stable test -p landesk --locked --lib actual_client_crosses_subsystem_memory_backend_and_browser_authentication -- --ignored
       - name: Build Windows x64
         run: cargo +stable build --locked --release --bin LanDeskDisplay --bin LanDeskServer
       - name: Read-only status smoke test

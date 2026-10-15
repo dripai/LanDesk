@@ -1,6 +1,6 @@
 /work/
 /target/
-/client/target/
+/apps/client/target/
 /HANDOFF.md
 *.log
 .DS_Store

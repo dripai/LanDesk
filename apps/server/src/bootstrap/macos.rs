@@ -1,0 +1,86 @@
+use crate::adapters::web as server;
+use crate::platform;
+use landesk_core::application::capture;
+use landesk_core::application::file_worker;
+use platform::macos::capture as mac_capture;
+use platform::macos::files;
+use platform::macos::native;
+
+use anyhow::Result;
+use std::sync::Arc;
+use std::sync::mpsc;
+
+pub fn run() -> Result<()> {
+    native::initialize_app();
+    let connection = platform::macos::connection::prepare()?;
+    let password = landesk_core::application::password::recover_password(
+        &connection,
+        &crate::platform::secrets::NativeSecretProtector,
+    )?;
+    let port = connection.port;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let (tx, rx) = mpsc::channel();
+    let native = native::Native {
+        tx,
+        shared: Arc::new(landesk_core::application::runtime::Shared::default()),
+    };
+    let state = server::AppState {
+        shared: native.shared.clone(),
+        native: Arc::new(native.clone()),
+        transport_key: landesk_core::security::transport_key::TransportKey::new(
+            connection.backend_key.clone(),
+        )?,
+        capture: capture::CaptureService::new(|| {
+            Box::new(mac_capture::MacCaptureBackend::default())
+        })?,
+        files: file_worker::FileService::new(files::HomeFiles::open(std::path::Path::new(
+            &objc2_foundation::NSHomeDirectory().to_string(),
+        ))?),
+    };
+    let transport_listener = runtime.block_on(tokio::net::TcpListener::bind(("0.0.0.0", port)))?;
+    let shutdown = native.shared.clone();
+    let failure = native.shared.clone();
+    let transport = runtime.spawn(async move {
+        let result = crate::adapters::ssh::run(
+            transport_listener,
+            connection,
+            platform::macos::connection::path(),
+            Arc::new(move || {
+                let state = state.clone();
+                Box::pin(async move {
+                    let (transport, desktop) = tokio::io::duplex(65536);
+                    tokio::spawn(async move {
+                        if let Err(error) = server::serve_stream(desktop, state).await {
+                            crate::diagnostics::log(&format!("Desktop stream closed: {error:#}"));
+                        }
+                    });
+                    Ok(Box::new(transport) as Box<dyn crate::adapters::ssh::StreamIo>)
+                })
+            }),
+            async move {
+                while !shutdown.shutdown.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            },
+        )
+        .await;
+        if result.is_err() {
+            failure
+                .shutdown
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    });
+    let shutdown = native.shared.clone();
+    let ui_result = native::run(native, rx, port, password);
+    shutdown
+        .shutdown
+        .store(true, std::sync::atomic::Ordering::Release);
+    ui_result?;
+    runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), transport).await
+    })???;
+    Ok(())
+}
