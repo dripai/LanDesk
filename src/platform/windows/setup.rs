@@ -1024,9 +1024,27 @@ mod tests {
                         == password.as_str(),
                     "Saved fresh password differs"
                 );
+                // Removal keeps unrelated files but drops the ownership marker.
+                // Reinstall must use the same preparation path as install(),
+                // rather than requiring the now-absent marker via ensure_directory.
+                ensure!(
+                    !paths.app.join("landesk-owner.txt").exists(),
+                    "Uninstall left an application ownership marker"
+                );
+                let mut tx = Transaction::new();
+                ensure!(
+                    prepare_application(&paths, &mut tx)
+                        .context("Prepare application after removing old installation")?
+                        .is_none(),
+                    "Removed executable unexpectedly required a backup"
+                );
+                os::owned(&paths.app, &["S-1-5-19", "S-1-5-32-545"])?;
+                ensure!(
+                    fs::read(paths.app.join("aad-user-file"))? == b"keep unrelated contents"
+                        && fs::read(driver.join("existing-driver"))? == b"keep display contents",
+                    "Reinstall changed unrelated files or display contents"
+                );
                 // Prove that real SCM names can be registered again immediately.
-                os::ensure_directory(&paths.app, os::APP, &["S-1-5-19", "S-1-5-32-545"])?;
-                fs::write(&paths.exe, b"owned new test executable")?;
                 drop(scm::create(&paths.exe, scm::TRANSPORT, true, None)?);
                 drop(scm::create(
                     &paths.exe,
