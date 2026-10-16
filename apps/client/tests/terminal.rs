@@ -171,19 +171,11 @@ impl Drop for Fixture {
 impl Fixture {
     async fn new(pty: u8, encrypted_key: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let known = dir.path().join("known_hosts");
         let host_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let login_key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let public_key = login_key.public_key().clone();
         let ssh_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ssh_port = ssh_listener.local_addr().unwrap().port();
-        keys::known_hosts::learn_known_hosts_path(
-            "127.0.0.1",
-            ssh_port,
-            host_key.public_key(),
-            &known,
-        )
-        .unwrap();
         let observed = Arc::new(Mutex::new(Observed::default()));
         let server = SshServer {
             observed: observed.clone(),
@@ -239,7 +231,6 @@ impl Fixture {
             let result = tunnel::run(
                 profile,
                 Zeroizing::new("test-only".into()),
-                known,
                 tx.clone(),
                 cancelled,
                 routes,

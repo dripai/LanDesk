@@ -6,10 +6,7 @@ use landesk_core::{
     domain::connection::{ConnectionProfile, Event, StopReason},
     ports::client::{ClientGateway, ClientGatewayFactory},
 };
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex, mpsc},
-};
+use std::sync::{Arc, Mutex, mpsc};
 use tokio::{net::TcpListener, sync::oneshot};
 use zeroize::Zeroizing;
 pub struct DesktopGatewayFactory;
@@ -50,20 +47,11 @@ impl ClientGateway for DesktopGateway {
         self: Arc<Self>,
         profile: ConnectionProfile,
         password: Zeroizing<String>,
-        known_hosts: PathBuf,
         events: mpsc::Sender<Event>,
         cancel: oneshot::Receiver<()>,
     ) -> BoxFuture<'static, Result<StopReason>> {
         Box::pin(async move {
-            tunnel::run(
-                profile,
-                password,
-                known_hosts,
-                events,
-                cancel,
-                self.routes.clone(),
-            )
-            .await
+            tunnel::run(profile, password, events, cancel, self.routes.clone()).await
         })
     }
 }

@@ -17,8 +17,8 @@ use zeroize::Zeroizing;
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     ensure!(
-        args.len() == 5,
-        "usage: terminal_gateway HOST USER PORT KEY_PATH KNOWN_HOSTS\nUse - for KEY_PATH to authenticate with LANDESK_SSH_SECRET. Press Enter to stop."
+        args.len() == 4,
+        "usage: terminal_gateway HOST USER PORT KEY_PATH\nUse - for KEY_PATH to authenticate with LANDESK_SSH_SECRET. Press Enter to stop."
     );
     let settings = ConnectionProfile {
         name: format!("{}@{}", args[1], args[0]),
@@ -51,14 +51,7 @@ async fn main() -> Result<()> {
         let _ = cancel.send(());
     });
     let (events, receiver) = mpsc::channel();
-    let task = tunnel::run(
-        settings.clone(),
-        secret,
-        PathBuf::from(&args[4]),
-        events,
-        cancelled,
-        routes.clone(),
-    );
+    let task = tunnel::run(settings.clone(), secret, events, cancelled, routes.clone());
     tokio::pin!(task);
     let mut tick = tokio::time::interval(Duration::from_millis(30));
     let result = loop {

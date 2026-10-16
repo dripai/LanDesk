@@ -43,7 +43,7 @@ static SAS: AtomicBool = AtomicBool::new(false);
 static STATUS: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(null_mut());
 
 fn data_dir() -> Result<PathBuf> {
-    Ok(PathBuf::from(std::env::var_os("ProgramData").context("ProgramData missing")?).join(NAME))
+    landesk_storage::application_data("server")
 }
 pub use crate::diagnostics::log;
 fn process_token() -> Result<Handle> {
@@ -500,7 +500,7 @@ fn serve_transport() -> Result<()> {
     let config = read_transport()?;
     let _ = landesk_core::application::password::recover_password(
         &config,
-        &crate::platform::secrets::NativeSecretProtector,
+        &landesk_storage::LocalSecrets::beside(&transport_path()?),
     )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -607,7 +607,6 @@ pub fn run() -> Result<()> {
                         | "--start-background"
                         | "--repair-runtime"
                         | "--change-password"
-                        | "--regenerate-password"
                         | "--set-startup"
                 )
             })
@@ -675,8 +674,9 @@ pub fn run() -> Result<()> {
                 Ok(())
             }
             [mode] if mode == "--export-logs" => super::bootstrap::export(),
-            [mode] if mode == "--change-password" => super::setup::change_password(false),
-            [mode] if mode == "--regenerate-password" => super::setup::change_password(true),
+            [mode, request] if mode == "--change-password" => {
+                super::setup::change_password(std::path::Path::new(request))
+            }
             [] => super::ui::run(false),
             [mode] if mode == "--settings" => super::ui::run(true),
             [mode] if mode == "--startup-ui" => super::ui::run(false),
@@ -698,11 +698,7 @@ pub fn run() -> Result<()> {
         if args.first().is_some_and(|mode| {
             matches!(
                 mode.as_str(),
-                "--start-background"
-                    | "--repair-runtime"
-                    | "--change-password"
-                    | "--regenerate-password"
-                    | "--set-startup"
+                "--start-background" | "--repair-runtime" | "--set-startup"
             )
         }) {
             super::ui::error_box(null_mut(), format!("{error:#}"));

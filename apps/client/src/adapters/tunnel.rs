@@ -14,8 +14,6 @@ use russh::Disconnect;
 use russh::client;
 use russh::keys;
 use russh::keys::PublicKeyOrCertificate;
-use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -41,61 +39,18 @@ async fn desktop_channel(session: &client::Handle<Handler>) -> Result<russh::Cha
     .context("LanDesk 子系统连接超时")?
 }
 
-static HOST_KEYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub(crate) struct Handler {
-    host: String,
-    port: u16,
-    known_hosts: PathBuf,
-}
+pub(crate) struct Handler;
 impl client::Handler for Handler {
     type Error = anyhow::Error;
     async fn check_server_key(&mut self, server: &PublicKeyOrCertificate) -> Result<bool> {
         ensure!(
             server.certificate().is_none(),
-            "首版暂不支持 SSH 主机证书，请使用普通主机密钥"
+            "暂不支持 SSH 主机证书，请使用普通主机密钥"
         );
-        let _lock = HOST_KEYS
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SSH 主机信任状态不可用"))?;
-        let key = server.public_key();
-        if keys::check_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)
-            .context("SSH 主机密钥已变化或信任文件无法读取，请核对服务器")?
-        {
-            return Ok(true);
-        }
-        save_host_key(&self.host, self.port, &key, &self.known_hosts)
-            .context("无法保存首次连接的 SSH 主机密钥")?;
+        // Product policy: encrypted SSH with user authentication, without host
+        // identity pinning. Never read or update a known_hosts file.
         Ok(true)
     }
-}
-
-fn save_host_key(
-    host: &str,
-    port: u16,
-    key: &keys::PublicKey,
-    path: &std::path::Path,
-) -> Result<()> {
-    let parent = path.parent().context("主机信任文件路径无效")?;
-    std::fs::create_dir_all(parent)?;
-    let old = match std::fs::read(path) {
-        Ok(data) => data,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(&old)?;
-    // Keep russh's OpenSSH serialization, but publish only after verifying its
-    // buffered write and syncing it. Its append helper alone does not report
-    // errors from BufWriter::drop and can leave an incomplete live file.
-    keys::known_hosts::learn_known_hosts_path(host, port, key, file.path())?;
-    ensure!(
-        keys::check_known_hosts_path(host, port, key, file.path())?,
-        "主机密钥写入不完整"
-    );
-    file.as_file().sync_all()?;
-    file.persist(path).context("主机信任文件保存失败")?;
-    Ok(())
 }
 
 trait StreamIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -129,7 +84,6 @@ impl Incoming {
 pub async fn run(
     settings: ConnectionProfile,
     password: Zeroizing<String>,
-    known_hosts: PathBuf,
     events: mpsc::Sender<Event>,
     cancel: oneshot::Receiver<()>,
     routes: Routes,
@@ -143,7 +97,6 @@ pub async fn run(
     run_bound(
         settings,
         password,
-        known_hosts,
         events,
         cancel,
         Incoming::Routed {
@@ -157,7 +110,6 @@ pub async fn run(
 async fn run_bound(
     settings: ConnectionProfile,
     password: Zeroizing<String>,
-    known_hosts: PathBuf,
     events: mpsc::Sender<Event>,
     mut cancel: oneshot::Receiver<()>,
     mut incoming: Incoming,
@@ -169,11 +121,7 @@ async fn run_bound(
         keepalive_max: 2,
         ..Default::default()
     });
-    let handler = Handler {
-        host: settings.host.clone(),
-        port: settings.ssh_port,
-        known_hosts,
-    };
+    let handler = Handler;
     let mut session = Arc::new(tokio::select! {
         _ = &mut cancel => return Ok(StopReason::Disconnected),
         result = timeout(Duration::from_secs(20), client::connect(config, (settings.host.as_str(), settings.ssh_port), handler)) => result.context("SSH 连接超时")??,
@@ -377,7 +325,6 @@ mod tests {
     }
 
     struct TestTunnel {
-        _directory: tempfile::TempDir,
         address: std::net::SocketAddr,
         id: String,
         ssh_port: u16,
@@ -396,18 +343,9 @@ mod tests {
             Self::new_with_routes(None).await
         }
         async fn new_with_routes(routes: Option<Routes>) -> Self {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("known_hosts");
             let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
             let ssh_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let ssh_port = ssh_listener.local_addr().unwrap().port();
-            keys::known_hosts::learn_known_hosts_path(
-                "127.0.0.1",
-                ssh_port,
-                key.public_key(),
-                &path,
-            )
-            .unwrap();
             let config = Arc::new(russh::server::Config {
                 keys: vec![key],
                 ..Default::default()
@@ -438,7 +376,6 @@ mod tests {
                 tokio::spawn(run(
                     settings,
                     Zeroizing::new("test-only".into()),
-                    path,
                     events,
                     cancelled,
                     routes,
@@ -447,14 +384,12 @@ mod tests {
                 tokio::spawn(run_bound(
                     settings,
                     Zeroizing::new("test-only".into()),
-                    path,
                     events,
                     cancelled,
                     Incoming::Local(listener),
                 ))
             };
             let fixture = Self {
-                _directory: directory,
                 address,
                 id,
                 ssh_port,
@@ -629,40 +564,60 @@ mod tests {
         }).await.unwrap();
     }
 
-    fn key() -> PublicKeyOrCertificate {
-        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
-            .unwrap()
-            .public_key()
-            .clone()
-            .into()
-    }
-    fn handler(path: PathBuf) -> Handler {
-        Handler {
-            host: "example.test".into(),
-            port: 22,
-            known_hosts: path,
-        }
-    }
     #[tokio::test]
-    async fn first_host_is_recorded_automatically_and_changed_key_is_rejected() {
-        use russh::client::Handler as _;
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("known_hosts");
-        let server_key = key();
-        let mut client = handler(path.clone());
-        assert!(client.check_server_key(&server_key).await.unwrap());
-        assert!(path.exists());
-        let original = std::fs::read(&path).unwrap();
-        assert!(client.check_server_key(&server_key).await.unwrap());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        assert!(client.check_server_key(&key()).await.is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
-    #[tokio::test]
-    async fn host_record_errors_are_not_silently_accepted() {
-        use russh::client::Handler as _;
-        let directory = tempfile::tempdir().unwrap();
-        let mut client = handler(directory.path().to_owned());
-        assert!(client.check_server_key(&key()).await.is_err());
+    async fn changed_host_keys_connect_but_wrong_password_is_rejected() {
+        timeout(Duration::from_secs(15), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let first = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+            let second = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+            assert_ne!(first.public_key(), second.public_key());
+            let keys = [first, second.clone(), second];
+            let server = tokio::spawn(async move {
+                let mut sessions = JoinSet::new();
+                for key in keys {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let config = Arc::new(russh::server::Config {
+                        keys: vec![key],
+                        auth_rejection_time: Duration::ZERO,
+                        ..Default::default()
+                    });
+                    sessions.spawn(async move {
+                        let session = russh::server::run_stream(
+                            config,
+                            socket,
+                            EchoServer(0, Default::default()),
+                        )
+                        .await
+                        .unwrap();
+                        let _ = session.await;
+                    });
+                }
+                while sessions.join_next().await.is_some() {}
+            });
+            let profile = ConnectionProfile {
+                host: address.ip().to_string(),
+                ssh_port: address.port(),
+                ..Default::default()
+            };
+            for (password, accepted) in [("test-only", true), ("test-only", true), ("wrong", false)]
+            {
+                let mut session =
+                    client::connect(Arc::new(client::Config::default()), address, Handler)
+                        .await
+                        .unwrap();
+                let result =
+                    authenticate(&mut session, &profile, Zeroizing::new(password.into())).await;
+                assert_eq!(result.is_ok(), accepted);
+                session
+                    .disconnect(Disconnect::ByApplication, "test complete", "en")
+                    .await
+                    .unwrap();
+                drop(session);
+            }
+            server.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

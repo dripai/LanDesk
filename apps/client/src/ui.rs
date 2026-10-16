@@ -353,12 +353,7 @@ impl Client {
         }
         self.password
             .update(cx, |state, cx| state.set_value("", window, cx));
-        let known_hosts = self
-            .settings_path
-            .as_ref()
-            .unwrap()
-            .with_file_name("known_hosts");
-        match self.connections.connect(settings, password, known_hosts) {
+        match self.connections.connect(settings, password) {
             Ok(()) => self.status.clear(),
             Err(error) => self.status = format!("{error:#}"),
         }

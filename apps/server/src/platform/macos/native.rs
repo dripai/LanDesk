@@ -1,121 +1,24 @@
 use crate::platform::macos::input::Input;
 use anyhow::Result;
 use anyhow::ensure;
-use landesk_core::application::{operation::Operation, password::PasswordOutcome};
 use landesk_core::domain::InputEvent;
-use landesk_core::domain::identity::CommitFailure;
 use landesk_core::protocol::MAX_TEXT_BYTES;
-use objc2::DefinedClass;
 use objc2::MainThreadMarker;
-use objc2::MainThreadOnly;
-use objc2::define_class;
-use objc2::msg_send;
-use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
 use objc2::runtime::ProtocolObject;
-use objc2::sel;
 use objc2_app_kit::NSApplication;
 use objc2_app_kit::NSApplicationActivationPolicy;
-use objc2_app_kit::NSBackingStoreType;
-use objc2_app_kit::NSButton;
-use objc2_app_kit::NSEventMask;
-use objc2_app_kit::NSFont;
 use objc2_app_kit::NSPasteboard;
 use objc2_app_kit::NSPasteboardItem;
 use objc2_app_kit::NSPasteboardTypePNG;
 use objc2_app_kit::NSPasteboardTypeString;
-use objc2_app_kit::NSTextField;
-use objc2_app_kit::NSWindow;
-use objc2_app_kit::NSWindowDelegate;
-use objc2_app_kit::NSWindowStyleMask;
 use objc2_foundation::NSArray;
 use objc2_foundation::NSData;
-use objc2_foundation::NSDate;
-use objc2_foundation::NSDefaultRunLoopMode;
-use objc2_foundation::NSNotification;
-use objc2_foundation::NSObject;
-use objc2_foundation::NSObjectProtocol;
-use objc2_foundation::NSPoint;
-use objc2_foundation::NSRect;
-use objc2_foundation::NSSize;
 use objc2_foundation::NSString;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Instant;
 use tokio::sync::oneshot;
-use zeroize::Zeroizing;
-
-struct PasswordUi {
-    saving: std::cell::RefCell<Operation<PasswordOutcome>>,
-    buttons: std::cell::RefCell<Vec<Retained<NSButton>>>,
-    label: Retained<NSTextField>,
-    status: Retained<NSTextField>,
-    copy: Retained<NSButton>,
-    password: std::cell::RefCell<Option<Zeroizing<String>>>,
-}
-impl PasswordUi {
-    fn submit(&self, password: Zeroizing<String>) -> Result<()> {
-        self.status.setStringValue(&NSString::from_str(""));
-        let path = super::connection::path();
-        self.saving
-            .borrow_mut()
-            .start(move || crate::adapters::identity::change_stored_password(&path, &password))?;
-        for button in self.buttons.borrow().iter() {
-            button.setEnabled(false);
-        }
-        self.copy.setEnabled(false);
-        self.label
-            .setStringValue(&NSString::from_str("正在保存连接密码…"));
-        Ok(())
-    }
-    fn poll(&self) {
-        let result = self.saving.borrow_mut().poll();
-        let Some(result) = result else {
-            return;
-        };
-        for button in self.buttons.borrow().iter() {
-            button.setEnabled(true);
-        }
-        match result {
-            Ok(PasswordOutcome::Saved { password, warning }) => {
-                self.update(Some(password));
-                if let Some(warning) = warning {
-                    self.error(anyhow::anyhow!(warning));
-                }
-            }
-            Ok(PasswordOutcome::Failed(error)) => {
-                let previous = if matches!(error, CommitFailure::Unknown(_)) {
-                    None
-                } else {
-                    self.password.borrow_mut().take()
-                };
-                self.update(previous);
-                self.error(error.into());
-            }
-            Err(error) => {
-                self.update(None);
-                self.error(error);
-            }
-        }
-    }
-    fn update(&self, password: Option<Zeroizing<String>>) {
-        self.label.setStringValue(&NSString::from_str(
-            &password
-                .as_ref()
-                .map(|p| format!("连接密码：{}", p.as_str()))
-                .unwrap_or_default(),
-        ));
-        self.copy.setEnabled(password.is_some());
-        *self.password.borrow_mut() = password;
-    }
-    fn error(&self, error: anyhow::Error) {
-        // Completion runs inside the timer: a nested modal loop here would pause
-        // that timer and remote input until the local user dismissed it.
-        self.status
-            .setStringValue(&NSString::from_str(&format!("{error:#}")));
-    }
-}
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -127,70 +30,19 @@ unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
 }
 
-define_class!(
-    #[unsafe(super = NSObject)]
-    #[thread_kind = MainThreadOnly]
-    #[ivars = PasswordUi]
-    struct PermissionActions;
-    unsafe impl NSObjectProtocol for PermissionActions {}
-    impl PermissionActions {
-        #[unsafe(method(changePassword:))]
-        fn change_password(&self, _sender: &AnyObject) {
-            let mtm = MainThreadMarker::new().expect("password UI runs on main thread");
-            if self.ivars().saving.borrow().is_busy() { return; }
-            match super::connection::prompt(mtm) {
-                Ok(Some(password)) => { if let Err(error) = self.ivars().submit(password) { self.ivars().error(error); } },
-                Ok(None) => {},
-                Err(error) => self.ivars().error(error),
-            }
-        }
-        #[unsafe(method(regeneratePassword:))]
-        fn regenerate_password(&self, _sender: &AnyObject) {
-            if self.ivars().saving.borrow().is_busy() { return; }
-            match landesk_core::domain::password::generate().and_then(|password| self.ivars().submit(password)) {
-                Ok(()) => {},
-                Err(error) => self.ivars().error(error),
-            }
-        }
-        #[unsafe(method(copyPassword:))]
-        fn copy_password(&self, _sender: &AnyObject) {
-            if let Some(password) = self.ivars().password.borrow().as_ref() {
-                let pasteboard = NSPasteboard::generalPasteboard();
-                pasteboard.clearContents();
-                if !pasteboard.setString_forType(&NSString::from_str(password), unsafe { NSPasteboardTypeString }) {
-                    self.ivars().error(anyhow::anyhow!("无法复制连接密码"));
-                }
-            }
-        }
-        #[unsafe(method(requestCapture:))]
-        fn request_capture(&self, _sender: &AnyObject) {
-            unsafe { CGRequestScreenCaptureAccess(); }
-        }
-        #[unsafe(method(requestInput:))]
-        fn request_input(&self, _sender: &AnyObject) {
-            // Enigo's native permission prompt; this generates no input events.
-            let _ = enigo::Enigo::new(&enigo::Settings::default());
-        }
-    }
-);
-
 use futures_util::future::BoxFuture;
 use landesk_core::application::runtime::Shared;
 use landesk_core::ports::DesktopControl;
 
-define_class!(
-    #[unsafe(super = NSObject)]
-    #[thread_kind = MainThreadOnly]
-    #[ivars = Arc<Shared>]
-    struct WindowLifecycle;
-    unsafe impl NSObjectProtocol for WindowLifecycle {}
-    unsafe impl NSWindowDelegate for WindowLifecycle {
-        #[unsafe(method(windowWillClose:))]
-        fn window_will_close(&self, _notification: &NSNotification) {
-            self.ivars().shutdown.store(true, Ordering::Release);
-        }
+pub fn request_capture() {
+    unsafe {
+        CGRequestScreenCaptureAccess();
     }
-);
+}
+pub fn request_input() -> Result<()> {
+    enigo::Enigo::new(&enigo::Settings::default())?;
+    Ok(())
+}
 
 pub enum Command {
     PasteText {
@@ -291,24 +143,6 @@ fn clipboard_text() -> Result<String> {
 pub fn permissions() -> (bool, bool) {
     // Read-only TCC preflight, never bypasses consent.
     unsafe { (CGPreflightScreenCaptureAccess(), AXIsProcessTrusted() != 0) }
-}
-
-fn label(
-    window: &NSWindow,
-    mtm: MainThreadMarker,
-    text: &str,
-    y: f64,
-    size: f64,
-) -> Retained<NSTextField> {
-    let field = NSTextField::labelWithString(&NSString::from_str(text), mtm);
-    field.setFrame(NSRect::new(NSPoint::new(24.0, y), NSSize::new(552.0, 46.0)));
-    field.setFont(Some(&NSFont::systemFontOfSize(size)));
-    field.setSelectable(true);
-    window
-        .contentView()
-        .expect("native content view")
-        .addSubview(&field);
-    field
 }
 
 struct NativeCommands {
@@ -452,158 +286,18 @@ pub fn initialize_app() -> MainThreadMarker {
     mtm
 }
 
-pub fn run(
-    native: Native,
-    rx: mpsc::Receiver<Command>,
-    port: u16,
-    password: Zeroizing<String>,
-) -> Result<()> {
-    let mtm = MainThreadMarker::new().expect("native UI runs on main thread");
-    let app = NSApplication::sharedApplication(mtm);
-    // These retained windows never release themselves when closed.
-    let panel = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 420.0)),
-            NSWindowStyleMask::Titled
-                | NSWindowStyleMask::Closable
-                | NSWindowStyleMask::Miniaturizable,
-            NSBackingStoreType::Buffered,
-            false,
-        )
-    };
-    unsafe {
-        panel.setReleasedWhenClosed(false);
-    }
-    panel.setTitle(&NSString::from_str("LanDesk"));
-    let lifecycle: Retained<WindowLifecycle> = unsafe {
-        let lifecycle = WindowLifecycle::alloc(mtm).set_ivars(native.shared.clone());
-        msg_send![super(lifecycle), init]
-    };
-    panel.setDelegate(Some(ProtocolObject::from_ref(&*lifecycle)));
-    panel.center();
-    label(&panel, mtm, "LanDesk", 364.0, 28.0);
-    label(&panel, mtm, &format!("连接端口：{port}"), 320.0, 16.0);
-    let status = label(&panel, mtm, "等待连接", 280.0, 15.0);
-    let password_label = label(&panel, mtm, "", 238.0, 20.0);
-    let copy = NSButton::new(mtm);
-    let actions: Retained<PermissionActions> = unsafe {
-        let actions = PermissionActions::alloc(mtm).set_ivars(PasswordUi {
-            label: password_label,
-            status: label(&panel, mtm, "", 166.0, 11.0),
-            saving: std::cell::RefCell::new(Operation::new()),
-            buttons: std::cell::RefCell::new(Vec::new()),
-            copy: copy.clone(),
-            password: std::cell::RefCell::new(None),
-        });
-        msg_send![super(actions), init]
-    };
-    for (title, action, x) in [
-        ("复制密码", sel!(copyPassword:), 24.0),
-        ("随机更换", sel!(regeneratePassword:), 180.0),
-        ("修改密码", sel!(changePassword:), 336.0),
-    ] {
-        let button = if x == 24.0 {
-            copy.clone()
-        } else {
-            NSButton::new(mtm)
-        };
-        button.setTitle(&NSString::from_str(title));
-        unsafe {
-            button.setTarget(Some(&actions));
-            button.setAction(Some(action));
-        }
-        actions.ivars().buttons.borrow_mut().push(button.clone());
-        button.setFrame(NSRect::new(
-            NSPoint::new(x, 190.0),
-            NSSize::new(145.0, 32.0),
-        ));
-        panel
-            .contentView()
-            .expect("native content view")
-            .addSubview(&button);
-    }
-    actions.ivars().update(Some(password));
-    let permission_label = label(&panel, mtm, "", 134.0, 13.0);
-    for (title, action, x) in [
-        ("授权屏幕录制", sel!(requestCapture:), 24.0),
-        ("授权辅助功能", sel!(requestInput:), 290.0),
-    ] {
-        let button = unsafe {
-            NSButton::buttonWithTitle_target_action(
-                &NSString::from_str(title),
-                Some(&actions),
-                Some(action),
-                mtm,
-            )
-        };
-        button.setFrame(NSRect::new(NSPoint::new(x, 72.0), NSSize::new(250.0, 32.0)));
-        panel
-            .contentView()
-            .expect("native content view")
-            .addSubview(&button);
-    }
-    label(
-        &panel,
-        mtm,
-        "关闭此窗口即停止服务，最小化不影响远程连接。",
-        14.0,
-        13.0,
-    );
-    panel.makeKeyAndOrderFront(None);
-    // Permission requests are explicit button actions, so configuration needs no consent prompt.
-    let last_update = std::cell::Cell::new(Instant::now() - std::time::Duration::from_secs(2));
+pub fn command_timer(native: Native, rx: mpsc::Receiver<Command>) -> super::run_loop::RunLoopTimer {
     let commands = std::cell::RefCell::new(NativeCommands {
         input: None,
         awake: None,
         copying: None,
     });
-    let timer_native = native.clone();
-    let timer_actions = actions.clone();
-    let timer = crate::platform::macos::run_loop::RunLoopTimer::new(mtm, move || {
-        objc2::rc::autoreleasepool(|_| {
-            commands.borrow_mut().tick(&timer_native, &rx);
-            timer_actions.ivars().poll();
-            if last_update.get().elapsed().as_secs_f32() >= 1.0 {
-                let (capture, input) = permissions();
-                permission_label.setStringValue(&NSString::from_str(&format!(
-                    "屏幕录制：{}    辅助功能：{}",
-                    if capture {
-                        "已授权"
-                    } else {
-                        "待授权，请在系统设置中添加本应用"
-                    },
-                    if input { "已授权" } else { "待授权" }
-                )));
-                let text = if timer_native.shared.active.load(Ordering::Acquire) {
-                    "远程连接中 · 本机显示画面"
-                } else {
-                    "等待连接 · 内置 SSH 加密连接"
-                };
-                status.setStringValue(&NSString::from_str(text));
-                last_update.set(Instant::now());
-            }
-        });
-    });
-    while !native.shared.shutdown.load(Ordering::Acquire)
-        || actions.ivars().saving.borrow().is_busy()
-    {
-        objc2::rc::autoreleasepool(|_| {
-            let deadline = NSDate::dateWithTimeIntervalSinceNow(0.025);
-            if let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
-                NSEventMask::Any,
-                Some(&deadline),
-                unsafe { NSDefaultRunLoopMode },
-                true,
-            ) {
-                app.sendEvent(&event);
-            }
-            app.updateWindows();
-        });
-    }
-    drop(timer);
-    native.shared.shutdown.store(true, Ordering::Release);
-    Ok(())
+    super::run_loop::RunLoopTimer::new(
+        MainThreadMarker::new().expect("UI main thread"),
+        move || {
+            objc2::rc::autoreleasepool(|_| commands.borrow_mut().tick(&native, &rx));
+        },
+    )
 }
 
 impl DesktopControl for Native {

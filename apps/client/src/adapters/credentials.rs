@@ -11,14 +11,8 @@ use std::path::Path;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-#[cfg(windows)]
-mod windows;
-#[cfg(windows)]
-use windows::{read_at, write_at};
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-use macos::{read_at, write_at};
+mod files;
+use files::{read_at, write_at};
 
 static ACCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -115,7 +109,7 @@ fn transaction(
         }
         if !failures.is_empty() {
             bail!(
-                "保存失败：{error:#}；凭据回滚失败：{}，请检查系统凭据存储",
+                "保存失败：{error:#}；凭据回滚失败：{}，请检查应用凭据文件",
                 failures.join("；")
             );
         }

@@ -1,5 +1,5 @@
-//! Recoverable local secrets. OS protection holds the encryption key;
-//! the configuration holds only authenticated ciphertext and a wrapped key.
+//! Recoverable local secrets. The storage adapter owns the local encryption key;
+//! the configuration holds only authenticated ciphertext.
 use crate::security::encryption;
 use crate::security::encryption::Ciphertext;
 use anyhow::Result;
@@ -12,14 +12,12 @@ use zeroize::Zeroizing;
 #[serde(deny_unknown_fields)]
 pub struct Secret {
     data: Ciphertext,
-    wrapped_key: Vec<u8>,
 }
 impl Secret {
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_test(plaintext: &[u8], purpose: &str) -> Self {
         Self {
             data: encryption::encrypt(&[7u8; 32], plaintext, purpose.as_bytes()).unwrap(),
-            wrapped_key: Vec::new(),
         }
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -31,10 +29,9 @@ impl Secret {
         purpose: &str,
         protector: &dyn crate::ports::SecretProtector,
     ) -> Result<Self> {
-        let (key, wrapped_key) = protector.key_for_write(purpose)?;
+        let key = protector.key_for_write(purpose)?;
         Ok(Self {
             data: encryption::encrypt(&key, plaintext, purpose.as_bytes())?,
-            wrapped_key,
         })
     }
     pub fn decrypt(
@@ -42,7 +39,7 @@ impl Secret {
         purpose: &str,
         protector: &dyn crate::ports::SecretProtector,
     ) -> Result<Zeroizing<Vec<u8>>> {
-        let key = protector.key_for_read(&self.wrapped_key, purpose)?;
+        let key = protector.key_for_read(purpose)?;
         encryption::decrypt(&key, &self.data, purpose.as_bytes())
     }
 }

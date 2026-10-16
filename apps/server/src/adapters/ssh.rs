@@ -335,14 +335,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.json");
         crate::adapters::identity::write_new(
-            &identity::create_stored("aB123456", DEFAULT_PORT).unwrap(),
+            &identity::create_stored("aB123456", DEFAULT_PORT, &path).unwrap(),
             &path,
         )
         .unwrap();
         assert_eq!(
             landesk_core::application::password::recover_password(
                 &identity::read(&path).unwrap(),
-                &crate::platform::secrets::NativeSecretProtector
+                &landesk_storage::LocalSecrets::beside(&path)
             )
             .unwrap()
             .as_str(),
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(
             landesk_core::application::password::recover_password(
                 &identity::read(&path).unwrap(),
-                &crate::platform::secrets::NativeSecretProtector
+                &landesk_storage::LocalSecrets::beside(&path)
             )
             .unwrap()
             .as_str(),

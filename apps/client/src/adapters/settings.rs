@@ -6,9 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub fn directory() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .context("无法找到当前用户配置目录")?
-        .join("LanDeskClient"))
+    landesk_storage::application_data("client")
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -52,8 +50,7 @@ impl Connections {
         Ok(())
     }
     pub fn replace(&mut self, old: Option<&str>, mut profile: ConnectionProfile) -> Result<String> {
-        // Normalize the identity, but preserve the SSH host spelling so editing an
-        // imported profile does not silently bypass its existing known_hosts entry.
+        // Normalize the connection identity while preserving the entered host spelling.
         profile.host = profile.host.trim().to_owned();
         profile.validate()?;
         let id = profile.id();

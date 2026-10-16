@@ -5,7 +5,6 @@ use crate::ports::client::{ClientGateway, ClientGatewayFactory};
 use anyhow::Result;
 use anyhow::ensure;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -167,7 +166,6 @@ impl ConnectionManager {
         &mut self,
         settings: ConnectionProfile,
         password: Zeroizing<String>,
-        known_hosts: PathBuf,
     ) -> Result<()> {
         ensure!(self.gateway_stop.is_some(), "网页入口尚未启动");
         settings.validate()?;
@@ -180,7 +178,7 @@ impl ConnectionManager {
         let events = self.sender.clone();
         self.runtime.spawn(async move {
             let (tx, rx) = mpsc::channel();
-            let task = gateway.connect(settings, password, known_hosts, tx, cancelled);
+            let task = gateway.connect(settings, password, tx, cancelled);
             tokio::pin!(task);
             let mut tick = tokio::time::interval(Duration::from_millis(30));
             let send = |event| {
@@ -323,7 +321,6 @@ mod tests {
             self: Arc<Self>,
             _: ConnectionProfile,
             _: Zeroizing<String>,
-            _: PathBuf,
             _: mpsc::Sender<Event>,
             cancel: oneshot::Receiver<()>,
         ) -> futures_util::future::BoxFuture<'static, Result<StopReason>> {

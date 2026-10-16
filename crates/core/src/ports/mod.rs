@@ -55,12 +55,8 @@ pub trait FileBackend: Send + Sync {
 }
 
 pub trait SecretProtector: Send + Sync {
-    fn key_for_write(&self, purpose: &str) -> Result<(crate::security::encryption::Key, Vec<u8>)>;
-    fn key_for_read(
-        &self,
-        wrapped: &[u8],
-        purpose: &str,
-    ) -> Result<crate::security::encryption::Key>;
+    fn key_for_write(&self, purpose: &str) -> Result<crate::security::encryption::Key>;
+    fn key_for_read(&self, purpose: &str) -> Result<crate::security::encryption::Key>;
 }
 pub trait IdentityRepository {
     fn lock(&self) -> Result<Box<dyn std::any::Any>>;

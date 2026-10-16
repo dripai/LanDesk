@@ -4,14 +4,14 @@
 
 ## 领域架构（当前实现）
 
-2026-10-16 已将代码整理为一个 workspace、一个锁文件、三个包：`landesk-core`、`landesk`（Server）、`landesk-client`。共享规则和用例在核心中实现，原生接口按目标平台编译。没有旧目录转发、跨目录源码引用或单连接配置迁移路径。本文中的图按职责表达；具体 Rust 类型和文件见下表。
+2026-10-16 已将代码整理为一个 workspace、一个锁文件、四个包：`landesk-core`、`landesk`（Server）、`landesk-client`。共享规则和用例在核心中实现，原生接口按目标平台编译。没有旧目录转发、跨目录源码引用或单连接配置迁移路径。本文中的图按职责表达；具体 Rust 类型和文件见下表。
 
 ### 实现映射
 
 | 领域 / 边界 | 当前实现 | 约束 |
 |---|---|---|
 | 身份 | `core/domain/identity.rs::ServerIdentity` | 密码哈希与显示密文一起更新，主机私钥、内部密钥和端口保持不变 |
-| 身份用例与存储 | `core/application/password.rs` → `IdentityRepository` / `SecretProtector` → Server `adapters/identity.rs` / `platform/secrets.rs` | SSH 不负责文件替换；系统密钥保护不进入领域模型 |
+| 身份用例与存储 | `core/application/password.rs` → `IdentityRepository` / `SecretProtector` → Server `adapters/identity.rs` / `storage::LocalSecrets` | SSH 不负责文件替换；本地密钥文件不进入领域模型 |
 | 密码操作 | `core/application/operation.rs::Operation` / `Refresh` | 单个有所有者的写任务；刷新可合并、过期结果丢弃；不强制中止已提交的系统操作 |
 | 客户端连接 | `core/domain/connection.rs::ConnectionProfile`、`core/application/connections.rs::ConnectionManager` | 网关与 SSH 由 `ClientGatewayFactory` / `ClientGateway` 注入；保留连接代次和取消规则 |
 | 网页空闲 | `core/application/viewer.rs` | 只有最后一个 WebSocket 关闭才开始 30 秒空闲计时 |
@@ -28,8 +28,8 @@
 
 | 领域 | 主要对象 | 必须共享的规则 | 平台负责的差异 |
 |---|---|---|---|
-| 服务端身份 | `ServerIdentity`、`AccessCredential` | 改密码不改 SSH 主机身份、监听端口或内部密钥；哈希与显示密文一致提交 | 钥匙串 / DPAPI、存储路径、文件权限、提权 |
-| 客户端连接 | `ConnectionProfile`、`ConnectionSession`、`HostTrust` | 规范化地址、去重、主机密钥校验、连接状态、重连编号、空闲关闭 | 打开浏览器、凭据系统、窗口生命周期 |
+| 服务端身份 | `ServerIdentity`、`AccessCredential` | 改密码不改 SSH 主机身份、监听端口或内部密钥；哈希与显示密文一致提交 | 共享密钥文件、文件权限、提权 |
+| 客户端连接 | `ConnectionProfile`、`ConnectionSession` | 规范化地址、去重、登录认证、连接状态、重连编号、空闲关闭 | 打开浏览器、凭据系统、窗口生命周期 |
 | 远控会话 | `ControlSession`、`InputCommand` | 认证先于控制；单控制者；取消后拒绝迟到输入；结束释放按键 | 输入注入、剪贴板、系统权限、安全桌面 |
 | 显示与采集 | `DisplaySelection`、`DisplaySpec`、`CaptureSession` | 尺寸预算、虚拟屏复用、采集成功后提交选择、失败保留旧屏 | SCK / GDI、虚拟显示驱动、原生对象线程归属 |
 | 文件传输 | `FileSession`、`Upload`、`FileEntry` | 会话隔离、边界校验、分块、提交与取消、错误可见 | 用户目录、路径与链接语义、文件访问身份 |
@@ -77,7 +77,7 @@ classDiagram
     ServerIdentity "1" *-- "1" AccessCredential : 一致更新
     ConnectionProfile "1" --> "0..1" ConnectionSession : 每个配置一个活动连接
     ConnectionSession "1" *-- "0..1" BrowserAccess : 重连更换凭证
-    ConnectionSession --> ServerIdentity : 通过主机密钥验证目标
+    ConnectionSession --> AccessCredential : SSH 登录认证
     ServerRuntime "1" *-- "0..1" ControlSession : 控制者互斥
     ServerRuntime "1" *-- "1" DisplaySelection : 独立于网页存续
     ControlSession "1" *-- "0..1" CaptureSession
@@ -85,7 +85,7 @@ classDiagram
     CaptureSession --> DisplaySelection : 成功采集后提交选择
 ```
 
-图中对象关系是职责分配，不是数据库表。Client 验证目标时只持有公开主机密钥及信任记录，不取得 Server 的私钥或内部密钥。仍采用当前需要的文件和系统凭据存储，不为领域建模引入数据库、服务拆分或通用事件总线。
+图中对象关系是职责分配，不是数据库表。Client 通过 SSH 加密连接和密码或私钥登录认证访问目标，不保存或校验服务器主机密钥，不取得 Server 的私钥或内部密钥。仍采用当前需要的文件和系统凭据存储，不为领域建模引入数据库、服务拆分或通用事件总线。
 
 ### 分层及依赖方向
 
@@ -113,9 +113,9 @@ flowchart TB
         ports --> domain
     end
     subgraph outbound[输出适配器]
-        common[共享实现：配置编码 / 哈希与加密 / SSH 客户端 / 网关]
-        mac[Mac：AppKit / 钥匙串 / SCK / CoreGraphics]
-        win[Windows：Win32 / DPAPI / SCM / GDI / 命名管道]
+        common[共享实现：本地文件与密钥 / 哈希与加密 / SSH 客户端 / 网关]
+        mac[Mac：GPUI / AppKit / 私有文件 / SCK / CoreGraphics]
+        win[Windows：Win32 / SCM / GDI / 命名管道]
     end
     cb --> cui
     sb --> sui
@@ -149,7 +149,7 @@ flowchart TB
 
 共同用例为：验证请求 → 取得操作互斥 → 读取当前身份 → 保护新密码 → 生成哈希 → 原子提交 → 发布结果。UI 的输入草稿、生成预览和取消不修改已保存密码；“随机更换”作为另一个命令提交生成后的密码，两者使用同一保存用例。
 
-Windows 仍在经过 UAC 的辅助进程内取得新密码并写入服务配置；Mac 在当前用户进程内操作。**不为了统一 UI 引入新的跨权限明文密码传输通道。** 这两个进程中的业务用例使用同一份核心代码。原生输入框、UAC 启动和运行循环分别是平台实现。
+Windows 在经过 UAC 的辅助进程内写入服务配置；Mac 在当前用户进程内操作。Windows 密码读取沿用限制本机交互用户的命名管道，由服务端解密后发送显示密码，不向界面开放服务端密钥目录。 这两个进程中的业务用例使用同一份核心代码。原生输入框、UAC 启动和运行循环分别是平台实现。
 
 ```mermaid
 sequenceDiagram
@@ -159,7 +159,7 @@ sequenceDiagram
     participant Flow as 共享操作协调器
     participant Worker as 后台用例工作线程
     participant Repo as 身份仓储
-    participant OS as 系统密钥保护与文件接口
+    participant OS as 共享本地密钥与文件接口
     User->>UI: 修改密码
     alt Windows
         UI->>Host: 以可见窗口方式请求 UAC 辅助进程
@@ -197,17 +197,35 @@ sequenceDiagram
 | 编辑、随机生成草稿 | 只修改草稿；允许取消；不占维护锁 |
 | 输入校验失败 | 留在编辑状态并说明错误，不启动保存 |
 | 保存中 | 禁止重复提交；继续处理窗口消息；退出等待当前提交完成 |
-| 用户取消密码输入或拒绝本次密码操作的 UAC | 结束操作，不显示未知故障、不写配置 |
+| 放弃草稿或拒绝本次密码操作的 UAC | 结束操作，不显示未知故障、不写配置 |
 | 提交前失败 | 已保存身份不变，显示明确错误；释放任务和操作互斥 |
 | 已提交但备份清理失败 | 报告“已保存但清理失败”，不把新密码误当未保存；依据实际存储刷新 |
-| 提交结果无法确认 | 清空可能过时的显示密码；Windows 异步读回并核验，Mac 显示错误并由重新打开应用重新核验 |
+| 提交结果无法确认 | 不宣称保存成功；Windows 异步读回并核验，Mac 保留草稿并报错，重新打开应用时读取核验 |
 | 完成事件迟到 | 写任务结果消费前不接纳下一次提交；刷新任务失效后丢弃其结果。连接事件仍以递增编号过滤 |
 
-不能强行取消已经进入钥匙串、DPAPI 或文件提交的系统调用，也不能在超时后宣称“保存已取消”。工作任务必须有所有者；不使用无人等待的后台线程悄悄修改密码。结果区分阶段和是否已提交；错误展示及诊断不得包含密码、密钥或输入内容。
+不能强行取消已经进入文件提交的系统调用，也不能在超时后宣称“保存已取消”。工作任务必须有所有者；不使用无人等待的后台线程悄悄修改密码。结果区分阶段和是否已提交；错误展示及诊断不得包含密码、密钥或输入内容。
 
-Mac 密码保存已移到 `Operation` 工作线程，主线程定时收取结果，保存中禁用重复操作，关闭窗口后继续泵消息直到保存结束。完成错误在窗口内显示，不从输入处理定时器进入嵌套模态循环。Windows 在提权辅助进程中输入密码，后台线程持有维护锁并执行同一个用例，进度窗口继续处理消息；主设置窗口通过 `Refresh` 异步读取管道密码，旧读回结果不能覆盖新状态。
+Mac 密码保存已移到 `Operation` 工作线程，主线程定时收取结果，保存中禁用重复操作，关闭窗口后继续泵消息直到保存结束。完成错误在窗口内显示，不从输入处理定时器进入嵌套模态循环。两端均在主窗口直接编辑密码，点击保存后生效；Windows 的随机生成仅修改草稿。Mac 使用 GPUI Kit 0.7.1 的 Input 与 Button，端口、密码和保存按钮同排；密码右侧刷新图标生成新密码并立即保存，确认成功后更新输入框；手工输入需点击保存，刷新不提交未保存的端口草稿。授权按钮右侧用勾表示已授权，操作结果、授权变化和连接状态统一显示在底部状态栏。端口变化时先预占新监听端口，再将端口与密码一起原子提交，停止旧监听并启动新监听；已有会话会断开。端口占用不写配置，提交后监听切换失败明确报告已保存但需要重新启动。Windows 将 AES-GCM 加密的请求写入临时目录，临时密钥和请求在辅助进程完成后一起清理，仅把路径传给提权辅助进程；辅助进程持有维护锁执行同一个用例，不再显示密码或进度弹窗，主窗口持续处理消息；主设置窗口通过 `Refresh` 异步读取管道密码，旧读回结果不能覆盖新状态。
 
 仓储使用独立的 `config.lock` 文件取得非阻塞操作锁，不锁即将被替换的配置文件，进程结束后由操作系统释放锁。Windows 原子替换失败后核验旧配置字节，无法核验时返回 `Unknown`；替换成功但备份清理失败返回 `CommittedWithWarning`。Unix 替换后同步父目录，失败时明确报告已替换但持久化存在问题。依据：[Rust File::try_lock（1.89 起可用）](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock)、[Windows ReplaceFileW 失败语义](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)。项目最低 Rust 版本为 1.92。
+
+不调用 Windows 凭据管理器、DPAPI 或 Mac 钥匙串，不迁移旧用户目录和旧凭据。两端共用 `landesk-storage::LocalSecrets`：随机 256 位密钥保存到独立文件，密码使用共享 AES-256-GCM 加解密；读取时缺失或损坏密钥直接报错，不能重新生成后覆盖原密文。密钥与密文同时被读取即可解密；Mac 使用 0700/0600，Windows 继承父目录 ACL，服务端安装器为身份与密钥目录授予 SYSTEM、管理员写入及 LocalService 读取权限。
+
+所有持久数据以实际程序位置为锚点，不取进程当前工作目录：
+
+```text
+程序目录/                          # Windows .exe 旁 / Mac .app 包外
+  data/
+    server/transport/config.json
+    server/transport/keys/         # 每个用途独立随机密钥
+    server/logs/                   # Windows 服务和界面日志
+    server/diagnostics/
+    client/settings.json
+    client/credentials/            # AES-GCM 密文
+    client/credentials/keys/
+```
+
+目录不可写时明确报错，不切换到用户目录。移动数据时必须保留对应密钥；Windows 注册服务后移动程序需要重新安装服务。SQLite 不引入：当前数据量小，现有文件原子提交和回滚足够，数据库也不能替代密钥的访问权限保护。
 
 ### 服务生命周期：共享任务所有权，保留宿主职责
 
@@ -216,7 +234,7 @@ Mac 密码保存已移到 `Operation` 工作线程，主线程定时收取结果
 ```mermaid
 flowchart LR
     subgraph macHost[Mac 进程宿主]
-        app[AppKit 主线程与应用退出事件]
+        app[GPUI 界面与 AppKit 主线程]
         macRun[Mac 装配器]
         app --> macRun
     end
@@ -248,7 +266,7 @@ flowchart LR
 
 ### Rust 包布局与条件编译
 
-当前使用一个 Cargo workspace、一个锁文件、三个包。核心内部按领域分模块，不为每个小模型创建 crate。
+当前使用一个 Cargo workspace、一个锁文件、四个包。核心内部按领域分模块，不为每个小模型创建 crate。
 
 ```text
 Cargo.toml                         # workspace 与统一构建 profile
@@ -259,26 +277,26 @@ crates/core/src/
   ports/                           # 身份仓储、密钥保护、桌面、采集、文件、客户端网关
   protocol/                        # 共享协议常量和消息契约
   security/                        # AES-GCM、Secret 值、内部认证；无系统密钥 API
+crates/storage/src/                # 共用程序旁 data 路径、本地密钥、文件权限与同步
 apps/server/src/
   bootstrap/macos.rs               # Mac 进程装配及退出
   adapters/identity.rs             # 身份编码、存储、原子替换
   adapters/ssh.rs                  # russh 入站协议适配
   adapters/web.rs                  # HTTP/WebSocket 解析、转发与背压
-  platform/macos/                  # AppKit、SCK、输入、文件、虚拟屏
+  platform/macos/                  # GPUI 设置界面、AppKit、SCK、输入、文件、虚拟屏
   platform/windows/                # SCM、UAC、管道、GDI、输入、驱动、原生窗口
-  platform/secrets.rs              # 按平台编译钥匙串 / DPAPI
   setup.rs / diagnostics.rs        # 安装配置校验、诊断格式与日志落盘
 apps/client/src/
   main.rs / ui.rs                  # 入口、GPUI 共享界面及装配
   adapters/                       # 网关、SSH、终端/SFTP、配置/凭据事务
-  adapters/credentials/            # 按平台编译 Credential Manager / 钥匙串
+  adapters/credentials/            # 两端共用 AES-GCM 凭据文件与事务
   platform/                       # 按平台编译 Mac 窗口 / Windows 托盘
 web/                              # 桌面及通用网页资源
 apps/client/web/                  # 终端网页资源
 docs/architecture.md
 ```
 
-共享核心不能依赖 Server 或 Client；协议适配器依赖核心中的消息契约，领域模型不能反过来依赖网络消息。模块边界由最小可见性和架构检查约束，crate 边界确保共享核心不引入 GUI、驱动或系统 SDK。原生凭据 API 的小型封装若确有两端复用需求，再放入专门的共享平台模块，不把客户端凭据和服务端身份事务合并。
+共享核心不能依赖 Server 或 Client；协议适配器依赖核心中的消息契约，领域模型不能反过来依赖网络消息。模块边界由最小可见性和架构检查约束，crate 边界确保共享核心不引入 GUI、驱动或系统 SDK。`landesk-storage` 是共享存储适配器，依赖 core；core 不反向依赖它。客户端凭据事务与服务端身份事务各自保持独立。
 
 Rust 的条件编译可排除不适用的模块，Cargo 可按目标平台选择依赖；这是项目已经使用的机制，不需要自制平台探测器。下面是已使用的模块选择方式：
 
@@ -343,16 +361,16 @@ Mac B 可以同时被控并控制其他设备。退出 B 的 Client 只结束第
 ## 连接与安全边界
 
 1. Client 启动本机动态网页入口，记录实际监听地址。配置文件不保存这个端口。
-2. 连接目标并验证 SSH 主机密钥；首次连接记录密钥，之后密钥变化明确拒绝。连接密码留在本机凭据存储和 SSH 认证流程中，不进入网页。
+2. 连接目标并完成 SSH 登录认证；不保存或校验 SSH 主机密钥，密钥变化不阻止连接。连接密码留在本机凭据存储和 SSH 认证流程中，不进入网页。
 3. 桌面模式打开 SSH session channel，请求 `landesk` subsystem，并等待明确的成功回执；拒绝、超时或后端不可用时不发布就绪状态。
 4. 就绪连接注册 `/s/<连接ID>/` 路由，同时生成独立随机 256 位网页访问凭证。连接 ID 来自目标地址和端口的 SHA-256，仅用于路由，不是凭据。
 5. Client 打开的 URL 在查询参数中携带启动凭证；网关验证后返回 303，跳到不含凭证的页面地址，并设置按端口命名、按连接路径限定的 `HttpOnly; SameSite=Strict` 会话 Cookie。入口和页面均禁止缓存，设置 `Referrer-Policy: no-referrer`。启动 URL 是敏感信息，不应复制分享或写入日志；本机浏览器历史、同账户恶意进程不属于该机制能完全隔离的范围。
 6. 每次资源请求与 WebSocket 升级都校验实际 Host 和凭证；提供 Origin 时必须精确匹配实际入口，WebSocket 必须携带 Origin。其他本机端口、外部站点、缺失或失效凭证均不能访问会话。
 7. 网关移除浏览器 Cookie，将已验证的请求转换为内部 HTTP 身份 `landesk.internal`。Server 的 SSH 边界覆盖外来内部认证头，注入本机私有密钥；资源与 WebSocket 统一验证该密钥。Windows 管道访问限制保持独立有效。
 
-内部 HTTP 身份是协议常量，不解析 DNS、不监听端口，不代表远端设备身份。SSH 主机密钥与连接密码才承担远端认证。终端页面另有每会话 hello token；来源、网页凭据及终端初始化认证分别验证。
+内部 HTTP 身份是协议常量，不解析 DNS、不监听端口，不代表远端设备身份。连接密码用于服务器验证客户端；主机密钥仍参与 SSH 握手，但客户端不验证它与目标设备的绑定。终端页面另有每会话 hello token；来源、网页凭据及终端初始化认证分别验证。
 
-同一 Client 的目标页面共享浏览器同源，路径和 Cookie 不构成目标网页之间的隔离；应只连接可信服务器。首次 SSH 主机密钥采用首次使用信任，不能验证第一次连接时的主机身份。
+同一 Client 的目标页面共享浏览器同源，路径和 Cookie 不构成目标网页之间的隔离；应只连接可信服务器。主机密钥校验已移除，客户端不能识别冒充的服务器。
 
 断开立即取消通道与转发任务，路由注销后凭证失效。同一目标重连生成新凭证，旧 Cookie、旧启动 URL 不可复用。客户端重新连接后自动打开新 URL；不能靠刷新旧地址创建 SSH。
 
@@ -376,9 +394,9 @@ SSH 就绪后，连续 30 秒没有桌面/终端 WebSocket 会话则关闭该 SS
 
 ### macOS
 
-使用 ScreenCaptureKit 采集、Enigo/CoreGraphics 输入、AppKit 窗口与剪贴板。输入及清理在 AppKit 主线程的 common run-loop modes 中执行，窗口拖动或模态循环不应吞掉按键释放。需要屏幕录制与辅助功能授权；启动不自动申请。
+使用 ScreenCaptureKit 采集、Enigo/CoreGraphics 输入、GPUI 设置窗口与 AppKit 剪贴板。输入及清理在 AppKit 主线程的 common run-loop modes 中执行，窗口拖动或模态循环不应吞掉按键释放。需要屏幕录制与辅助功能授权；启动不自动申请。
 
-连接密码首次随机生成 8 位数字/大小写字母，界面可查看、复制及修改。验证使用 Argon2id，显示密码使用 AES-256-GCM 密文；加密密钥保存在钥匙串。修改失败不显示未保存密码。SSH 身份与内部认证密钥不提供给浏览器。
+连接密码首次随机生成 8 位数字/大小写字母，界面可直接选中文本复制和编辑。验证使用 Argon2id，显示密码使用 AES-256-GCM 密文；加密密钥保存在 `data/server/transport/keys/`；目录权限 `0700`，密钥文件权限 `0600`，不调用钥匙串。密钥与配置都依赖当前用户的文件访问权限保护，不防止同一用户进程读取。保存失败保留输入草稿并在状态栏报错，不显示保存成功。SSH 身份与内部认证密钥不提供给浏览器。
 
 当前 `.app` 打包采用本机 ad-hoc 临时签名，没有 Developer ID 签名或公证；更新后系统可能重新要求隐私授权。正式分发签名尚未接入。
 
@@ -390,7 +408,7 @@ SSH 就绪后，连续 30 秒没有桌面/终端 WebSocket 会话则关闭该 SS
 
 物理控制台可能与 RDP 会话不同；不自动登录、不修改系统账户或 RDP。支持 GDI/JPEG 采集、SendInput 和剪贴板；桌面文件访问与上传明确禁用，不暴露 LocalSystem 文件系统。普通输入失败时保留画面和选屏，显示警告；实际输入成功后撤销警告，不重放失败点击或文字。Ctrl+Alt+Delete 的 SendSAS 调用无效果回执，日志成功不代表登录界面必然响应。
 
-连接配置位于 `%ProgramData%\LanDeskServer\transport\config.json`，包含 Argon2id、AES-GCM 密文、SSH 身份与内部密钥，限制普通用户读取。密码加密密钥使用机器范围 DPAPI。专用本机密码管道允许交互用户读取显示密码的加密记录；界面校验 LocalService 管道所有者，不接收 SSH 私钥或内部密钥。机器范围 DPAPI 不能隔离已经取得密文的本机用户。
+连接配置位于程序旁 `data/server/transport/config.json`，包含 Argon2id、AES-GCM 密文、SSH 身份与内部密钥，限制普通用户读取。密码加密密钥使用共享本地文件方案。专用本机密码管道允许交互用户读取显示密码，拒绝远程客户端；界面校验 LocalService 管道所有者，不接收 SSH 私钥、密码加密密钥或内部密钥。
 
 ### 显示选择与虚拟设备生命周期
 
@@ -418,7 +436,7 @@ Windows 驱动使用上游 MttVDD 25.7.23 原始 DLL/INF/CAT，安装前核验 S
 - 启动时最小化：控制登录后管理界面，开始菜单入口可打开设置。
 - 卸载：停止服务和界面，删除程序、启动入口、防火墙与应用登记；保留配置、日志及无关文件。可选移除 LanDesk 自建虚拟设备，不移除第三方设备和共享 Driver Store 包。
 - 修复日志并启动：验证归属和配置，修复日志目录、文件及 LocalService 权限，按依赖顺序启动服务。不重建密码、不重装驱动；配置缺失明确报错。
-- 导出日志：生成 `%ProgramData%\LanDeskServer\diagnostics\LanDeskServer-diagnostics-*.zip`。不持有安装锁；日志缺失或读取失败记入 `status.json`，仍可导出诊断状态。
+- 导出日志：生成 `程序旁 data/server/diagnostics/LanDeskServer-diagnostics-*.zip`。不持有安装锁；日志缺失或读取失败记入 `status.json`，仍可导出诊断状态。
 
 只读检查：
 
@@ -471,7 +489,9 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanD
 
 ## 版本依据与验证记录
 
-**0.4.0 本地验证（2026-10-16；Windows MSVC CI 待推送后验证）**：
+**0.5.0 本地验证（2026-10-16）**：核心 29 项、共享存储 2 项、服务端 44 项库测试通过；客户端 14 项库测试和 7 项 SSH/PTY/SFTP 测试通过。覆盖本地 AES 密文、密钥丢失/损坏、数据目录移动、事务回滚、端口预占及监听切换。Mac arm64 与 Windows x64 gnullvm 全目标 Clippy 通过。Windows MSVC 与原生安装/服务/界面尚未验证。Mac 两个 release 应用已替换到 `/Applications`；已检查 GPUI 布局、无效端口状态栏错误、重启恢复相同密码、`/Applications/data/server/` 实际落盘及 SSH 监听。未通过界面修改真实密码，未验证本轮远程画面和输入；当前新版系统授权显示未授权。
+
+**0.4.0 重构完成时的历史验证（2026-10-16）**：
 
 | 检查 | 结果 |
 |---|---|
@@ -483,10 +503,10 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanD
 | 静态检查 | Mac arm64 和 Windows x64 gnullvm 全 workspace、全部目标（含 GPUI 客户端、服务端、测试及示例）Clippy `-D warnings` 通过 |
 | 文档及边界 | 架构依赖检查、格式、UTF-8、Python 语法、本地链接、4 张 Mermaid 图语法及 diff 检查通过 |
 
-本轮没有执行 Windows MSVC CI 或 Windows 原生测试，没有部署新构建。Windows UAC/SCM/驱动、Mac 新密码界面与真实钥匙串交互、Mac Intel 和三机链路仍需实机验收；虚拟显示硬件测试默认跳过。以下历史记录不代表重构后的版本已通过同样的实机验证。
+以上历史测试不能代替本次存储与界面变更的验证；Windows UAC/SCM/驱动、Mac Intel 和三机链路仍需实机验收，虚拟显示硬件测试默认跳过。
 
 
-锁定依赖：russh 0.64.1、Tokio 1.53.2、Hyper 1.12.0、Axum 0.8.9、GPUI Kit 0.7.1、ScreenCaptureKit Rust 11.0.0、Enigo 0.6.1、windows-sys 0.61.2、windows 0.61.3、security-framework 3.7.0。接口先核对本机锁定源码。
+锁定依赖：russh 0.64.1、Tokio 1.53.2、Hyper 1.12.0、Axum 0.8.9、GPUI Kit 0.7.1、ScreenCaptureKit Rust 11.0.0、Enigo 0.6.1、windows-sys 0.61.2、windows 0.61.3。接口先核对本机锁定源码。
 
 - 2026-10-15，0.3.0：Mac 服务端 54 项库测试、3 项平台契约测试及原生运行循环测试通过；客户端 26 项核心测试与 7 项 SSH/终端集成测试通过；29 项网页测试通过。跨程序集成测试验证了 subsystem、内存后端、网页凭证交换、静态资源、WebSocket 升级与断开路由清理；没有验证真实画面或输入。
 - 两端格式检查和 Clippy 通过。Windows x64 gnullvm 客户端全目标编译检查、服务端库及两个程序 Clippy 通过；这是 macOS 交叉检查，不等于 Windows MSVC CI 或实机通过。
@@ -498,7 +518,7 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanD
 官方及实现依据：
 
 - [SSH subsystem / russh Handler](https://docs.rs/russh/0.64.1/russh/server/trait.Handler.html)、[Tokio 动态监听](https://docs.rs/tokio/1.53.2/tokio/net/struct.TcpListener.html)、[Tokio 内存流](https://docs.rs/tokio/1.53.2/tokio/io/fn.duplex.html)、[Hyper HTTP Upgrade](https://docs.rs/hyper/1.12.0/hyper/upgrade/index.html)。
-- [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit)、[AppKit Run Loops](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/RunLoopManagement/RunLoopManagement.html)、[钥匙串接口](https://docs.rs/security-framework/3.7.0/security_framework/passwords/index.html)、[Developer ID](https://developer.apple.com/developer-id/)。
+- [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit)、[AppKit Run Loops](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/RunLoopManagement/RunLoopManagement.html)、[Unix 文件权限](https://doc.rust-lang.org/std/os/unix/fs/trait.PermissionsExt.html)、[Developer ID](https://developer.apple.com/developer-id/)。
 - [Mac 虚拟显示器参考实现（Chromium）](https://chromium.googlesource.com/chromium/src/+/HEAD/ui/display/mac/test/virtual_display_util_mac.mm)：不是公开 Apple API 承诺。
 - [Windows IDD](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/indirect-display-driver-model-overview)、[MttVDD 25.7.23](https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23)、[DiInstallDevice](https://learn.microsoft.com/en-us/windows/win32/api/newdev/nf-newdev-diinstalldevice)、[WinVerifyTrust](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust)。
-- [Windows 服务入口](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicectrldispatcherw)、[DeleteService](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-deleteservice)、[CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw)、[SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)、[SendSAS](https://learn.microsoft.com/en-us/windows/win32/api/sas/nf-sas-sendsas)、[DPAPI](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)。
+- [Windows 服务入口](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-startservicectrldispatcherw)、[DeleteService](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-deleteservice)、[CreateProcessAsUserW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw)、[SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)、[SendSAS](https://learn.microsoft.com/en-us/windows/win32/api/sas/nf-sas-sendsas)。

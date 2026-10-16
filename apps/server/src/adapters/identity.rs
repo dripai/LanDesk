@@ -1,4 +1,3 @@
-use crate::platform::secrets::NativeSecretProtector;
 use anyhow::{Context, Result, ensure};
 #[cfg(windows)]
 use landesk_core::domain::identity::CommitFailure;
@@ -8,6 +7,7 @@ use landesk_core::{
     ports::IdentityRepository,
     security::secret::Secret,
 };
+use landesk_storage::LocalSecrets;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 pub struct IdentityFile(pub PathBuf);
@@ -160,14 +160,14 @@ pub fn write_new(config: &ServerIdentity, path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn create_stored(password: &str, port: u16) -> Result<ServerIdentity> {
+pub fn create_stored(password: &str, port: u16, path: &Path) -> Result<ServerIdentity> {
     create(
         password,
         port,
         Secret::encrypt(
             password.as_bytes(),
             PASSWORD_PURPOSE,
-            &NativeSecretProtector,
+            &LocalSecrets::beside(path),
         )?,
     )
 }
@@ -195,7 +195,7 @@ pub fn change_stored_password(
 ) -> landesk_core::application::password::PasswordOutcome {
     landesk_core::application::password::change(
         &IdentityFile(path.into()),
-        &NativeSecretProtector,
+        &LocalSecrets::beside(path),
         Zeroizing::new(password.to_owned()),
     )
 }

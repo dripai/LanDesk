@@ -40,7 +40,7 @@ pub(crate) fn validate_display_xml(bytes: &[u8]) -> Result<()> {
                 depth -= 1;
             }
             Event::Text(text) if depth == 0 => ensure!(
-                text.as_ref().iter().all(u8::is_ascii_whitespace),
+                text.iter().all(u8::is_ascii_whitespace),
                 "显示配置根元素外存在内容"
             ),
             Event::Eof => {

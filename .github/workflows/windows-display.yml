@@ -28,8 +28,8 @@ jobs:
         run: cargo +stable fmt --all --check
       - name: Check Windows component
         run: cargo +stable clippy -p landesk --locked --lib --bin LanDeskDisplay --bin LanDeskServer -- -D warnings
-      - name: Shared core tests
-        run: cargo +stable test -p landesk-core --locked
+      - name: Shared core and storage tests
+        run: cargo +stable test -p landesk-core -p landesk-storage --locked
       - name: Windows library tests
         run: cargo +stable test -p landesk --locked --lib
       - name: Native SCM and setup API tests (administrator runner, no driver installation)

@@ -60,7 +60,6 @@ async fn main() -> Result<()> {
         ssh_port: args[1].parse()?,
         ..Default::default()
     };
-    let directory = tempfile::tempdir()?;
     let routes = gateway::Routes::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -74,7 +73,6 @@ async fn main() -> Result<()> {
     let task = tokio::spawn(tunnel::run(
         settings,
         password,
-        directory.path().join("known_hosts"),
         events,
         cancelled,
         tunnel_routes,

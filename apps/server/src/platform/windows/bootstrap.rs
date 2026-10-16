@@ -12,22 +12,13 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Services::*;
 
 pub fn machine_logs() -> Result<PathBuf> {
-    Ok(
-        PathBuf::from(std::env::var_os("ProgramData").context("ProgramData missing")?)
-            .join("LanDeskServer/logs"),
-    )
+    Ok(landesk_storage::application_data("server")?.join("logs"))
 }
 pub fn user_logs() -> Result<PathBuf> {
-    Ok(
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA missing")?)
-            .join("LanDeskServer/logs"),
-    )
+    machine_logs()
 }
 pub fn diagnostic_exports() -> Result<PathBuf> {
-    Ok(
-        PathBuf::from(std::env::var_os("ProgramData").context("ProgramData missing")?)
-            .join("LanDeskServer/diagnostics"),
-    )
+    Ok(landesk_storage::application_data("server")?.join("diagnostics"))
 }
 pub fn log_locations() -> String {
     format!(

@@ -23,12 +23,34 @@ pub fn change(
     protector: &dyn SecretProtector,
     password: Zeroizing<String>,
 ) -> PasswordOutcome {
+    save(repository, protector, password, None)
+}
+pub fn change_connection(
+    repository: &dyn IdentityRepository,
+    protector: &dyn SecretProtector,
+    password: Zeroizing<String>,
+    port: u16,
+) -> PasswordOutcome {
+    save(repository, protector, password, Some(port))
+}
+fn save(
+    repository: &dyn IdentityRepository,
+    protector: &dyn SecretProtector,
+    password: Zeroizing<String>,
+    port: Option<u16>,
+) -> PasswordOutcome {
     let run = || -> CommitResult {
         password::validate(&password)?;
+        if port == Some(0) {
+            return Err(anyhow::anyhow!("端口必须在 1–65535 之间").into());
+        }
         let _operation = repository.lock()?;
         let mut identity = repository.read()?;
         let secret = Secret::encrypt(password.as_bytes(), PASSWORD_PURPOSE, protector)?;
         identity.replace_credential(&password, secret)?;
+        if let Some(port) = port {
+            identity.port = port;
+        }
         repository.commit(&identity)
     };
     match run() {
@@ -87,12 +109,12 @@ mod tests {
         fail: bool,
     }
     impl SecretProtector for Protector {
-        fn key_for_write(&self, _: &str) -> Result<(crate::security::encryption::Key, Vec<u8>)> {
+        fn key_for_write(&self, _: &str) -> Result<crate::security::encryption::Key> {
             self.writes.fetch_add(1, Ordering::Relaxed);
             ensure!(!self.fail, "injected key protection failure");
-            Ok((Zeroizing::new([7; 32]), vec![]))
+            Ok(Zeroizing::new([7; 32]))
         }
-        fn key_for_read(&self, _: &[u8], _: &str) -> Result<crate::security::encryption::Key> {
+        fn key_for_read(&self, _: &str) -> Result<crate::security::encryption::Key> {
             Ok(Zeroizing::new([7; 32]))
         }
     }
@@ -220,6 +242,34 @@ mod tests {
             change(&repository(2), &protector, Zeroizing::new("new".into())),
             PasswordOutcome::Failed(CommitFailure::Unknown(_))
         ));
+    }
+    #[test]
+    fn connection_settings_commit_together_and_invalid_port_changes_nothing() {
+        let repo = repository(0);
+        let protector = Protector {
+            writes: AtomicUsize::new(0),
+            fail: false,
+        };
+        let original_port = repo.read().unwrap().port;
+        assert!(matches!(
+            change_connection(&repo, &protector, Zeroizing::new("new".into()), 0),
+            PasswordOutcome::Failed(_)
+        ));
+        assert_eq!(repo.read().unwrap().port, original_port);
+        assert!(
+            repo.read()
+                .unwrap()
+                .verify_password("old-password")
+                .unwrap()
+        );
+        assert!(matches!(
+            change_connection(&repo, &protector, Zeroizing::new("new".into()), 2345),
+            PasswordOutcome::Saved { .. }
+        ));
+        let saved = repo.read().unwrap();
+        assert_eq!(saved.port, 2345);
+        assert!(saved.verify_password("new").unwrap());
+        assert_eq!(&*recover_password(&saved, &protector).unwrap(), "new");
     }
     #[test]
     fn concurrent_operation_and_changed_running_identity_are_rejected() {

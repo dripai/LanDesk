@@ -4497,7 +4497,7 @@ dependencies = [
 
 [[package]]
 name = "landesk"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4506,11 +4506,13 @@ dependencies = [
  "enigo",
  "futures-util",
  "getrandom 0.3.4",
+ "gpui-kit",
  "http-body-util",
  "hyper",
  "hyper-util",
  "image",
  "landesk-core",
+ "landesk-storage",
  "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -4518,7 +4520,6 @@ dependencies = [
  "quick-xml 0.38.4",
  "russh",
  "screencapturekit 11.0.0",
- "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4533,10 +4534,9 @@ dependencies = [
 
 [[package]]
 name = "landesk-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
- "dirs 6.0.0",
  "futures-util",
  "getrandom 0.3.4",
  "gpui-kit",
@@ -4544,6 +4544,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "landesk-core",
+ "landesk-storage",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -4551,7 +4552,6 @@ dependencies = [
  "raw-window-handle",
  "russh",
  "russh-sftp",
- "security-framework",
  "serde",
  "serde_json",
  "tempfile",
@@ -4565,7 +4565,7 @@ dependencies = [
 
 [[package]]
 name = "landesk-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4576,6 +4576,18 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "landesk-storage"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "landesk-core",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "zeroize",
 ]
 

@@ -103,47 +103,33 @@ impl Drop for Lock {
     }
 }
 
-pub(super) fn change_password(randomize: bool) -> Result<()> {
-    use landesk_core::application::{operation::Operation, password::PasswordOutcome};
-    let password = if randomize {
-        landesk_core::domain::password::generate()?
-    } else {
-        let Some(password) = dialog::password()? else {
-            return Ok(());
-        };
-        password
-    };
-    let progress = dialog::Progress::new("保存连接密码")?;
-    progress.stage("正在保存连接密码…")?;
-    let mut operation = Operation::new();
-    operation.start(move || -> Result<PasswordOutcome> {
-        // Windows mutex ownership never crosses threads.
-        let _lock = Lock::new()?;
-        let directory = os::environment("ProgramData")?.join("LanDeskServer/transport");
-        os::ensure_directory(&directory, os::TRANSPORT_ACL, &["S-1-5-19"])?;
-        let path = directory.join("config.json");
-        os::plain(&path)?;
-        Ok(crate::adapters::identity::change_stored_password(
-            &path, &password,
-        ))
-    })?;
-    loop {
-        progress.pump();
-        if let Some(result) = operation.poll() {
-            match result?? {
-                PasswordOutcome::Saved { warning, .. } => {
-                    crate::diagnostics::log(
-                        "Connection password changed; existing sessions retained",
-                    );
-                    if let Some(warning) = warning {
-                        dialog::complete(&warning);
-                    }
-                    return Ok(());
-                }
-                PasswordOutcome::Failed(error) => return Err(error.into()),
+pub(super) fn change_password(request: &Path) -> Result<()> {
+    use landesk_core::application::password::PasswordOutcome;
+    // The UI passes only a path to AES-GCM-protected data, never a password in argv.
+    os::plain(request)?;
+    ensure!(fs::metadata(request)?.len() <= 16384, "密码保存请求过大");
+    let bytes = zeroize::Zeroizing::new(fs::read(request)?);
+    let secret: landesk_core::security::secret::Secret = serde_json::from_slice(&bytes)?;
+    let plaintext = secret.decrypt(
+        "LanDesk.PasswordChange",
+        &landesk_storage::LocalSecrets::beside(request),
+    )?;
+    let password = zeroize::Zeroizing::new(String::from_utf8(plaintext.to_vec())?);
+    landesk_core::domain::password::validate(&password)?;
+    let _lock = Lock::new()?;
+    let directory = Paths::new()?.transport;
+    os::ensure_directory(&directory, os::TRANSPORT_ACL, &["S-1-5-19"])?;
+    let path = directory.join("config.json");
+    os::plain(&path)?;
+    match crate::adapters::identity::change_stored_password(&path, &password) {
+        PasswordOutcome::Saved { warning, .. } => {
+            crate::diagnostics::log("Connection password changed; existing sessions retained");
+            if let Some(warning) = warning {
+                crate::diagnostics::log(&warning);
             }
+            Ok(())
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        PasswordOutcome::Failed(error) => Err(error.into()),
     }
 }
 
@@ -208,7 +194,7 @@ struct Paths {
 impl Paths {
     fn new() -> Result<Self> {
         let app = os::environment("ProgramFiles")?.join("LanDeskServer");
-        let data = os::environment("ProgramData")?.join("LanDeskServer");
+        let data = landesk_storage::data_directory(&app.join("LanDeskServer.exe"), "server")?;
         Ok(Self {
             exe: app.join("LanDeskServer.exe"),
             app,
@@ -218,9 +204,21 @@ impl Paths {
         })
     }
     fn prepare_logs(&self) -> Result<()> {
+        if !self.app.exists() {
+            os::create_directory(&self.app, os::APP)?;
+        }
+        let root = self.app.join("data");
+        if self.data.parent() == Some(root.as_path()) {
+            os::ensure_directory(&root, os::PRIVATE, &[])?;
+        }
         os::ensure_directory(&self.data, os::PRIVATE, &[])?;
         os::ensure_directory(&self.logs, os::LOGS, &["S-1-5-32-545"])?;
-        for name in ["transport.log", "transport.previous.log"] {
+        for name in [
+            "transport.log",
+            "transport.previous.log",
+            "ui.log",
+            "ui.previous.log",
+        ] {
             let file = self.logs.join(name);
             if file.exists() {
                 os::plain(&file)?;
@@ -232,7 +230,11 @@ impl Paths {
             }
             os::protect(
                 &file,
-                "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;LS)(A;;GR;;;BU)",
+                if name.starts_with("ui.") {
+                    "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;BU)"
+                } else {
+                    "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;LS)(A;;GR;;;BU)"
+                },
             )?;
         }
         Ok(())
@@ -260,14 +262,14 @@ impl Paths {
         ensure!(!path.exists(), "全新安装前连接配置未清理");
         let password = landesk_core::domain::password::generate()?;
         crate::adapters::identity::write_new(
-            &crate::adapters::identity::create_stored(&password, 2222)?,
+            &crate::adapters::identity::create_stored(&password, 2222, &path)?,
             &path,
         )?;
         os::plain(&path)?;
         let config = crate::adapters::identity::read(&path)?;
         let _ = landesk_core::application::password::recover_password(
             &config,
-            &crate::platform::secrets::NativeSecretProtector,
+            &landesk_storage::LocalSecrets::beside(&path),
         )?;
         Ok(config)
     }
@@ -1070,7 +1072,7 @@ mod tests {
                 let config = paths.transport()?;
                 let password = landesk_core::application::password::recover_password(
                     &config,
-                    &crate::platform::secrets::NativeSecretProtector,
+                    &landesk_storage::LocalSecrets::beside(&config_path),
                 )?;
                 ensure!(
                     password.len() == 8 && password.bytes().all(|b| b.is_ascii_alphanumeric()),
@@ -1079,7 +1081,7 @@ mod tests {
                 ensure!(
                     landesk_core::application::password::recover_password(
                         &crate::adapters::identity::read(&config_path)?,
-                        &crate::platform::secrets::NativeSecretProtector
+                        &landesk_storage::LocalSecrets::beside(&config_path)
                     )?
                     .as_str()
                         == password.as_str(),

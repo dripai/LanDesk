@@ -1,10 +1,7 @@
 use crate::domain::connection::{ConnectionProfile, Event, StopReason};
 use anyhow::Result;
 use futures_util::future::BoxFuture;
-use std::{
-    path::PathBuf,
-    sync::{Arc, mpsc},
-};
+use std::sync::{Arc, mpsc};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 pub trait ClientGatewayFactory: Send + Sync {
@@ -17,7 +14,6 @@ pub trait ClientGateway: Send + Sync {
         self: Arc<Self>,
         profile: ConnectionProfile,
         password: Zeroizing<String>,
-        known_hosts: PathBuf,
         events: mpsc::Sender<Event>,
         cancel: oneshot::Receiver<()>,
     ) -> BoxFuture<'static, Result<StopReason>>;

@@ -22,4 +22,12 @@ for app in ['client', 'server']:
     assert not (package / 'Cargo.lock').exists(), 'workspace must have one lockfile'
     for path in (package / 'src').rglob('*.rs'):
         assert '#[path' not in path.read_text(encoding='utf-8'), f'cross-source inclusion in {path}'
+storage = root / 'crates/storage'
+assert storage.exists(), 'shared storage adapter missing'
+assert 'landesk-storage' not in manifest['dependencies'], 'core depends on storage adapter'
+for area in ['apps/client/src', 'apps/server/src', 'crates/storage/src']:
+    for path in (root / area).rglob('*.rs'):
+        text = path.read_text(encoding='utf-8')
+        assert not re.search(r'\b(?:CredReadW|CredWriteW|CredDeleteW|CryptProtectData|CryptUnprotectData)\s*\(', text), f'OS credential store in {path}'
+        assert 'security_framework::' not in text, f'keychain dependency in {path}'
 print('architecture boundaries: OK')

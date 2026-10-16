@@ -1,5 +1,5 @@
 //! Local interactive users may view the connection password. This pipe returns
-//! only its encrypted record, never the transport's host key or backend key.
+//! only the display password over a local ACL-protected pipe, never host or backend keys.
 use super::desktop::checked;
 use super::desktop::wide;
 use anyhow::Context;
@@ -88,18 +88,19 @@ fn verify_owner(pipe: &NamedPipeClient) -> Result<()> {
 #[serde(deny_unknown_fields)]
 pub struct PasswordInfo {
     pub port: u16,
-    secret: landesk_core::security::secret::Secret,
+    password: String,
 }
 impl PasswordInfo {
     pub fn password(&self) -> Result<zeroize::Zeroizing<String>> {
-        let bytes = self.secret.decrypt(
-            landesk_core::domain::identity::PASSWORD_PURPOSE,
-            &crate::platform::secrets::NativeSecretProtector,
-        )?;
-        let value =
-            zeroize::Zeroizing::new(String::from_utf8(bytes.to_vec()).context("连接密码编码无效")?);
-        landesk_core::domain::password::validate(&value)?;
+        landesk_core::domain::password::validate(&self.password)?;
+        let value = zeroize::Zeroizing::new(self.password.clone());
         Ok(value)
+    }
+}
+impl Drop for PasswordInfo {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.password.zeroize();
     }
 }
 pub struct Listener(NamedPipeServer);
@@ -112,18 +113,21 @@ impl Listener {
             self.0.connect().await.context("密码界面管道连接失败")?;
             let mut pipe = std::mem::replace(&mut self.0, create(false)?);
             let path = path.clone();
-            let data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-                let config = crate::adapters::identity::read(&path)?;
-                let _ = landesk_core::application::password::recover_password(
-                    &config,
-                    &crate::platform::secrets::NativeSecretProtector,
-                )?;
-                Ok(serde_json::to_vec(&PasswordInfo {
-                    port: config.port,
-                    secret: config.password_secret(),
-                })?)
-            })
-            .await??;
+            let data =
+                tokio::task::spawn_blocking(move || -> Result<zeroize::Zeroizing<Vec<u8>>> {
+                    let config = crate::adapters::identity::read(&path)?;
+                    let password = landesk_core::application::password::recover_password(
+                        &config,
+                        &landesk_storage::LocalSecrets::beside(&path),
+                    )?;
+                    Ok(zeroize::Zeroizing::new(serde_json::to_vec(
+                        &PasswordInfo {
+                            port: config.port,
+                            password: password.to_string(),
+                        },
+                    )?))
+                })
+                .await??;
             // A closed or stalled UI does not stop remote control.
             let _ = tokio::time::timeout(Duration::from_secs(2), pipe.write_all(&data)).await;
         }
@@ -141,7 +145,7 @@ pub async fn read() -> Result<PasswordInfo> {
             }
         };
         verify_owner(&pipe)?;
-        let mut data = Vec::new();
+        let mut data = zeroize::Zeroizing::new(Vec::new());
         pipe.take(MAX_RECORD + 1).read_to_end(&mut data).await?;
         ensure!(data.len() as u64 <= MAX_RECORD, "密码界面响应过大");
         serde_json::from_slice(&data).context("密码界面响应无效")

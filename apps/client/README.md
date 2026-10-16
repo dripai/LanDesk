@@ -7,7 +7,7 @@ Windows 10 / 11 x64 与 macOS 客户端，使用 GPUI Kit 0.7.1 管理多台服�
 1. Windows 从本仓库 Actions 的 **Windows client** 成功构建下载 `LanDeskClient-windows-x64`，解压运行 `LanDeskClient.exe`。Mac 打开 `LanDeskClient.app`。
 2. 左侧点 `+` 添加服务器。远程桌面填写名称、地址、连接端口（默认 2222）和 LanDesk 连接密码，不填写用户名；Mac 需运行 LanDeskServer 并授予屏幕录制和辅助功能权限，不需要系统远程登录。服务端首次自动生成密码，可在服务端主界面查看和修改。SSH 终端继续填写系统 SSH 用户名、端口和密码/私钥，目标必须提供 SSH、PTY 和 Shell。保存后点击“连接”，SSH 就绪后自动打开网页。
 3. 单击左侧条目查看连接信息；“编辑”后可保存或取消。编辑期间先完成或取消编辑，再切换条目。连接中禁止编辑或删除该条目；断开后可删除，删除同时移除它保存的密码。
-4. SSH 密码下方可勾选“记住密码”，保存或连接时生效。密码保存到 Windows 凭据管理器或 macOS 钥匙串，不写入 JSON。未记住密码时，每次连接需要输入；取消勾选并连接或保存会删除此条目的已存密码。
+4. SSH 密码下方可勾选“记住密码”，保存或连接时生效。两端共用程序旁 `data/client/credentials/` 的 AES-GCM 密文文件和本地密钥，不使用 Windows 凭据管理器、DPAPI 或 Mac 钥匙串。密码不写入连接列表。未记住密码时，每次连接需要输入；取消勾选并连接或保存会删除此条目的已存密码。
    私钥认证填写本机私钥的绝对路径（Windows 例如 `C:\Users\Alice\.ssh\id_ed25519`，Mac 例如 `/Users/alice/.ssh/id_ed25519`），不展开 `~`。未加密私钥的口令留空，加密私钥每次连接输入口令；口令不保存，私钥内容不复制进配置或网页。切换为私钥并保存会删除原先记住的密码。
 5. 每台服务器使用独立 SSH 会话、浏览器标签、连接状态和 30 秒无远控连接计时。切换列表不会断开连接；右侧“断开”只影响当前服务器。Windows 托盘菜单可“断开全部连接”或“退出”。
 6. 首次 SSH 就绪后未打开网页会话，或最后一个桌面/终端 WebSocket 关闭后，连续 30 秒没有网页会话会自动关闭该 SSH。终端开着但没有输入不算无会话。宽限期内刷新或重连会取消倒计时。HTTP 保活和资源请求不会延长时间。网络异常识别依赖底层 TCP/SSH 心跳。
@@ -33,7 +33,7 @@ Windows 10 / 11 x64 与 macOS 客户端，使用 GPUI Kit 0.7.1 管理多台服�
 
 统一入口使用系统分配的 `127.0.0.1:<动态端口>`，页面地址为 `/s/<完整 SHA-256>/`。客户端自动打开携带随机会话凭证的启动 URL，验证后跳转到无凭证参数的地址，使用 HttpOnly Cookie 访问资源及 WebSocket；启动 URL 不要分享。每次重连更换凭证，旧凭证失效，连接 ID 不提供授权。哈希输入为 UTF-8 JSON 二元组 `[规范化地址, SSH端口]`：IP 使用标准格式，主机名转小写并移除末尾点。用户名、名称和密码不参与计算。同一地址和 SSH 端口只能保存一条连接；主机名与其解析到的 IP 不合并，不进行隐式 DNS 去重。
 
-哈希标识连接地址，不是设备硬件身份，也不是凭据。SSH 主机密钥负责识别主机：首次自动记录，后续变化拒绝，不显示指纹确认，也不覆盖旧记录。首次使用信任无法验证第一次连接的主机身份。
+哈希标识连接地址，不是设备硬件身份，也不是凭据。客户端不记录或校验 SSH 主机密钥；密钥变化不阻止连接。SSH 加密与用户认证保留，但不能识别冒充的服务器。
 
 入口根据完整哈希路径分流，通过进程内独立通道连接对应 SSH；没有每服务器的公开本地端口。关闭路由后，已有引用无法转接到另一台机器。网页模块及 WebSocket 使用相对路径，标签标题显示服务器名称。入口验证 Host/Origin，终端与文件通道另有每次 SSH 连接随机生成的 hello token；这个 token 不放在 URL 中，SSH 重连后失效。每个 Server 限制一个远控控制会话；多个不同 Server 可同时连接。
 
@@ -43,13 +43,13 @@ Windows 10 / 11 x64 与 macOS 客户端，使用 GPUI Kit 0.7.1 管理多台服�
 
 配置位于 `%APPDATA%\LanDeskClient\settings.json`，包括服务器列表和托盘偏好。每台服务器的凭据目标为 `LanDeskClient/SSH/<哈希>`，凭据内校验地址、端口和协议身份；桌面模式的 SSH 用户名为内部固定字段，用户不需要填写。修改地址会更换标识和网页路径；保存时删除旧条目的凭据，目标密码须重新输入。SSH 终端更换系统用户名也需重新输入密码。
 
-旧的单服务器配置及其匹配密码会一次性迁入列表，成功后写入新版格式。配置和凭据修改失败会回滚；回滚失败明确报错。损坏配置、重复连接和不匹配的旧凭据不会被静默忽略。
+仅支持当前服务器列表格式，不迁移旧用户目录、系统凭据库或旧配置。配置和凭据修改失败会回滚；回滚失败明确报错。损坏配置、重复连接和不匹配的旧凭据不会被静默忽略。
 
-SSH 主机信任文件仍为同目录 `known_hosts`，同进程并发更新加锁并原子写入。删除连接保留主机信任记录，以便以后重新添加时仍能检查密钥变化。支持密码认证和 russh 可解析的私钥文件认证，不支持 SSH Agent、跳板机、keyboard-interactive 或主机证书。认证失败直接报错，不自动切换认证方式。
+不再读取或写入 `known_hosts`；磁盘上的旧记录不影响连接。支持密码认证和 russh 可解析的私钥文件认证，不支持 SSH Agent、跳板机、keyboard-interactive 或主机证书。认证失败直接报错，不自动切换认证方式。
 
 网页入口与服务端完全独立，可在同机共存。入口失败不禁用配置编辑，界面提供重试；其他目标认证失败不影响已有连接。不支持旧固定端口转发脚本。
 
-连接任务由 `src/connections.rs` 的 `ConnectionManager` 管理，UI 负责表单和展示。连接状态明确区分连接中、已连接、断开中和已停止；断开后的迟到就绪事件不会重新打开网页，旧连接事件不能覆盖新连接。退出时先取消所有连接，等待任务停止后关闭网页入口。
+连接任务由 `crates/core/src/application/connections.rs` 的 `ConnectionManager` 管理，UI 负责表单和展示。连接状态明确区分连接中、已连接、断开中和已停止；断开后的迟到就绪事件不会重新打开网页，旧连接事件不能覆盖新连接。退出时先取消所有连接，等待任务停止后关闭网页入口。
 
 ## 构建与验证
 
@@ -61,7 +61,7 @@ python3 scripts/bundle_macos_client.py --debug  # 本机开发验证
 open apps/client/target/bundle/macos/LanDeskClient.app
 ```
 
-脚本生成当前 Mac 架构的 `.app`，采用本地临时签名，未做 Apple Developer ID 签名或公证。配置位于 `~/Library/Application Support/LanDeskClient/`，密码使用系统钥匙串。网页入口动态分配，仅绑定回环地址，可以和本机 LanDesk 服务端同时运行。
+脚本生成当前 Mac 架构的 `.app`，采用本地临时签名，未做 Apple Developer ID 签名或公证。配置位于 `.app` 包外旁边的 `data/client/`（Windows 为 `.exe` 旁边），不依赖启动工作目录。`credentials/` 保存 AES-GCM 密文，`credentials/keys/` 保存随机密钥；同时取得两者即可解密。Mac 目录 0700、文件 0600；Windows 继承程序目录 ACL。目录不可写直接报错，不换到用户目录。网页入口动态分配，仅绑定回环地址，可以和本机 LanDesk 服务端同时运行。
 
 Windows 构建使用 Rust stable MSVC、Visual Studio C++ 工具链、Windows SDK 和 CMake：
 
@@ -80,7 +80,7 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release
 开发时可在 Mac/Linux 运行相同核心的诊断入口：
 
 ```sh
-cargo run --manifest-path apps/client/Cargo.toml --locked --no-default-features --example terminal_gateway -- example.com alice 22 /absolute/path/id_ed25519 /absolute/path/known_hosts
+cargo run --manifest-path apps/client/Cargo.toml --locked --no-default-features --example terminal_gateway -- example.com alice 22 /absolute/path/id_ed25519
 ```
 
 入口与正式客户端一致，监听动态 IPv4 回环地址，打印带会话凭证的启动 URL，勿分享或收集到日志。按回车退出，30 秒无网页会话也会退出。加密私钥的口令通过 `LANDESK_SSH_SECRET` 环境变量提供；私钥路径用 `-` 时改用该变量中的 SSH 密码。不要把真实凭据写入源码或命令历史。
@@ -89,6 +89,6 @@ cargo run --manifest-path apps/client/Cargo.toml --locked --no-default-features 
 
 文件功能依据：[russh-sftp 3.0.0](https://docs.rs/russh-sftp/3.0.0/russh_sftp/client/struct.RawSftpSession.html)、[SFTP v3 文件创建和重命名语义](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02#section-6.5)。布局核对了内嵌 addon-fit 0.11.0 的 `proposeDimensions`：测量容器不能带额外内边距，否则终端行数可能超过实际可用高度。
 
-Mac 凭据依据：[security-framework 3.7.0](https://docs.rs/security-framework/3.7.0/security_framework/passwords/index.html)。窗口关闭与恢复使用锁定 GPUI 的 `on_reopen` 及 AppKit `NSWindow`，不使用 Windows 托盘机制。
+Mac 凭据使用 [Rust Unix 文件权限](https://doc.rust-lang.org/std/os/unix/fs/trait.PermissionsExt.html)和原子文件替换。窗口关闭与恢复使用锁定 GPUI 的 `on_reopen` 及 AppKit `NSWindow`，不使用 Windows 托盘机制。
 
 本轮验证及待验收项统一记录在 [架构设计](../../docs/architecture.md#版本依据与验证记录)。

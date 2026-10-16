@@ -18,6 +18,7 @@ use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::Services::*;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::UI::Controls::BST_CHECKED;
+use windows_sys::Win32::UI::Controls::EM_SETLIMITTEXT;
 use windows_sys::Win32::UI::Controls::EM_SETSEL;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
@@ -283,6 +284,45 @@ fn show_password(window: &Window, port: u16, password: zeroize::Zeroizing<String
         "显示连接密码",
     )
 }
+fn save_password(hwnd: HWND, window: &Window) -> Result<()> {
+    use std::io::Write;
+    let len = unsafe { GetWindowTextLengthW(window.password) };
+    ensure!(
+        (1..=1024).contains(&len),
+        "连接密码不能为空，且不能超过 1024 字节"
+    );
+    let mut buffer = zeroize::Zeroizing::new(vec![0u16; len as usize + 1]);
+    let read = unsafe { GetWindowTextW(window.password, buffer.as_mut_ptr(), buffer.len() as i32) };
+    let password = zeroize::Zeroizing::new(String::from_utf16(&buffer[..read as usize])?);
+    landesk_core::domain::password::validate(&password)?;
+    window.password_read.borrow_mut().invalidate();
+    // The request and its key live only for the elevated helper's lifetime.
+    let request_directory = tempfile::tempdir()?;
+    let request_path = request_directory.path().join("request.json");
+    let secret = landesk_core::security::secret::Secret::encrypt(
+        password.as_bytes(),
+        "LanDesk.PasswordChange",
+        &landesk_storage::LocalSecrets::beside(&request_path),
+    )?;
+    let mut request = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&request_path)?;
+    request.write_all(&serde_json::to_vec(&secret)?)?;
+    request.sync_all()?;
+    drop(request);
+    let path = request_path.to_str().context("密码保存请求路径编码无效")?;
+    ensure!(!path.contains('"'), "密码保存请求路径无效");
+    unsafe {
+        SetWindowTextW(window.status, wide("正在保存连接密码…").as_ptr());
+    }
+    elevated(
+        hwnd,
+        &std::env::current_exe()?,
+        &format!("--change-password \"{path}\""),
+        true,
+    )
+}
 fn refresh_runtime(window: &Window) -> Result<()> {
     invalidate_password(window);
     unsafe {
@@ -421,7 +461,7 @@ pub(super) fn elevated(
     )?;
     if exit != 0 {
         let status = super::setup_services::failure_summary();
-        anyhow::bail!("操作失败（进程退出码 {exit}）。具体原因见辅助进程提示。\r\n{status}");
+        anyhow::bail!("操作失败（进程退出码 {exit}）。具体原因见日志。\r\n{status}");
     }
     Ok(())
 }
@@ -574,25 +614,36 @@ unsafe extern "system" fn procedure(
                             error_box(hwnd, format!("{error:#}"));
                         }
                     }
-                    PASSWORD | RANDOM_PASSWORD => {
-                        invalidate_password(window);
-                        let command = if wparam & 0xffff == PASSWORD {
-                            "--change-password"
-                        } else {
-                            "--regenerate-password"
-                        };
-                        let result = std::env::current_exe()
-                            .map_err(anyhow::Error::from)
-                            .and_then(|path| elevated(hwnd, &path, command, true))
-                            .or_else(|error| {
-                                if error.is::<HelperCancelled>() {
-                                    Ok(())
-                                } else {
-                                    Err(error)
-                                }
+                    RANDOM_PASSWORD => {
+                        let result =
+                            landesk_core::domain::password::generate().and_then(|password| {
+                                let text = zeroize::Zeroizing::new(wide(&password));
+                                checked(
+                                    unsafe { SetWindowTextW(window.password, text.as_ptr()) },
+                                    "生成连接密码",
+                                )
                             });
-                        let refreshed = refresh_password(window);
-                        display_result(window, result.and(refreshed));
+                        match result {
+                            Ok(()) => unsafe {
+                                SetWindowTextW(window.status, wide("点击保存密码后生效").as_ptr());
+                            },
+                            Err(error) => display_result(window, Err(error)),
+                        }
+                    }
+                    PASSWORD => {
+                        let result = save_password(hwnd, window);
+                        if result.is_ok() {
+                            let _ = refresh_password(window);
+                        }
+                        match result {
+                            Ok(()) => unsafe {
+                                SetWindowTextW(window.status, wide("连接密码已保存").as_ptr());
+                            },
+                            Err(error) if error.is::<HelperCancelled>() => unsafe {
+                                SetWindowTextW(window.status, wide("已取消保存").as_ptr());
+                            },
+                            Err(error) => display_result(window, Err(error)),
+                        }
                     }
                     COPY_PASSWORD => unsafe {
                         SendMessageW(window.password, EM_SETSEL, 0, -1);
@@ -759,15 +810,18 @@ fn run_window(force_show: bool) -> Result<()> {
     let password = child(
         "EDIT",
         "",
-        WS_BORDER | ES_READONLY as u32 | ES_AUTOHSCROLL as u32 | WS_TABSTOP,
+        WS_BORDER | ES_AUTOHSCROLL as u32 | WS_TABSTOP,
         60,
         370,
         0,
     )?;
+    unsafe {
+        SendMessageW(password, EM_SETLIMITTEXT, 1024, 0);
+    }
     for (title, id, x, width) in [
         ("复制密码", COPY_PASSWORD, 24, 100),
-        ("随机更换", RANDOM_PASSWORD, 134, 110),
-        ("修改密码", PASSWORD, 254, 140),
+        ("随机生成", RANDOM_PASSWORD, 134, 110),
+        ("保存密码", PASSWORD, 254, 140),
     ] {
         let button = child(
             "BUTTON",
@@ -801,10 +855,10 @@ fn run_window(force_show: bool) -> Result<()> {
     child("STATIC", "退出托盘不停止后台服务。", 0, 241, 390, 0)?;
     child(
         "BUTTON",
-        "保存",
+        "保存启动设置",
         BS_PUSHBUTTON as u32 | WS_TABSTOP,
         281,
-        90,
+        140,
         APPLY,
     )?;
     child(
