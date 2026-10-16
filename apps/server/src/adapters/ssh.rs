@@ -41,9 +41,27 @@ pub type Backend = Arc<
     dyn Fn() -> futures_util::future::BoxFuture<'static, Result<Box<dyn StreamIo>>> + Send + Sync,
 >;
 
+/// Configuration activation is chosen by the host, never inferred from the OS.
+#[derive(Clone)]
+pub enum PasswordPolicy {
+    OnRestart,
+    LiveFile(PathBuf),
+}
+impl PasswordPolicy {
+    fn authenticate(&self, running: &ServerIdentity, password: &str) -> Result<bool> {
+        match self {
+            Self::OnRestart => running.verify_password(password),
+            Self::LiveFile(path) => landesk_core::application::password::authenticate(
+                &identity::IdentityFile(path.clone()),
+                running,
+                password,
+            ),
+        }
+    }
+}
 struct Transport {
     config: Arc<ServerIdentity>,
-    config_path: PathBuf,
+    password_policy: PasswordPolicy,
     backend: Backend,
     hashing: Arc<Semaphore>,
 }
@@ -52,7 +70,7 @@ impl server::Server for Transport {
     fn new_client(&mut self, _: Option<SocketAddr>) -> Client {
         Client {
             config: self.config.clone(),
-            config_path: self.config_path.clone(),
+            password_policy: self.password_policy.clone(),
             backend: self.backend.clone(),
             hashing: self.hashing.clone(),
             channels: JoinSet::new(),
@@ -66,7 +84,7 @@ impl server::Server for Transport {
 }
 struct Client {
     config: Arc<ServerIdentity>,
-    config_path: PathBuf,
+    password_policy: PasswordPolicy,
     backend: Backend,
     hashing: Arc<Semaphore>,
     channels: JoinSet<()>,
@@ -86,15 +104,11 @@ impl server::Handler for Client {
         }
         let permit = self.hashing.clone().acquire_owned().await?;
         let config = self.config.clone();
-        let path = self.config_path.clone();
+        let policy = self.password_policy.clone();
         let password = Zeroizing::new(password.to_owned());
         let accepted = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            landesk_core::application::password::authenticate(
-                &identity::IdentityFile(path),
-                &config,
-                &password,
-            )
+            policy.authenticate(&config, &password)
         })
         .await??;
         crate::diagnostics::log(if accepted {
@@ -179,7 +193,7 @@ impl server::Handler for Client {
 pub async fn run(
     listener: TcpListener,
     config: ServerIdentity,
-    config_path: PathBuf,
+    password_policy: PasswordPolicy,
     backend: Backend,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
@@ -193,7 +207,7 @@ pub async fn run(
     });
     let mut transport = Transport {
         config: Arc::new(config),
-        config_path,
+        password_policy,
         backend,
         hashing: Arc::new(Semaphore::new(4)),
     };
@@ -399,6 +413,13 @@ mod tests {
     }
     #[tokio::test]
     async fn password_tunnel_serves_http_and_websocket_without_exposing_internal_key() {
+        exercise_password_tunnel(false).await;
+    }
+    #[tokio::test]
+    async fn staged_settings_preserve_remote_session_and_activate_only_on_restart() {
+        exercise_password_tunnel(true).await;
+    }
+    async fn exercise_password_tunnel(deferred: bool) {
         let config = identity::create(
             "测试-access-password",
             DEFAULT_PORT,
@@ -452,7 +473,11 @@ mod tests {
         let server = tokio::spawn(run(
             listener,
             config,
-            config_path.clone(),
+            if deferred {
+                PasswordPolicy::OnRestart
+            } else {
+                PasswordPolicy::LiveFile(config_path.clone())
+            },
             Arc::new(move || {
                 Box::pin(async move {
                     Ok(
@@ -548,19 +573,59 @@ mod tests {
         );
         let channel = open_desktop(&second).await;
         assert!(http(channel, "/").await.contains("desktop page"));
-        identity::change_password(&config_path, "new-pass", secret("new-pass")).unwrap();
-        let mut old = connect(addr, public_key).await;
-        assert!(
-            !old.authenticate_password(USER, "测试-access-password")
+        // Keep an actual desktop WebSocket open while both settings are committed.
+        let channel = open_desktop(&second).await;
+        let (mut live_ws, _) =
+            tokio_tungstenite::client_async("ws://landesk.internal/ws", channel.into_stream())
                 .await
-                .unwrap()
-                .success()
-        );
-        assert!(
-            old.authenticate_password(USER, "new-pass")
-                .await
-                .unwrap()
-                .success()
+                .unwrap();
+        let next_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let next_addr = next_listener.local_addr().unwrap();
+        use landesk_core::ports::IdentityRepository;
+        let repo = identity::IdentityFile(config_path.clone());
+        let mut saved = repo.read().unwrap();
+        saved
+            .replace_credential("new-pass", secret("new-pass"))
+            .unwrap();
+        if deferred {
+            saved.port = next_addr.port();
+        }
+        repo.commit(&saved).unwrap();
+        let mut old = connect(addr, public_key.clone()).await;
+        if deferred {
+            assert!(
+                !old.authenticate_password(USER, "new-pass")
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                old.authenticate_password(USER, "测试-access-password")
+                    .await
+                    .unwrap()
+                    .success()
+            );
+        } else {
+            assert!(
+                !old.authenticate_password(USER, "测试-access-password")
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                old.authenticate_password(USER, "new-pass")
+                    .await
+                    .unwrap()
+                    .success()
+            );
+        }
+        live_ws
+            .send(Message::Text("still connected after save".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            live_ws.next().await.unwrap().unwrap(),
+            Message::Text("still connected after save".into())
         );
         let channel = open_desktop(&second).await;
         assert!(http(channel, "/").await.contains("desktop page"));
@@ -570,6 +635,58 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+        let closed = timeout(Duration::from_secs(5), live_ws.next())
+            .await
+            .unwrap();
+        assert!(closed.is_none() || matches!(closed, Some(Err(_)) | Some(Ok(Message::Close(_)))));
+        if deferred {
+            assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+            let config = identity::read(&config_path).unwrap();
+            assert_eq!(config.port, next_addr.port());
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let restarted = tokio::spawn(run(
+                next_listener,
+                config,
+                PasswordPolicy::OnRestart,
+                Arc::new(move || {
+                    Box::pin(async move {
+                        Ok(
+                            Box::new(tokio::net::TcpStream::connect(backend_addr).await?)
+                                as Box<dyn StreamIo>,
+                        )
+                    })
+                }),
+                async {
+                    let _ = stopped.await;
+                },
+            ));
+            let mut new_peer = connect(next_addr, public_key).await;
+            assert!(
+                !new_peer
+                    .authenticate_password(USER, "测试-access-password")
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                new_peer
+                    .authenticate_password(USER, "new-pass")
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                http(open_desktop(&new_peer).await, "/")
+                    .await
+                    .contains("desktop page")
+            );
+            stop.send(()).unwrap();
+            timeout(Duration::from_secs(5), restarted)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
         backend_task.abort();
     }
 

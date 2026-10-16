@@ -4,7 +4,7 @@ use anyhow::ensure;
 use std::path::PathBuf;
 
 pub fn path() -> Result<PathBuf> {
-    Ok(landesk_storage::application_data("server")?.join("transport/config.json"))
+    Ok(landesk_storage::application_data("server")?.join("config/config.json"))
 }
 
 pub fn prepare() -> Result<landesk_core::domain::identity::ServerIdentity> {

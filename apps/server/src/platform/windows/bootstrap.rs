@@ -1,10 +1,9 @@
 //! The downloadable EXE contains its installer and the original signed driver.
 use super::desktop::wide;
-use super::ui;
+use super::privilege as ui;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
-use std::path::Path;
 use std::path::PathBuf;
 use std::ptr::null;
 use std::ptr::null_mut;
@@ -15,10 +14,12 @@ pub fn machine_logs() -> Result<PathBuf> {
     Ok(landesk_storage::application_data("server")?.join("logs"))
 }
 pub fn user_logs() -> Result<PathBuf> {
-    machine_logs()
-}
-pub fn diagnostic_exports() -> Result<PathBuf> {
-    Ok(landesk_storage::application_data("server")?.join("diagnostics"))
+    match installed_executable()? {
+        Some(executable) => {
+            Ok(landesk_storage::data_directory(&executable, "server")?.join("logs"))
+        }
+        None => machine_logs(), // Bootstrap logs belong to the not-yet-installed executable.
+    }
 }
 pub fn log_locations() -> String {
     format!(
@@ -39,7 +40,12 @@ pub fn initialize_logging(args: &[String]) -> Result<()> {
         "--worker" => "worker.log",
         _ => "ui.log",
     };
-    let directory = if filename == "ui.log" {
+    let directory = if matches!(
+        mode,
+        "--manage" | "--managed-uninstall" | "--run-uninstall" | "--prepare-uninstall"
+    ) {
+        super::setup::Paths::new()?.data.join("logs")
+    } else if filename == "ui.log" {
         let directory = user_logs()?;
         std::fs::create_dir_all(&directory)?;
         directory
@@ -149,22 +155,4 @@ pub fn install_if_needed() -> Result<bool> {
         "安装进程结束，但后台服务尚未注册"
     );
     Ok(true)
-}
-pub fn open_folder(path: &Path) -> Result<()> {
-    let result = unsafe {
-        windows_sys::Win32::UI::Shell::ShellExecuteW(
-            null_mut(),
-            wide("open").as_ptr(),
-            wide(&path.to_string_lossy()).as_ptr(),
-            null(),
-            null(),
-            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-        )
-    };
-    ensure!(
-        result as isize > 32,
-        "无法打开日志文件夹 ({})",
-        result as isize
-    );
-    Ok(())
 }

@@ -1,9 +1,9 @@
 use super::native::{self, Command, Native};
 use crate::bootstrap::macos::TransportUpdate;
+use crate::settings_view::{connection_row, input, status_bar};
 use anyhow::{Context as _, Result, ensure};
 use gpui_kit::component::button::*;
-use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::*;
 use gpui_kit::*;
 use landesk_core::application::{operation::Operation, password::PasswordOutcome};
@@ -29,13 +29,6 @@ struct Panel {
     active: bool,
     quitting: bool,
     _timer: super::run_loop::RunLoopTimer,
-}
-fn input(value: String, window: &mut Window, cx: &mut App) -> Entity<InputState> {
-    cx.new(|cx| {
-        let mut state = InputState::new(window, cx);
-        state.set_value(value, window, cx);
-        state
-    })
 }
 impl Panel {
     fn new(
@@ -188,7 +181,6 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let disabled = self.saving.is_busy() || self.quitting;
-        let status = self.status.clone();
         div()
             .v_flex()
             .size_full()
@@ -200,33 +192,13 @@ impl Render for Panel {
                     .p_5()
                     .gap_4()
                     .flex_1()
-                    .child(
-                        div()
-                            .h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().text_sm().child("端口"))
-                            .child(Input::new(&self.port).w(px(90.)).disabled(disabled))
-                            .child(div().text_sm().ml_2().child("密码"))
-                            .child(Input::new(&self.password).flex_1().disabled(disabled))
-                            .child(
-                                Button::new("refresh-password")
-                                    .ghost()
-                                    .icon(gpui_kit::assets::IconName::RefreshCw)
-                                    .tooltip("生成并保存新密码")
-                                    .disabled(disabled)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.refresh_password(cx)),
-                                    ),
-                            )
-                            .child(
-                                Button::new("save")
-                                    .primary()
-                                    .label("保存")
-                                    .disabled(disabled)
-                                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                            ),
-                    )
+                    .child(connection_row(
+                        &self.port,
+                        &self.password,
+                        disabled,
+                        cx.listener(|this, _, _, cx| this.save(cx)),
+                        cx.listener(|this, _, _, cx| this.refresh_password(cx)),
+                    ))
                     .child(
                         div()
                             .h_flex()
@@ -267,19 +239,7 @@ impl Render for Panel {
                             })),
                     ),
             )
-            .child(
-                div()
-                    .id("status")
-                    .h(px(36.))
-                    .flex_shrink_0()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .px_4()
-                    .py_2()
-                    .text_sm()
-                    .tooltip(move |window, cx| Tooltip::new(status.clone()).build(window, cx))
-                    .child(div().text_ellipsis().child(self.status.clone())),
-            )
+            .child(status_bar(&self.status, cx))
     }
 }
 

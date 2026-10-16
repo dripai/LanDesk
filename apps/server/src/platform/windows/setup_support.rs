@@ -2,7 +2,7 @@
 use super::desktop::Handle;
 use super::desktop::checked;
 use super::desktop::wide;
-use super::ui;
+use super::privilege as ui;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
@@ -35,7 +35,6 @@ pub(super) const TRANSPORT_ACL: &str =
     "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)";
 pub(super) const LOGS: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
 pub(super) const RUN: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-pub(super) const OPTIONS: &str = r"SOFTWARE\LanDesk\Server";
 pub(super) const UNINSTALL: &str =
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LanDeskServer";
 pub(super) const POLICY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
@@ -163,6 +162,103 @@ impl Drop for RestorePrivilege {
         }
     }
 }
+/// Freeze the creator's SID into inheritable grants before an elevated helper writes replies.
+pub(super) fn restrict_request_directory(path: &Path) -> Result<()> {
+    let security = Security::read(path)?;
+    let mut owner = null_mut();
+    let mut defaulted = 0;
+    checked(
+        unsafe { GetSecurityDescriptorOwner(security.0.as_ptr() as _, &mut owner, &mut defaulted) },
+        "读取请求目录所有者",
+    )?;
+    let sid = sid_string(owner)?;
+    let dacl = descriptor(&format!(
+        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
+    ))?;
+    checked(
+        unsafe {
+            SetFileSecurityW(
+                wide(&path.to_string_lossy()).as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                dacl.0,
+            )
+        },
+        "保护管理请求目录",
+    )
+}
+/// The requesting user may observe helper exit, including UAC with a different admin account.
+/// SYNCHRONIZE grants no termination, handle duplication or process-memory access.
+pub(super) fn allow_requester_to_wait(process: HANDLE, directory: &Path) -> Result<()> {
+    let security = Security::read(directory)?;
+    let mut owner = null_mut();
+    let mut defaulted = 0;
+    checked(
+        unsafe { GetSecurityDescriptorOwner(security.0.as_ptr() as _, &mut owner, &mut defaulted) },
+        "读取管理请求所有者",
+    )?;
+    let mut acl = null_mut();
+    let mut descriptor = null_mut();
+    let code = unsafe {
+        GetSecurityInfo(
+            process,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut acl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    ensure!(code == ERROR_SUCCESS, "无法读取卸载进程权限（{code}）");
+    let _descriptor = Descriptor(descriptor);
+    ensure!(!acl.is_null(), "卸载进程缺少访问控制");
+    let entry = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: SYNCHRONIZATION_SYNCHRONIZE,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: owner.cast(),
+            ..Default::default()
+        },
+    };
+    let mut merged = null_mut();
+    let code = unsafe { SetEntriesInAclW(1, &entry, acl, &mut merged) };
+    ensure!(code == ERROR_SUCCESS, "无法设置卸载进程等待权限（{code}）");
+    let _merged = Descriptor(merged.cast());
+    let code = unsafe {
+        SetSecurityInfo(
+            process,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            merged,
+            null_mut(),
+        )
+    };
+    ensure!(code == ERROR_SUCCESS, "无法应用卸载进程等待权限（{code}）");
+    Ok(())
+}
+/// Users may create a request child, never modify another user's child or the root ACL.
+pub(super) fn ensure_request_directory(path: &Path) -> Result<()> {
+    if path.exists() {
+        Security::read(path)?.trusted_acl(&[], true)?;
+        ensure!(
+            std::fs::read_to_string(path.join("landesk-owner.txt"))? == OWNER,
+            "请求目录归属无效"
+        );
+    } else {
+        create_directory(
+            path,
+            "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;BU)(A;OICIIO;FA;;;CO)",
+        )?;
+        std::fs::write(path.join("landesk-owner.txt"), OWNER)?;
+    }
+    Ok(())
+}
 impl Security {
     pub(super) fn read(path: &Path) -> Result<Self> {
         plain_chain(path)?;
@@ -226,6 +322,9 @@ impl Security {
         )
     }
     fn trusted(&self, readers: &[&str]) -> Result<()> {
+        self.trusted_acl(readers, false)
+    }
+    fn trusted_acl(&self, readers: &[&str], requests: bool) -> Result<()> {
         let pointer = self.0.as_ptr() as _;
         let mut owner = null_mut();
         let mut defaulted = 0;
@@ -262,6 +361,13 @@ impl Security {
             ensure!(kind == 0, "目录包含不支持的授权 ACL 条目");
             let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
             let sid = sid_string((&allowed.SidStart as *const u32) as _)?;
+            if requests
+                && ((sid == "S-1-5-32-545" && allowed.Mask & !0x1200af == 0)
+                    || (sid == "S-1-3-0"
+                        && u32::from(allowed.Header.AceFlags) & INHERIT_ONLY_ACE != 0))
+            {
+                continue;
+            }
             if sid != "S-1-5-18" && sid != "S-1-5-32-544" {
                 ensure!(
                     readers.contains(&sid.as_str()) && allowed.Mask & !0x1200a9 == 0,

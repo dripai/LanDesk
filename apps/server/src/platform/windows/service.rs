@@ -467,7 +467,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
             "--service"
         };
         super::bootstrap::initialize_logging(&[mode.into()])
-            .context("服务日志初始化失败，请在设置中修复日志并启动")?;
+            .context("服务日志初始化失败，请检查程序目录日志权限")?;
         if TRANSPORT.load(Ordering::Relaxed) {
             serve_transport()
         } else {
@@ -491,7 +491,7 @@ unsafe extern "system" fn service_main(_: u32, _: *mut *mut u16) {
     }
 }
 fn transport_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join("transport").join("config.json"))
+    Ok(data_dir()?.join("config").join("config.json"))
 }
 fn read_transport() -> Result<landesk_core::domain::identity::ServerIdentity> {
     crate::adapters::identity::read(&transport_path()?)
@@ -512,10 +512,12 @@ fn serve_transport() -> Result<()> {
         let password_pipe = super::password_pipe::Listener::new()?;
         log(&format!("SSH ready on port {}", config.port));
         report(SERVICE_RUNNING, 0);
+        let running = serde_json::to_vec(&config)?;
+        let active_port = config.port;
         let transport = crate::adapters::ssh::run(
             listener,
             config,
-            transport_path()?,
+            crate::adapters::ssh::PasswordPolicy::OnRestart,
             Arc::new(|| {
                 Box::pin(async {
                     Ok(Box::new(super::pipe::connect().await?)
@@ -530,7 +532,7 @@ fn serve_transport() -> Result<()> {
         );
         tokio::select! {
             result = transport => result,
-            result = password_pipe.serve(transport_path()?) => result,
+            result = password_pipe.serve(transport_path()?, running, active_port) => result,
         }
     });
     runtime.shutdown_timeout(Duration::from_secs(3));
@@ -605,13 +607,12 @@ pub fn run() -> Result<()> {
                         | "--run-uninstall"
                         | "--export-logs"
                         | "--start-background"
-                        | "--repair-runtime"
-                        | "--change-password"
-                        | "--set-startup"
+                        | "--manage"
+                        | "--managed-uninstall"
                 )
             })
         {
-            super::ui::error_box(null_mut(), format!("无法创建日志：{error:#}"));
+            super::privilege::error_box(null_mut(), format!("无法创建日志：{error:#}"));
         }
         return Err(error);
     }
@@ -655,8 +656,20 @@ pub fn run() -> Result<()> {
                 );
                 Ok(())
             }
-            [mode] if mode == "--start-background" => super::ui::start_background(),
-            [mode] if mode == "--repair-runtime" => super::setup::repair_runtime(),
+            [mode] if mode == "--start-background" => {
+                super::management::start(&super::setup::Paths::new()?)
+            }
+            [mode, directory] if mode == "--manage" => {
+                super::management::run(std::path::Path::new(directory))
+            }
+            [mode, directory, owner, display, parent] if mode == "--managed-uninstall" => {
+                super::setup::managed_uninstall(
+                    std::path::Path::new(directory),
+                    owner.parse()?,
+                    display == "1",
+                    parent.parse()?,
+                )
+            }
             [mode, launcher] if mode == "--install-integrated" => {
                 super::bootstrap::install(launcher.parse().context("安装启动进程参数无效")?)
             }
@@ -674,20 +687,9 @@ pub fn run() -> Result<()> {
                 Ok(())
             }
             [mode] if mode == "--export-logs" => super::bootstrap::export(),
-            [mode, request] if mode == "--change-password" => {
-                super::setup::change_password(std::path::Path::new(request))
-            }
             [] => super::ui::run(false),
-            [mode] if mode == "--settings" => super::ui::run(true),
-            [mode] if mode == "--startup-ui" => super::ui::run(false),
-            [mode, automatic, minimized] if mode == "--set-startup" => {
-                ensure!(
-                    matches!(automatic.as_str(), "0" | "1")
-                        && matches!(minimized.as_str(), "0" | "1"),
-                    "启动参数无效"
-                );
-                super::ui::set_startup(automatic == "1", minimized == "1")
-            }
+            [mode] if mode == "--settings" => super::ui::run(false),
+            [mode] if mode == "--startup-ui" => super::ui::run(true),
             _ => {
                 bail!("参数无效；双击 LanDeskServer.exe 安装或打开设置")
             }
@@ -695,13 +697,11 @@ pub fn run() -> Result<()> {
     })();
     if let Err(error) = &result {
         log(&format!("LanDeskServer failed: {error:#}"));
-        if args.first().is_some_and(|mode| {
-            matches!(
-                mode.as_str(),
-                "--start-background" | "--repair-runtime" | "--set-startup"
-            )
-        }) {
-            super::ui::error_box(null_mut(), format!("{error:#}"));
+        if args
+            .first()
+            .is_some_and(|mode| matches!(mode.as_str(), "--start-background"))
+        {
+            super::privilege::error_box(null_mut(), format!("{error:#}"));
         }
     }
     result

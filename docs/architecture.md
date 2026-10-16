@@ -194,7 +194,7 @@ sequenceDiagram
 
 | 状态或事件 | 统一处理 |
 |---|---|
-| 编辑、随机生成草稿 | 只修改草稿；允许取消；不占维护锁 |
+| 手工编辑 | 只修改草稿；不占维护锁；刷新按钮生成并保存新密码 |
 | 输入校验失败 | 留在编辑状态并说明错误，不启动保存 |
 | 保存中 | 禁止重复提交；继续处理窗口消息；退出等待当前提交完成 |
 | 放弃草稿或拒绝本次密码操作的 UAC | 结束操作，不显示未知故障、不写配置 |
@@ -205,7 +205,15 @@ sequenceDiagram
 
 不能强行取消已经进入文件提交的系统调用，也不能在超时后宣称“保存已取消”。工作任务必须有所有者；不使用无人等待的后台线程悄悄修改密码。结果区分阶段和是否已提交；错误展示及诊断不得包含密码、密钥或输入内容。
 
-Mac 密码保存已移到 `Operation` 工作线程，主线程定时收取结果，保存中禁用重复操作，关闭窗口后继续泵消息直到保存结束。完成错误在窗口内显示，不从输入处理定时器进入嵌套模态循环。两端均在主窗口直接编辑密码，点击保存后生效；Windows 的随机生成仅修改草稿。Mac 使用 GPUI Kit 0.7.1 的 Input 与 Button，端口、密码和保存按钮同排；密码右侧刷新图标生成新密码并立即保存，确认成功后更新输入框；手工输入需点击保存，刷新不提交未保存的端口草稿。授权按钮右侧用勾表示已授权，操作结果、授权变化和连接状态统一显示在底部状态栏。端口变化时先预占新监听端口，再将端口与密码一起原子提交，停止旧监听并启动新监听；已有会话会断开。端口占用不写配置，提交后监听切换失败明确报告已保存但需要重新启动。Windows 将 AES-GCM 加密的请求写入临时目录，临时密钥和请求在辅助进程完成后一起清理，仅把路径传给提权辅助进程；辅助进程持有维护锁执行同一个用例，不再显示密码或进度弹窗，主窗口持续处理消息；主设置窗口通过 `Refresh` 异步读取管道密码，旧读回结果不能覆盖新状态。
+两端共用 GPUI Kit 0.7.1 的 `settings_view`：端口与密码行内输入，密码右侧为刷新图标和保存按钮，底部固定一行状态栏。刷新生成并保存新密码，成功后才更新输入框；手工输入需点击保存；刷新不会提交未保存的端口草稿。保存、服务维护在 `Operation` 工作线程执行，操作中禁用重复提交，旧 `Refresh` 读取不能覆盖新状态。
+
+Windows 使用**保存后重启生效**语义。保存只原子提交端口、密码散列和密文；运行中的 SSH 使用启动配置快照，现有远程连接、新连接的旧密码及当前监听端口均不改变。状态栏显示“已保存，下次重启后生效”。防火墙仍限定程序路径与 TCP 端口：保存时允许当前运行端口与待生效端口，提交前失败恢复旧规则；未知提交结果明确报错。这样 Windows 重启也能启用新端口；界面主动重启时规则收敛至已保存端口。
+
+窗口只列出通信服务、桌面服务及 SCM 状态，不提供逐服务控制。底部“重启”依次停止桌面、停止通信，再启动通信、桌面；当前远程连接断开，之后使用新端口和密码连接。尚未保存的输入不参与重启。启动失败仍可从辅助进程返回的加密设置快照编辑端口和密码，避免因服务未启动而无法修正配置。运行中可从 LocalService 所有的本机管道读取已保存设置及是否待生效；新建管理进程仅启动缺少的服务，托盘打开窗口不重启后台。
+
+Mac 保持现有运行方式：密码保存后用于新连接；修改端口时预占新端口，提交后切换监听并断开已有会话。Mac 授权按钮右侧用勾表示授权，事件覆盖显示在共享状态栏。Windows 的服务管理不映射为 Mac 的两个系统服务。
+
+Windows 管理请求及临时密钥位于 `data/server/runtime/ui/request-*/`，不再写系统临时目录。主进程只向管理员辅助进程传路径；加密保存请求不出现在命令行或日志中。每项操作返回结构化结果与覆盖式进度，无密码输入和完成弹窗。维护任务串行执行，系统 UAC 仍可能出现。卸载助手只向请求目录所有者追加 `SYNCHRONIZE` 权限，供普通界面观察退出，不授予结束进程、复制句柄或读写内存权限；使用另一管理员账号授权时也不依赖默认进程 ACL。依据：[Windows 进程访问权限](https://learn.microsoft.com/en-us/windows/win32/procthread/process-security-and-access-rights)、[SetEntriesInAclW](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setentriesinaclw)。
 
 仓储使用独立的 `config.lock` 文件取得非阻塞操作锁，不锁即将被替换的配置文件，进程结束后由操作系统释放锁。Windows 原子替换失败后核验旧配置字节，无法核验时返回 `Unknown`；替换成功但备份清理失败返回 `CommittedWithWarning`。Unix 替换后同步父目录，失败时明确报告已替换但持久化存在问题。依据：[Rust File::try_lock（1.89 起可用）](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock)、[Windows ReplaceFileW 失败语义](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)。项目最低 Rust 版本为 1.92。
 
@@ -216,10 +224,14 @@ Mac 密码保存已移到 `Operation` 工作线程，主线程定时收取结果
 ```text
 程序目录/                          # Windows .exe 旁 / Mac .app 包外
   data/
-    server/transport/config.json
-    server/transport/keys/         # 每个用途独立随机密钥
+    server/config/config.json
+    server/config/keys/         # 每个用途独立随机密钥
     server/logs/                   # Windows 服务和界面日志
-    server/diagnostics/
+    server/preferences.json       # Windows 托盘偏好
+    server/runtime/ui/            # 按用户隔离的临时加密管理请求
+    server/runtime/setup/         # 安装包展开、卸载助手
+    server/display/               # LanDesk 新建驱动的配置
+    server/diagnostics/            # 仅命令行诊断导出
     client/settings.json
     client/credentials/            # AES-GCM 密文
     client/credentials/keys/
@@ -334,7 +346,7 @@ workspace、身份仓储、共享密码用例、后台操作、连接/控制生�
 | Windows 原生测试 | 首个提权辅助窗口可见、可关闭；父窗口消息循环持续推进；SCM/管道身份验证仍生效 |
 | Mac 原生测试 | 已有主线程运行循环测试；新增密码窗口和真实系统密钥存储交互仍需实机验收 |
 | 协议集成 | 真实 Client → SSH → Server → HTTP/WebSocket；错误凭证、取消、重连和断开隔离 |
-| 实机验收 | Windows A 控制 Mac B，同时 B 控制 Windows C；两边修改密码后新连接使用新密码，既有会话保持既定行为 |
+| 实机验收 | Windows A 控制 Mac B，同时 B 控制 Windows C；Windows 保存后旧端口/密码保持有效，重启后切换新端口/密码；Mac 保存后新连接使用新密码 |
 
 条件编译检查、单元测试和 Windows CI 原生窗口测试不能替代 UAC 安全桌面、TCC、硬件采集或三机链路实测。共享接口也不意味着所有平台功能齐全：当前 Windows 桌面文件访问明确禁用，不能因统一 `FilePort` 就开放 SYSTEM 文件系统。
 
@@ -396,7 +408,7 @@ SSH 就绪后，连续 30 秒没有桌面/终端 WebSocket 会话则关闭该 SS
 
 使用 ScreenCaptureKit 采集、Enigo/CoreGraphics 输入、GPUI 设置窗口与 AppKit 剪贴板。输入及清理在 AppKit 主线程的 common run-loop modes 中执行，窗口拖动或模态循环不应吞掉按键释放。需要屏幕录制与辅助功能授权；启动不自动申请。
 
-连接密码首次随机生成 8 位数字/大小写字母，界面可直接选中文本复制和编辑。验证使用 Argon2id，显示密码使用 AES-256-GCM 密文；加密密钥保存在 `data/server/transport/keys/`；目录权限 `0700`，密钥文件权限 `0600`，不调用钥匙串。密钥与配置都依赖当前用户的文件访问权限保护，不防止同一用户进程读取。保存失败保留输入草稿并在状态栏报错，不显示保存成功。SSH 身份与内部认证密钥不提供给浏览器。
+连接密码首次随机生成 8 位数字/大小写字母，界面可直接选中文本复制和编辑。验证使用 Argon2id，显示密码使用 AES-256-GCM 密文；加密密钥保存在 `data/server/config/keys/`；目录权限 `0700`，密钥文件权限 `0600`，不调用钥匙串。密钥与配置都依赖当前用户的文件访问权限保护，不防止同一用户进程读取。保存失败保留输入草稿并在状态栏报错，不显示保存成功。SSH 身份与内部认证密钥不提供给浏览器。
 
 当前 `.app` 打包采用本机 ad-hoc 临时签名，没有 Developer ID 签名或公证；更新后系统可能重新要求隐私授权。正式分发签名尚未接入。
 
@@ -408,7 +420,7 @@ SSH 就绪后，连续 30 秒没有桌面/终端 WebSocket 会话则关闭该 SS
 
 物理控制台可能与 RDP 会话不同；不自动登录、不修改系统账户或 RDP。支持 GDI/JPEG 采集、SendInput 和剪贴板；桌面文件访问与上传明确禁用，不暴露 LocalSystem 文件系统。普通输入失败时保留画面和选屏，显示警告；实际输入成功后撤销警告，不重放失败点击或文字。Ctrl+Alt+Delete 的 SendSAS 调用无效果回执，日志成功不代表登录界面必然响应。
 
-连接配置位于程序旁 `data/server/transport/config.json`，包含 Argon2id、AES-GCM 密文、SSH 身份与内部密钥，限制普通用户读取。密码加密密钥使用共享本地文件方案。专用本机密码管道允许交互用户读取显示密码，拒绝远程客户端；界面校验 LocalService 管道所有者，不接收 SSH 私钥、密码加密密钥或内部密钥。
+连接配置位于程序旁 `data/server/config/config.json`，包含 Argon2id、AES-GCM 密文、SSH 身份与内部密钥，限制普通用户读取。密码加密密钥使用共享本地文件方案。专用本机密码管道允许交互用户读取显示密码，拒绝远程客户端；界面校验 LocalService 管道所有者，不接收 SSH 私钥、密码加密密钥或内部密钥。
 
 ### 显示选择与虚拟设备生命周期
 
@@ -422,7 +434,7 @@ SSH 就绪后，连续 30 秒没有桌面/终端 WebSocket 会话则关闭该 SS
 
 虚拟设备由 Server 持有，网页断开/刷新后仍存在；相同尺寸复用。新设备创建及采集初始化成功后才提交选择；失败保留原选择，旧采集释放后再处理旧设备。切回实体屏仍保留最后虚拟屏到服务退出，配置不落盘。尺寸受 1600 万像素预算限制。创建显示器可能触发系统调整布局，但 LanDesk 不主动搬窗口、镜像或改变主屏。
 
-Windows 驱动使用上游 MttVDD 25.7.23 原始 DLL/INF/CAT，安装前核验 SHA-256 和 WinVerifyTrust，再由 DiInstallDevice 验证安装；不导入证书或开启测试签名。新配置为 1920×1080、60 Hz、SDR；自建设备 `ROOT\LANDESKDISPLAY\0000`。已有正常 MttVDD 复用并保留配置及归属；设备异常或配置无效时明确失败。没有配置时使用上游默认 `C:\VirtualDisplayDriver`。
+Windows 驱动使用上游 MttVDD 25.7.23 原始 DLL/INF/CAT，安装前核验 SHA-256 和 WinVerifyTrust，再由 DiInstallDevice 验证安装；不导入证书或开启测试签名。新配置为 1920×1080、60 Hz、SDR；自建设备 `ROOT\LANDESKDISPLAY\0000`。已有正常 MttVDD 复用并保留配置及归属；设备异常或配置无效时明确失败。新建驱动的配置位于 `data/server/display/vdd_settings.xml`，通过注册表 `HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver\VDDPATH` 指定；安装失败回滚路径登记和本次配置。已核对 [25.7.23 Driver.cpp 的 initpath/loadSettings](https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/25.7.23/Virtual%20Display%20Driver%20%28HDR%29/MttVDD/Driver.cpp)：支持 REG_SZ 自定义路径，读取缓冲区受 MAX_PATH 限制。Windows Driver Store 仍由系统管理，不能迁入应用目录；复用其他程序已有驱动时保留其原配置路径。
 
 无头冷启动、合盖、FileVault、UAC、锁屏和不同系统版本的能力必须逐项实机验证，不能由编译成功或显示器枚举成功推出。Linux 图形桌面服务、音频与透明跳板尚未实现。
 
@@ -432,11 +444,11 @@ Windows 驱动使用上游 MttVDD 25.7.23 原始 DLL/INF/CAT，安装前核验 S
 
 安装器只有全新安装路径：校验归属，清理被替换的服务/程序/连接配置，再创建服务与入口。更新会生成新密码和 SSH 身份；正常运行及重启保留它们。无关文件、共享驱动和已有显示配置必须保留，同名但归属不明的程序拒绝覆盖。安装失败逆序回滚本次创建对象并记录回滚失败；不承诺恢复已经清理的旧服务。
 
-- 开机启动：默认启用，后台不依赖用户登录；取消只改为手动启动，不立即断开。
-- 启动时最小化：控制登录后管理界面，开始菜单入口可打开设置。
-- 卸载：停止服务和界面，删除程序、启动入口、防火墙与应用登记；保留配置、日志及无关文件。可选移除 LanDesk 自建虚拟设备，不移除第三方设备和共享 Driver Store 包。
-- 修复日志并启动：验证归属和配置，修复日志目录、文件及 LocalService 权限，按依赖顺序启动服务。不重建密码、不重装驱动；配置缺失明确报错。
-- 导出日志：生成 `程序旁 data/server/diagnostics/LanDeskServer-diagnostics-*.zip`。不持有安装锁；日志缺失或读取失败记入 `status.json`，仍可导出诊断状态。
+- 托盘菜单提供“开机启动”“最小化托盘”，勾选后立即保存，失败恢复原选项及系统设置。两项均启用时，登录启动直接创建隐藏窗口，不先显示再隐藏；手动启动或托盘打开设置会显示窗口。
+- 取消开机启动只改变后续启动方式，不断开当前连接；关闭设置窗口是否隐藏到托盘由“最小化托盘”决定，退出托盘不停止后台。
+- 窗口右下角“重启”“卸载”，上方两行只显示服务状态；启停阶段和查询失败分别显示“启动中/停止中”和“未知”，不把错误当停止。
+- 卸载在主窗口确认一次，停止服务、移除系统入口和 LanDesk 自建虚拟设备，保留配置、日志、第三方设备及共享 Driver Store 包。辅助进程将过程写到状态栏；最后通知窗口退出以释放 EXE，再删除程序文件。窗口退出后的最终结果写入 `uninstall.log`；运行中的卸载助手登记下次 Windows 重启清理。
+- 界面移除复制密码、旧密码操作按钮、导出日志、修复并启动和单独保存启动设置。日志自动写入程序旁 `data/server/logs/`；启动路径检查必要目录和日志文件，不重建缺失的身份和密钥。命令行 `--export-logs` 仍可导出不含凭据的诊断包。
 
 只读检查：
 
@@ -445,9 +457,9 @@ LanDeskServer.exe --version
 LanDeskServer.exe --status
 ```
 
-后台日志：`install.log`、`uninstall.log`、`server.log`、`transport.log`、`worker.log`；带 UTC 时间、PID、版本，约 2 MB 轮换。界面日志在 `%LOCALAPPDATA%\LanDeskServer\logs\ui.log`，需单独提供。诊断只收集明确列出的日志、服务、设备与会话元数据，不收集密码、配置、私钥、画面、输入、剪贴板或窗口标题。首帧日志只记录是否纯色，不记录像素。
+后台日志：`install.log`、`uninstall.log`、`server.log`、`transport.log`、`worker.log`；带 UTC 时间、PID、版本，约 2 MB 轮换。界面日志为同目录 `ui.log`。诊断只收集明确列出的日志、服务、设备与会话元数据，不收集密码、配置、私钥、画面、输入、剪贴板或窗口标题。首帧日志只记录是否纯色，不记录像素。
 
-服务先注册 SCM 再初始化日志；初始化失败通过 SCM 报错。维护操作的密码输入、确认与完成弹窗不占维护锁；等待辅助进程时继续处理窗口消息。
+服务先注册 SCM 再初始化日志；初始化失败通过 SCM 报错。主窗口卸载确认不占维护锁；维护辅助进程在后台线程等待，GPUI 继续处理窗口消息。
 
 维护辅助进程以 `SW_SHOWNORMAL` 启动，并通过 `SEE_MASK_NO_CONSOLE` 避免新建控制台。不能使用 `SW_HIDE` 隐藏控制台：Windows 会将启动显示参数应用到第一次 `ShowWindow`，导致密码窗口隐藏、主窗口一直等待用户完成不可见的对话框。原生回归测试通过实际提权启动路径，在新进程中检查首次窗口可见及可关闭；不改密码或安装状态。依据：[ShowWindow 启动参数规则](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)、[ShellExecuteEx 参数](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)。
 
@@ -485,9 +497,13 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanD
 
 普通测试不安装驱动、不创建虚拟设备。Windows 管理员原生维护测试由 CI 显式运行：`cargo test -p landesk --locked --lib native_setup_ -- --ignored --test-threads=1`。Mac 真实虚拟显示测试需要显式设置 `LANDESK_TEST_VIRTUAL_DISPLAY=1 LANDESK_TEST_VIRTUAL_CAPTURE=1`，且测试进程已有屏幕录制权限。
 
+按本次改动涉及的产品和平台打包；服务端改动不要求客户端同步升级。Windows 服务端独立包使用 `windows-display.yml`，客户端使用 `windows-client.yml`。共享 `Cargo.lock` 的变动会触发两者，因此明确只发布 Windows 服务端时，提交消息加入 `[skip ci]`，推送后显式执行 `gh workflow run windows-display.yml --ref <已推送分支>`，并核对运行的提交 SHA。工作流会执行服务端、共享库及 Client 探针验证，但仅上传 `LanDeskServer-windows-x64` 包。此流程是显式选择构建目标，不是自动分析依赖影响范围；共享代码变动仍需验证受影响的平台。依据：[跳过 push/PR 自动运行](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs)、[手动运行指定分支的工作流](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
+
 验收必须覆盖：同机 Client/Server 共存、两条独立链路、旧端口已占用时 Client 可启动、跨目标隔离、网页凭证缺失/错误/失效、错误 Origin/Host、未知 subsystem/Shell/端口转发拒绝、入口失败后配置可编辑及重试、退出释放所有任务。UI 构建与协议测试不等于真实跨机桌面/键鼠验收。
 
 ## 版本依据与验证记录
+
+**Server 0.6.0 Windows 管理界面改版，本地验证（2026-10-16，Windows 包待 CI 构建）**：Windows 与 Mac 共用 GPUI 连接输入行和状态栏；Windows 改为保存后重启生效。服务端库测试 45 项通过、1 项现有集成探针测试忽略；新增真实 SSH/WebSocket 测试覆盖保存期间连接继续通信、重启前旧密码有效、重启断开旧连接、新端口/密码启用。Mac 全目标和 Windows x64 gnullvm 交叉全目标 Clippy 通过。尚未验证 Windows 实机 GPUI、托盘隐藏启动、UAC、SCM 重启、卸载及 VDDPATH 驱动加载；交叉检查不代表 Windows MSVC 打包或实机运行通过。
 
 **0.5.0 本地验证（2026-10-16）**：核心 29 项、共享存储 2 项、服务端 44 项库测试通过；客户端 14 项库测试和 7 项 SSH/PTY/SFTP 测试通过。覆盖本地 AES 密文、密钥丢失/损坏、数据目录移动、事务回滚、端口预占及监听切换。Mac arm64 与 Windows x64 gnullvm 全目标 Clippy 通过。Windows MSVC 与原生安装/服务/界面尚未验证。Mac 两个 release 应用已替换到 `/Applications`；已检查 GPUI 布局、无效端口状态栏错误、重启恢复相同密码、`/Applications/data/server/` 实际落盘及 SSH 监听。未通过界面修改真实密码，未验证本轮远程画面和输入；当前新版系统授权显示未授权。
 

@@ -13,3 +13,5 @@
 `vdd_settings.xml` 是 LanDesk 的配置：一个 1920×1080、60 Hz、SDR 屏幕，关闭硬件光标和日志。字段及默认配置路径 `C:\VirtualDisplayDriver` 已核对该 tag 的 [Driver.cpp](https://github.com/VirtualDrivers/Virtual-Display-Driver/blob/25.7.23/Virtual%20Display%20Driver%20%28HDR%29/MttVDD/Driver.cpp) 与配置模板。
 
 安装前在目标 Windows 检查目录签名信任，安装由系统校验驱动包；不导入证书、不启用测试签名、不修改 Secure Boot。签名、Win10/Win11 加载与无头屏幕输出仍需实机验证。
+
+LanDesk 新建驱动使用程序旁 `data/server/display/`，在安装前设置 `HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver` 的 `VDDPATH`（REG_SZ）。25.7.23 的 `initpath()` 读取此路径，`loadSettings()` 从该目录读取 `vdd_settings.xml`；路径包含终止符不得超过 260 个 UTF-16 码元。复用已运行的其他 MttVDD 时不修改其注册路径或配置。Windows Driver Store 安装位置仍由系统管理。

@@ -88,6 +88,8 @@ fn verify_owner(pipe: &NamedPipeClient) -> Result<()> {
 #[serde(deny_unknown_fields)]
 pub struct PasswordInfo {
     pub port: u16,
+    pub pending: bool,
+    pub active_port: u16,
     password: String,
 }
 impl PasswordInfo {
@@ -108,11 +110,12 @@ impl Listener {
     pub fn new() -> Result<Self> {
         Ok(Self(create(true)?))
     }
-    pub async fn serve(mut self, path: PathBuf) -> Result<()> {
+    pub async fn serve(mut self, path: PathBuf, running: Vec<u8>, active_port: u16) -> Result<()> {
         loop {
             self.0.connect().await.context("密码界面管道连接失败")?;
             let mut pipe = std::mem::replace(&mut self.0, create(false)?);
             let path = path.clone();
+            let running = running.clone();
             let data =
                 tokio::task::spawn_blocking(move || -> Result<zeroize::Zeroizing<Vec<u8>>> {
                     let config = crate::adapters::identity::read(&path)?;
@@ -123,11 +126,23 @@ impl Listener {
                     Ok(zeroize::Zeroizing::new(serde_json::to_vec(
                         &PasswordInfo {
                             port: config.port,
+                            pending: serde_json::to_vec(&config)? != running,
+                            active_port,
                             password: password.to_string(),
                         },
                     )?))
                 })
-                .await??;
+                .await;
+            let data = match data {
+                Ok(Ok(data)) => data,
+                _ => {
+                    // A damaged saved draft must never stop the running SSH snapshot.
+                    crate::diagnostics::log(
+                        "Saved settings could not be read; running connections retained",
+                    );
+                    continue;
+                }
+            };
             // A closed or stalled UI does not stop remote control.
             let _ = tokio::time::timeout(Duration::from_secs(2), pipe.write_all(&data)).await;
         }

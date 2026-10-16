@@ -96,7 +96,7 @@ async fn run_transport(
             let task = crate::adapters::ssh::run(
                 listener,
                 identity,
-                config_path.clone(),
+                crate::adapters::ssh::PasswordPolicy::LiveFile(config_path.clone()),
                 backend.clone(),
                 async {
                     let _ = stopped.await;

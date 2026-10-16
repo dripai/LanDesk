@@ -747,7 +747,7 @@ mod access_tests {
         let service = tokio::spawn(crate::adapters::ssh::run(
             listener,
             config,
-            path,
+            crate::adapters::ssh::PasswordPolicy::LiveFile(path),
             backend,
             async {
                 let _ = stopped.await;
