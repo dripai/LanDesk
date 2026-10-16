@@ -3,9 +3,9 @@ name: Windows server
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
+    paths: ["apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "scripts/test_bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
   pull_request:
-    paths: ["apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
+    paths: ["apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "scripts/test_bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
   workflow_dispatch:
 
 permissions:
@@ -29,6 +29,12 @@ jobs:
         run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
       - name: Architecture boundaries
         run: python scripts/check_architecture.py
+      - name: Package and browser regression tests
+        run: |
+          python -m unittest discover -s scripts -p test_bundle_windows_display.py
+          if ($LASTEXITCODE -ne 0) { throw 'Package regression tests failed' }
+          node --test web/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Browser regression tests failed' }
       - name: Format
         run: cargo +stable fmt --all --check
       - name: Check Windows component

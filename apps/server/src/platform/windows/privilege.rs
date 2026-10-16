@@ -143,7 +143,9 @@ pub(super) fn elevated(
     let verb = wide("runas");
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        // Suppress a new console independently of the helper's GUI windows.
+        // The server's Windows GUI subsystem prevents console creation.
+        // NO_CONSOLE only requests console inheritance; it does not hide a
+        // console-subsystem executable launched through elevation.
         fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE,
         hwnd,
         lpVerb: verb.as_ptr(),

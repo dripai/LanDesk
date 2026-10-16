@@ -8,7 +8,8 @@ const source = await readFile(new URL('./app.js', import.meta.url), 'utf8');
 const toolbarSource = (await readFile(new URL('./toolbar.js', import.meta.url), 'utf8')).replace('export function', 'function');
 function fixture(writeText = async () => {}, script = source) {
   const nodes = new Map(), sockets = [], images = [], timers = new Set(), drawn = [], layoutWidths = [];
-  let frameResets = 0;
+  let frameResets = 0, fileHandlers = null;
+  const fileMessages = [];
   const node = id => {
     if (!nodes.has(id)) {
       const element = new EventTarget();
@@ -23,8 +24,8 @@ function fixture(writeText = async () => {}, script = source) {
   class Socket {
     static OPEN = 1;
     readyState = 1; sent = [];
-    constructor() { sockets.push(this); }
-    send(value) { this.sent.push(JSON.parse(value)); }
+    constructor(url) { this.url = String(url); sockets.push(this); }
+    send(value) { this.sent.push(typeof value === 'string' ? JSON.parse(value) : value); }
     close() { this.readyState = 3; }
     receive(value) { this.onmessage({data:JSON.stringify(value)}); }
   }
@@ -36,7 +37,11 @@ function fixture(writeText = async () => {}, script = source) {
     window:new EventTarget(), navigator:{clipboard:{writeText}},
     ResizeObserver:class { observe() {} }, createKeyboard,
     createFrames:()=>({draw(frame) { drawn.push(frame); },reset() { frameResets++; }}),
-    createFiles:()=>({handle:()=>false,resize() { layoutWidths.push(node('session').hidden ? 0 : 1200); },connect() {},reset() {}}),
+    createFiles:(_panel, send, binary, _notify, options)=>{
+      fileHandlers = {send, binary, options};
+      return {handle:message=>fileMessages.push(message),resize() { layoutWidths.push(node('session').hidden ? 0 : 1200); },
+        connect() { node('files-panel').hidden = false; },reset() { node('files-panel').hidden = true; },toggle() { node('files-panel').hidden = !node('files-panel').hidden; }};
+    },
     createImagePaste:()=>({paste:image=>images.push(image),handle:()=>false,reset() {}}),
     setTimeout:fn=>{ timers.add(fn); return fn; },clearTimeout:fn=>timers.delete(fn),
     setInterval:()=>0,clearInterval() {},
@@ -50,8 +55,40 @@ function fixture(writeText = async () => {}, script = source) {
     return event;
   }
   const copy = () => event('keyboard-input','keydown',{key:'c',code:'KeyC',ctrlKey:true});
-  return {node,sockets,images,event,copy,timers,drawn,layoutWidths,get frameResets() { return frameResets; }};
+  return {node,sockets,images,event,copy,timers,drawn,layoutWidths,fileHandlers,fileMessages,get frameResets() { return frameResets; }};
 }
+
+test('Windows files use an independent connection and failure preserves video and input', () => {
+  const f = fixture(), desktop = f.sockets[0];
+  desktop.receive({type:'ready',width:1920,height:1080,native_width:1920,native_height:1080,
+    requested_width:null,display_id:1,displays:[],capabilities:{os:'windows',virtual_display:true,files:true}});
+  assert.equal(f.node('files-button').hidden,false);
+  assert.equal(f.sockets.length,2);
+  const files = f.sockets[1];
+  assert.match(files.url,/\/s\/test\/files-ws$/);
+  files.onopen(); assert.deepEqual(files.sent[0],{type:'hello'});
+  files.receive({type:'files_ready'}); assert.equal(f.node('files-panel').hidden,false);
+  f.event('files-button','click'); f.event('files-button','click');
+  assert.equal(f.sockets.length,2); assert.equal(files.readyState,1);
+  f.fileHandlers.send({type:'list_directory',id:1,path:'',cursor:''});
+  const chunk = new Uint8Array([1,2,3]); f.fileHandlers.binary(chunk);
+  assert.equal(files.sent.at(-1),chunk);
+  assert.ok(!desktop.sent.some(value=>value.type==='list_directory'));
+  const releases = desktop.sent.filter(value=>value.type==='release_all').length;
+  f.fileHandlers.options.releaseInput();
+  assert.equal(desktop.sent.filter(value=>value.type==='release_all').length,releases+1);
+  assert.ok(!files.sent.some(value=>value.type==='release_all'));
+  files.onerror();
+  assert.equal(desktop.readyState,1); assert.equal(f.node('session').hidden,false);
+  const frame = new Blob(['jpeg']); desktop.onmessage({data:frame});
+  assert.deepEqual(f.drawn,[frame]); assert.equal(f.frameResets,0);
+  f.event('files-button','click');
+  assert.equal(f.sockets.length,3);
+  const reconnected = f.sockets[2]; reconnected.receive({type:'files_ready'});
+  assert.equal(f.node('files-panel').hidden,false);
+  f.event('disconnect','click');
+  assert.equal(desktop.readyState,3); assert.equal(reconnected.readyState,3);
+});
 
 test('desktop fixture loads source checked out with Windows CRLF line endings', () => {
   const f = fixture(undefined, source.replace(/\r?\n/g, '\r\n'));

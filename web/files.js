@@ -161,7 +161,7 @@ export function createFiles(panel, send, sendBinary, notify, options = {}) {
   }
   resizer.addEventListener('pointerdown', event => {
     if (event.button !== 0) return;
-    event.preventDefault(); send({type:'release_all'});
+    event.preventDefault(); options.releaseInput?.();
     drag = {x:event.clientX, width:panel.getBoundingClientRect().width};
     resizer.setPointerCapture(event.pointerId); resizer.classList.add('dragging'); resizer.focus();
   });

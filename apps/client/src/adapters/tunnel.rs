@@ -285,7 +285,7 @@ mod tests {
             tokio::spawn(async move {
                 let mut stream = channel.into_stream();
                 while let Ok(request) = read_headers(&mut stream).await {
-                    if request.starts_with("GET /ws ") {
+                    if request.starts_with("GET /ws ") || request.starts_with("GET /files-ws ") {
                         if stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").await.is_err() { break; }
                         let (mut input, mut output) = tokio::io::split(stream);
                         let _ = tokio::io::copy(&mut input, &mut output).await;
@@ -410,7 +410,7 @@ mod tests {
             .unwrap();
             fixture
         }
-        async fn viewer(&self) -> tokio::net::TcpStream {
+        async fn viewer(&self, path: &str) -> tokio::net::TcpStream {
             let mut socket = tokio::net::TcpStream::connect(self.address).await.unwrap();
             // Reuse a keep-alive HTTP connection for the upgrade, as browsers may do.
             socket
@@ -418,7 +418,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(read_headers(&mut socket).await.unwrap().contains("200 OK"));
-            socket.write_all(b"GET /ws HTTP/1.1\r\nHost: landesk.internal\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nOrigin: http://landesk.internal\r\n\r\n").await.unwrap();
+            socket.write_all(format!("GET {path} HTTP/1.1\r\nHost: landesk.internal\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nOrigin: http://landesk.internal\r\n\r\n").as_bytes()).await.unwrap();
             assert!(
                 read_headers(&mut socket)
                     .await
@@ -445,7 +445,7 @@ mod tests {
     async fn encrypted_websocket_transfers_bytes_and_cancellation_releases_listener() {
         timeout(Duration::from_secs(10), async {
             let mut fixture = TestTunnel::new().await;
-            let mut socket = fixture.viewer().await;
+            let mut socket = fixture.viewer("/ws").await;
             let bytes: Vec<u8> = (0..65536).map(|n| (n % 251) as u8).collect();
             socket.write_all(&bytes).await.unwrap();
             let mut received = vec![0; bytes.len()];
@@ -476,10 +476,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_viewer_survives_idle_limit_and_last_close_stops_tunnel() {
+    async fn independent_file_viewer_survives_desktop_close_and_last_close_stops_tunnel() {
         let mut fixture = TestTunnel::new().await;
-        let first = fixture.viewer().await;
-        let mut second = fixture.viewer().await;
+        let first = fixture.viewer("/ws").await;
+        let mut second = fixture.viewer("/files-ws").await;
         drop(first);
         tokio::time::sleep(
             landesk_core::application::viewer::IDLE_TIMEOUT + Duration::from_secs(1),
@@ -496,7 +496,7 @@ mod tests {
         drop(second);
         // A refresh within the grace period restores the same tunnel.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let refreshed = fixture.viewer().await;
+        let refreshed = fixture.viewer("/ws").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!fixture.task.is_finished());
         drop(refreshed);

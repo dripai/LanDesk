@@ -2,7 +2,7 @@ use super::capture::WindowsCapture;
 use super::desktop::Handle;
 use super::desktop::checked;
 use super::desktop::wide;
-use super::input::NoFiles;
+use super::files::UserFiles;
 use super::input::WindowsControl;
 use crate::adapters::web::AppState;
 use anyhow::Context;
@@ -96,14 +96,9 @@ pub fn require_system_console() -> Result<()> {
     );
     Ok(())
 }
-fn enable_privileges() -> Result<()> {
+pub(super) fn enable_privileges(names: &[&str]) -> Result<()> {
     let token = process_token()?;
-    for name in [
-        "SeTcbPrivilege",
-        "SeAssignPrimaryTokenPrivilege",
-        "SeIncreaseQuotaPrivilege",
-        "SeDebugPrivilege",
-    ] {
+    for name in names {
         let mut luid = LUID::default();
         checked(
             unsafe { LookupPrivilegeValueW(null(), wide(name).as_ptr(), &mut luid) },
@@ -391,7 +386,12 @@ pub fn request_sas() -> Result<()> {
 }
 fn serve() -> Result<()> {
     require_system()?;
-    enable_privileges()?;
+    enable_privileges(&[
+        "SeTcbPrivilege",
+        "SeAssignPrimaryTokenPrivilege",
+        "SeIncreaseQuotaPrivilege",
+        "SeDebugPrivilege",
+    ])?;
     // Validate configuration before telling SCM that service startup succeeded.
     let _ = read_transport()?;
     report(SERVICE_RUNNING, 0);
@@ -581,7 +581,7 @@ fn worker(stop_name: &str) -> Result<()> {
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        let state = AppState { transport_key: landesk_core::security::transport_key::TransportKey::new(key)?, native, shared: shared.clone(), capture: CaptureService::new(|| Box::new(WindowsCapture::default()))?, files: FileService::new(NoFiles) };
+        let state = AppState { transport_key: landesk_core::security::transport_key::TransportKey::new(key)?, native, shared: shared.clone(), capture: CaptureService::new(|| Box::new(WindowsCapture::default()))?, files: FileService::new(UserFiles) };
         let server = super::pipe::serve(state);
         tokio::pin!(server);
         loop {

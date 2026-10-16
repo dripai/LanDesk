@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use anyhow::ensure;
+#[cfg(test)]
 use landesk_core::domain::FileCommand;
 use landesk_core::domain::FileEntry;
 use landesk_core::domain::FileKind;
@@ -19,9 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
-const TEMP_PREFIX: &str = ".landesk-upload-";
-const PAGE_SIZE: usize = 500;
+use crate::adapters::file_session::{MAX_FILE_BYTES, PAGE_SIZE, TEMP_PREFIX};
 
 pub struct HomeFiles {
     root: File,
@@ -316,100 +315,33 @@ impl Drop for Upload {
     }
 }
 
-pub struct FileSession {
-    home: Arc<HomeFiles>,
-    upload: Option<Upload>,
-    cancelled: Arc<AtomicBool>,
+pub type FileSession = crate::adapters::file_session::Session;
+impl crate::adapters::file_session::Store for HomeFiles {
+    fn list(&self, id: u32, path: &str, cursor: &str) -> Result<FileResponse> {
+        self.list(id, path, cursor)
+    }
+    fn start(
+        &self,
+        id: u32,
+        path: &str,
+        name: &str,
+        size: u64,
+    ) -> Result<Box<dyn crate::adapters::file_session::Upload>> {
+        Ok(Box::new(Upload::start(self, id, path, name, size)?))
+    }
 }
-impl FileSession {
-    #[cfg(test)]
-    pub fn new(home: Arc<HomeFiles>) -> Self {
-        Self::with_cancellation(home, Arc::new(AtomicBool::new(false)))
+impl crate::adapters::file_session::Upload for Upload {
+    fn id(&self) -> u32 {
+        self.id
     }
-    pub fn with_cancellation(home: Arc<HomeFiles>, cancelled: Arc<AtomicBool>) -> Self {
-        Self {
-            home,
-            upload: None,
-            cancelled,
-        }
+    fn chunk(&mut self, data: &[u8]) -> Result<FileResponse> {
+        self.chunk(data)
     }
-    fn abort(&mut self) -> Result<()> {
-        if let Some(mut upload) = self.upload.take() {
-            upload.cleanup()?;
-        }
-        Ok(())
+    fn finish(&mut self, cancelled: &AtomicBool) -> Result<FileResponse> {
+        self.finish(cancelled)
     }
-    fn response(&mut self, id: u32, result: Result<FileResponse>, abort: bool) -> FileResponse {
-        match result {
-            Ok(value) => value,
-            Err(error) => {
-                let cleanup = if abort { self.abort() } else { Ok(()) };
-                let message = match cleanup {
-                    Ok(()) => format!("{error:#}"),
-                    Err(cleanup) => format!("{error:#}；{cleanup:#}"),
-                };
-                FileResponse::FileError {
-                    id,
-                    message,
-                    upload_active: self.upload.is_some(),
-                }
-            }
-        }
-    }
-    pub fn message(&mut self, message: FileCommand) -> FileResponse {
-        let (id, result, abort) = match message {
-            FileCommand::ListDirectory { id, path, cursor } => {
-                (id, self.home.list(id, &path, &cursor), false)
-            }
-            FileCommand::UploadStart {
-                id,
-                path,
-                name,
-                size,
-            } => {
-                let result = (|| {
-                    ensure!(self.upload.is_none(), "已有文件正在上传");
-                    self.upload = Some(Upload::start(&self.home, id, &path, &name, size)?);
-                    ensure!(!self.cancelled.load(Ordering::Acquire), "文件会话已取消");
-                    Ok(FileResponse::UploadReady {
-                        id,
-                        chunk_size: UPLOAD_CHUNK_BYTES,
-                    })
-                })();
-                (id, result, self.cancelled.load(Ordering::Acquire))
-            }
-            FileCommand::UploadFinish { id } => {
-                let result = (|| {
-                    let upload = self.upload.as_mut().context("没有正在上传的文件")?;
-                    ensure!(upload.id == id, "上传编号不匹配");
-                    let value = upload.finish(&self.cancelled)?;
-                    self.upload.take();
-                    Ok(value)
-                })();
-                (id, result, true)
-            }
-            FileCommand::UploadCancel { id } => {
-                let result = (|| {
-                    ensure!(
-                        self.upload.as_ref().is_some_and(|u| u.id == id),
-                        "上传编号不匹配"
-                    );
-                    self.abort()?;
-                    Ok(FileResponse::UploadCancelled { id })
-                })();
-                (id, result, false)
-            }
-        };
-        self.response(id, result, abort)
-    }
-    pub fn chunk(&mut self, data: &[u8]) -> FileResponse {
-        let id = self.upload.as_ref().map_or(0, |u| u.id);
-        let result = self
-            .upload
-            .as_mut()
-            .context("请先开始文件上传")
-            .and_then(|u| u.chunk(data));
-        self.response(id, result, true)
+    fn cleanup(&mut self) -> Result<()> {
+        self.cleanup()
     }
 }
 
@@ -421,15 +353,6 @@ impl landesk_core::ports::FileBackend for HomeFiles {
         Box::new(FileSession::with_cancellation(self, cancelled))
     }
 }
-impl landesk_core::ports::FileSession for FileSession {
-    fn message(&mut self, message: FileCommand) -> FileResponse {
-        FileSession::message(self, message)
-    }
-    fn chunk(&mut self, bytes: &[u8]) -> FileResponse {
-        FileSession::chunk(self, bytes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

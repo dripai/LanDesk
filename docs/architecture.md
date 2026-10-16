@@ -81,11 +81,12 @@ classDiagram
     ServerRuntime "1" *-- "0..1" ControlSession : 控制者互斥
     ServerRuntime "1" *-- "1" DisplaySelection : 独立于网页存续
     ControlSession "1" *-- "0..1" CaptureSession
-    ControlSession "1" *-- "0..1" FileSession
+    BrowserAccess --> FileSession : 独立认证文件连接
+    BrowserAccess --> ControlSession : 独立画面与输入连接
     CaptureSession --> DisplaySelection : 成功采集后提交选择
 ```
 
-图中对象关系是职责分配，不是数据库表。Client 通过 SSH 加密连接和密码或私钥登录认证访问目标，不保存或校验服务器主机密钥，不取得 Server 的私钥或内部密钥。仍采用当前需要的文件和系统凭据存储，不为领域建模引入数据库、服务拆分或通用事件总线。
+图中对象关系是职责分配，不是数据库表。Client 通过 SSH 加密连接和密码或私钥登录认证访问目标，不保存或校验服务器主机密钥，不取得 Server 的私钥或内部密钥。连接配置和密钥采用程序旁文件存储，不调用系统凭据库，也不为领域建模引入数据库、服务拆分或通用事件总线。
 
 ### 分层及依赖方向
 
@@ -348,7 +349,7 @@ workspace、身份仓储、共享密码用例、后台操作、连接/控制生�
 | 协议集成 | 真实 Client → SSH → Server → HTTP/WebSocket；错误凭证、取消、重连和断开隔离 |
 | 实机验收 | Windows A 控制 Mac B，同时 B 控制 Windows C；Windows 保存后旧端口/密码保持有效，重启后切换新端口/密码；Mac 保存后新连接使用新密码 |
 
-条件编译检查、单元测试和 Windows CI 原生窗口测试不能替代 UAC 安全桌面、TCC、硬件采集或三机链路实测。共享接口也不意味着所有平台功能齐全：当前 Windows 桌面文件访问明确禁用，不能因统一 `FilePort` 就开放 SYSTEM 文件系统。
+条件编译检查、单元测试和 Windows CI 原生窗口测试不能替代 UAC 安全桌面、TCC、硬件采集或三机链路实测。共享接口也不意味着所有平台功能齐全：Windows 文件访问必须取得实际登录用户令牌，不能因统一 `FileBackend` 就开放 SYSTEM 文件系统。
 
 ## 角色与连接拓扑
 
@@ -400,7 +401,21 @@ Mac B 可以同时被控并控制其他设备。退出 B 的 Client 只结束第
 
 Windows Client 可选择最小化/关闭窗口留在托盘。Mac Client 不创建菜单栏状态图标：最小化到 Dock，关闭窗口保留连接，Dock 重新打开恢复窗口，应用菜单或 `⌘Q` 断开连接后退出。
 
-SSH 就绪后，连续 30 秒没有桌面/终端 WebSocket 会话则关闭该 SSH；HTTP 保活与资源访问不续期。最后一个网页会话关闭后开始计时，宽限期内刷新可继续使用同一连接。终端打开但不输入不算空闲。网络故障由 TCP/SSH 心跳识别，不按桌面输入或画面频率判断。
+SSH 就绪后，连续 30 秒没有桌面/文件/终端 WebSocket 会话则关闭该 SSH；HTTP 保活与资源访问不续期。最后一个网页会话关闭后开始计时，宽限期内刷新可继续使用同一连接。终端打开但不输入不算空闲。网络故障由 TCP/SSH 心跳识别，不按桌面输入或画面频率判断。
+
+### 独立文件连接
+
+桌面 `/ws` 只承载画面、键鼠和剪贴板；文件 `/files-ws` 使用同一 SSH 连接下的独立 subsystem 通道、HTTP 升级和 WebSocket。客户端转发层同时允许这两个升级路径；本次功能需要配套更新 Client，旧 Client 只转发 `/ws`。两者均经过网关凭证、内部密钥和 Origin 校验；文件连接必须先发送 `hello` 并收到 `files_ready`。文件操作不获取控制会话租约，也不要求成功启动屏幕采集。独立队列和文件工作线程隔离上传背压、磁盘阻塞与画面/输入；SSH 或服务整体退出仍会关闭两者。
+
+网页默认显示右侧文件面板，可收起、拖动宽度；上传控制和画面控制分别发送到对应连接。文件断开只重置文件面板，可点击文件按钮重连；桌面断开或关闭网页会同时取消未完成上传。文件面板列目录和上传普通文件，不提供下载、删除、跨用户目录或任意磁盘根目录访问。
+
+Mac 与 Windows 共用 `adapters/file_session.rs` 的上传会话、分块、提交/取消和错误处理；平台文件适配器只实现目录读取、创建、写入、原子提交和清理。单文件上限 512 MiB，单块上限 64 KiB，每页最多 500 项；拒绝覆盖同名文件，取消或断开清理未完成文件，超时后明确提示刷新确认提交结果。
+
+Windows 使用 `windows-sys 0.61.2` 的 `WTSQueryUserToken` 取得活动控制台用户令牌，`GetUserProfileDirectoryW` 取得该用户目录，文件线程在每次操作期间调用 `ImpersonateLoggedOnUser` / `RevertToSelf`。不请求用户再次输入 Windows 密码，不使用 SYSTEM 身份执行路径操作。没有登录用户、权限不足或登录会话变更时明确报错；不切换到其他用户或 SYSTEM。登录身份改变后需要重新建立连接，不继续向原用户目录上传。服务 worker 显式启用查询用户令牌所需的 `SeTcbPrivilege`，文件访问仍受用户令牌 ACL 限制。
+
+Windows 对路径每一段以不跟随重解析点、不共享写入/删除的目录句柄固定；拒绝目录链接、junction、路径穿越、设备名和备用数据流。上传文件以用户权限创建，独占句柄持有到结束；按句柄执行不覆盖重命名或取消删除，避免路径被替换后写入/清理另一文件。Mac 保留 `openat` / `O_NOFOLLOW` 和不覆盖原子重命名实现。上传目标是用户在文件面板选择的目录；它不属于程序旁的配置/日志数据。
+
+官方依据：[WTSQueryUserToken](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsqueryusertoken)、[GetUserProfileDirectoryW](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-getuserprofiledirectoryw)、[线程用户身份](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-impersonateloggedonuser)、[恢复身份失败处理](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-reverttoself)、[文件共享和重解析标志](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)、[不覆盖重命名](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info)。这些 API 的官方支持不代表本轮已完成 Windows 实机验收。
 
 ## 平台能力与约束
 
@@ -418,7 +433,7 @@ SSH 就绪后，连续 30 秒没有桌面/终端 WebSocket 会话则关闭该 SS
 
 提供 `LanDeskTransport`（LocalService）与 `LanDeskServer`（LocalSystem）两项服务，桌面服务依赖通信服务。桌面工作进程位于活动控制台会话，通信通过 SYSTEM 所有的受保护命名管道，不通过本机 TCP。托盘/设置界面与后台服务分离，退出管理界面不停止远控。
 
-物理控制台可能与 RDP 会话不同；不自动登录、不修改系统账户或 RDP。支持 GDI/JPEG 采集、SendInput 和剪贴板；桌面文件访问与上传明确禁用，不暴露 LocalSystem 文件系统。普通输入失败时保留画面和选屏，显示警告；实际输入成功后撤销警告，不重放失败点击或文字。Ctrl+Alt+Delete 的 SendSAS 调用无效果回执，日志成功不代表登录界面必然响应。
+物理控制台可能与 RDP 会话不同；不自动登录、不修改系统账户或 RDP。支持 GDI/JPEG 采集、SendInput 和剪贴板；文件目录浏览与上传以活动控制台登录用户身份执行，根目录为该用户 profile，不暴露 LocalSystem 文件系统。普通输入失败时保留画面和选屏，显示警告；实际输入成功后撤销警告，不重放失败点击或文字。Ctrl+Alt+Delete 的 SendSAS 调用无效果回执，日志成功不代表登录界面必然响应。
 
 连接配置位于程序旁 `data/server/config/config.json`，包含 Argon2id、AES-GCM 密文、SSH 身份与内部密钥，限制普通用户读取。密码加密密钥使用共享本地文件方案。专用本机密码管道允许交互用户读取显示密码，拒绝远程客户端；界面校验 LocalService 管道所有者，不接收 SSH 私钥、密码加密密钥或内部密钥。
 
@@ -441,6 +456,8 @@ Windows 驱动使用上游 MttVDD 25.7.23 原始 DLL/INF/CAT，安装前核验 S
 ## Windows 安装、维护与诊断
 
 将 `LanDeskServer.exe` 放入独立文件夹后双击，管理员授权后在原目录注册两个后台服务。服务路径直接指向当前 EXE，不复制到 Program Files，也不依赖启动时的工作目录；配置、密钥、日志都在旁边的 `data/server/`。程序目录和 EXE 设置管理员/SYSTEM 写入权限，保护 SYSTEM 服务执行文件；不递归修改已有无关子文件权限。不能直接放在磁盘根目录。驱动与模板内嵌，无需系统 OpenSSH、PowerShell 或维护脚本；Driver Store 仍由 Windows 管理。防火墙规则仅放行该 EXE 的 SSH 入站端口。驱动提示重启时需重启后验收。
+
+安装持有维护锁时，仅当 `LanDeskServer` 和 `LanDeskTransport` 两项 SCM 登记都不存在，才检查并清理旧目录留下的防火墙、开机启动、快捷方式和卸载入口。必须匹配 LanDesk 专有标识及目标格式；旧 EXE 已删除也可清理，但不访问或删除旧目录、配置和其他文件。先验证全部入口，再修改；清理失败执行补偿并报告回滚错误。服务登记仍存在时继续采用严格路径归属检查，不让另一个目录接管。
 
 注册只有原目录路径：校验服务归属，移除本目录的服务登记及系统入口，再注册当前 EXE。已有连接配置、密钥和托盘选项继续使用；只有没有配置和密钥的首次启动才生成身份。配置损坏、密钥丢失或仅剩密钥时明确报错，不重建身份。失败逆序回滚本次系统组件及权限变更，保留 EXE、配置和日志，并报告回滚失败；不承诺恢复已清理的旧服务。
 
@@ -467,12 +484,13 @@ LanDeskServer.exe --status
 
 GPUI 0.3.8 的 Windows manifest 已声明 `PerMonitorV2`。桌面工作进程只验证 DPI 上下文，不再次调用 `SetProcessDpiAwarenessContext`；Windows 会拒绝重复设置，即使目标模式一致，错误码也是 `ERROR_ACCESS_DENIED`。发布流程用实际 release EXE 的 `--check-dpi` 检查 manifest 生效，不安装服务或创建数据。依据：[SetProcessDpiAwarenessContext](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setprocessdpiawarenesscontext)、[DPI 上下文比较](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-aredpiawarenesscontextsequal)。
 
-维护辅助进程以 `SW_SHOWNORMAL` 启动，并通过 `SEE_MASK_NO_CONSOLE` 避免新建控制台。不能使用 `SW_HIDE` 隐藏控制台：Windows 会将启动显示参数应用到第一次 `ShowWindow`，导致密码窗口隐藏、主窗口一直等待用户完成不可见的对话框。原生回归测试通过实际提权启动路径，在新进程中检查首次窗口可见及可关闭；不改密码或安装状态。依据：[ShowWindow 启动参数规则](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)、[ShellExecuteEx 参数](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)。
+`LanDeskServer.exe` 明确编译为 Windows GUI 子系统，从映像启动阶段避免主窗口、保存/刷新密码、安装和卸载辅助进程创建控制台；不再启动后调用 `FreeConsole`。打包脚本检查实际 PE 的 AMD64、PE32+ 和 GUI 子系统字段，拒绝控制台版本。维护辅助进程保留 `SW_SHOWNORMAL`；`SEE_MASK_NO_CONSOLE` 只表示继承父控制台，不能独立保证提权进程不弹黑窗。诊断工具 `LanDeskDisplay.exe` 保留控制台子系统。依据：[Rust windows_subsystem](https://doc.rust-lang.org/reference/runtime.html#the-windows_subsystem-attribute)、[PE 子系统定义](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)。不能使用 `SW_HIDE` 隐藏控制台：Windows 会将启动显示参数应用到第一次 `ShowWindow`，导致密码窗口隐藏、主窗口一直等待用户完成不可见的对话框。原生回归测试通过实际提权启动路径，在新进程中检查首次窗口可见及可关闭；不改密码或安装状态。依据：[ShowWindow 启动参数规则](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)、[ShellExecuteEx 参数](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)。
 
 ## 构建与验证
 
 ```sh
 python3 scripts/check_architecture.py
+python3 -m unittest discover -s scripts -p test_bundle_windows_display.py
 cargo fmt --all --check
 cargo test -p landesk-core -p landesk --locked
 cargo clippy --workspace --locked --all-targets -- -D warnings
@@ -508,6 +526,10 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanD
 验收必须覆盖：同机 Client/Server 共存、两条独立链路、旧端口已占用时 Client 可启动、跨目标隔离、网页凭证缺失/错误/失效、错误 Origin/Host、未知 subsystem/Shell/端口转发拒绝、入口失败后配置可编辑及重试、退出释放所有任务。UI 构建与协议测试不等于真实跨机桌面/键鼠验收。
 
 ## 版本依据与验证记录
+
+**0.7.0（2026-10-16）**：修正 Windows Server GUI 子系统和打包校验；增加无 SCM 登记时的旧入口清理及补偿；补齐 Windows 用户目录浏览/上传，拆分桌面与文件 WebSocket，复用两端上传会话。Client 和 Server 统一为 0.7.0，Client 同步放行文件连接，必须配套更新。新增功能按次版本发布。
+
+本机已验证：核心 29 项及契约 3 项；Mac Server 库 46 项及文件工作线程 1 项；Client 库 14 项及终端集成 7 项；网页 30 项；PE 打包校验 3 项；真实 Client → SSH → Server 的独立文件连接握手；文件连接独立维持 SSH、最后关闭后回收。Mac arm64 与 Windows x64 gnullvm 的 Client/Server 全目标 Clippy、格式、架构、UTF-8 和 diff 检查通过。新增 Windows 文件取消/不覆盖/路径边界/重解析点/线程身份及旧登记回滚测试已通过交叉编译，尚未在 Windows 运行；本轮未完成 MSVC CI、真实 Windows 上传、UAC 黑窗及残留安装实机验收，也未替换本机应用。
 
 **Server 0.6.0 Windows 管理界面改版，本地验证（2026-10-16，Windows 包待 CI 构建）**：Windows 与 Mac 共用 GPUI 连接输入行和状态栏；Windows 改为保存后重启生效。服务端库测试 45 项通过、1 项现有集成探针测试忽略；新增真实 SSH/WebSocket 测试覆盖保存期间连接继续通信、重启前旧密码有效、重启断开旧连接、新端口/密码启用。Mac 全目标和 Windows x64 gnullvm 交叉全目标 Clippy 通过。尚未验证 Windows 实机 GPUI、托盘隐藏启动、UAC、SCM 重启、卸载及 VDDPATH 驱动加载；交叉检查不代表 Windows MSVC 打包或实机运行通过。
 

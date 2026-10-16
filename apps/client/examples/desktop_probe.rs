@@ -2,6 +2,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
+use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use http_body_util::Empty;
 use hyper::Request;
@@ -128,6 +129,27 @@ async fn main() -> Result<()> {
             .insert("origin", format!("http://{address}").parse()?);
         request.headers_mut().insert("cookie", cookie.parse()?);
         let (mut socket, _) = connect_async(request).await?;
+        let mut files = format!("ws://{address}{path}files-ws").into_client_request()?;
+        files
+            .headers_mut()
+            .insert("origin", format!("http://{address}").parse()?);
+        files.headers_mut().insert("cookie", cookie.parse()?);
+        let (mut files, _) = connect_async(files).await?;
+        files
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"hello"}"#.into(),
+            ))
+            .await?;
+        let ready = files
+            .next()
+            .await
+            .context("file channel closed before ready")??
+            .into_text()?;
+        ensure!(
+            serde_json::from_str::<serde_json::Value>(&ready)?["type"] == "files_ready",
+            "independent file channel not ready"
+        );
+        files.close(None).await?;
         socket.close(None).await?;
         Ok::<_, anyhow::Error>(())
     })
@@ -141,7 +163,7 @@ async fn main() -> Result<()> {
     let _ = stop.send(());
     gateway.await??;
     println!(
-        "PASS: SSH subsystem, memory backend, browser credential exchange, assets, WebSocket, disconnect cleanup"
+        "PASS: SSH subsystem, memory backend, browser credential exchange, assets, independent desktop/file WebSockets, disconnect cleanup"
     );
     Ok(())
 }

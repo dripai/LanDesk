@@ -629,17 +629,22 @@ fn long_path(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(String::from_utf16(&buffer[..length])?))
 }
 pub(super) fn firewall(executable: &Path) -> Result<Option<INetFwRule>> {
+    if let Some(rule) = firewall_rule()? {
+        ensure!(
+            unsafe { rule.Grouping()? } == FW_GROUP
+                && unsafe { rule.ApplicationName()? }
+                    .to_string()
+                    .eq_ignore_ascii_case(&long_path(executable)?.to_string_lossy()),
+            "同名防火墙规则不属于当前 LanDesk 目录"
+        );
+        Ok(Some(rule))
+    } else {
+        Ok(None)
+    }
+}
+fn firewall_rule() -> Result<Option<INetFwRule>> {
     match unsafe { firewall_rules()?.Item(&BSTR::from(FW_NAME)) } {
-        Ok(rule) => {
-            ensure!(
-                unsafe { rule.Grouping()? } == FW_GROUP
-                    && unsafe { rule.ApplicationName()? }
-                        .to_string()
-                        .eq_ignore_ascii_case(&long_path(executable)?.to_string_lossy()),
-                "同名防火墙规则不属于 LanDesk"
-            );
-            Ok(Some(rule))
-        }
+        Ok(rule) => Ok(Some(rule)),
         Err(error) if error.code().0 as u32 == 0x80070002 => Ok(None),
         Err(error) => Err(error).context("读取防火墙规则"),
     }
@@ -686,6 +691,17 @@ pub(super) fn shortcut_path() -> Result<PathBuf> {
     }
 }
 pub(super) fn shortcut_owned(path: &Path, executable: &Path) -> Result<()> {
+    let (target, arguments) = shortcut_target(path)?;
+    ensure!(
+        long_path(&target)?
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&long_path(executable)?.to_string_lossy())
+            && arguments == "--settings",
+        "同名快捷方式不属于 LanDesk"
+    );
+    Ok(())
+}
+fn shortcut_target(path: &Path) -> Result<(PathBuf, String)> {
     plain_chain(path)?;
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
@@ -693,14 +709,13 @@ pub(super) fn shortcut_owned(path: &Path, executable: &Path) -> Result<()> {
         file.Load(PCWSTR(wide(&path.to_string_lossy()).as_ptr()), STGM_READ)?;
         let mut target = [0u16; 32768];
         link.GetPath(&mut target, null_mut(), SLGP_RAWPATH.0 as u32)?;
-        ensure!(
-            long_path(Path::new(&super::setup_services::string(target.as_ptr())?))?
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&long_path(executable)?.to_string_lossy()),
-            "同名快捷方式不属于 LanDesk"
-        );
+        let mut arguments = [0u16; 32768];
+        link.GetArguments(&mut arguments)?;
+        Ok((
+            PathBuf::from(super::setup_services::string(target.as_ptr())?),
+            super::setup_services::string(arguments.as_ptr())?,
+        ))
     }
-    Ok(())
 }
 pub(super) fn create_shortcut(path: &Path, executable: &Path) -> Result<()> {
     plain_chain(path)?;
@@ -714,6 +729,113 @@ pub(super) fn create_shortcut(path: &Path, executable: &Path) -> Result<()> {
             .with_context(|| format!("保存快捷方式: {}", path.display()))?;
     }
     Ok(())
+}
+
+fn orphan_executable(path: &Path, current: &Path) -> bool {
+    path.is_absolute()
+        && (path
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&current.to_string_lossy())
+            || path
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("LanDeskServer.exe")))
+}
+
+/// Called under the maintenance lock. Absence of BOTH service registrations is
+/// required: a second copy must never take over an existing installation.
+pub(super) fn cleanup_orphaned_entries(current: &Path) -> Result<()> {
+    use super::setup_services as scm;
+    if scm::open(scm::SERVER)?.is_some() || scm::open(scm::TRANSPORT)?.is_some() {
+        return Ok(());
+    }
+    let firewall = firewall_rule()?;
+    if let Some(rule) = &firewall {
+        let target = unsafe { rule.ApplicationName()? }.to_string();
+        ensure!(
+            unsafe { rule.Grouping()? } == FW_GROUP
+                && unsafe { rule.Description()? } == "LanDesk encrypted desktop"
+                && unsafe { rule.Protocol()? } == NET_FW_IP_PROTOCOL_TCP.0
+                && unsafe { rule.Direction()? } == NET_FW_RULE_DIR_IN
+                && orphan_executable(Path::new(&target), current),
+            "同名防火墙规则不是可识别的 LanDesk 残留，已保留：{target}"
+        );
+    }
+    let shortcut = shortcut_path()?;
+    let shortcut_backup = if shortcut.try_exists()? {
+        let (target, arguments) = shortcut_target(&shortcut)?;
+        ensure!(
+            orphan_executable(&target, current) && arguments == "--settings",
+            "同名快捷方式不是可识别的 LanDesk 残留，已保留"
+        );
+        Some((std::fs::read(&shortcut)?, Security::read(&shortcut)?))
+    } else {
+        None
+    };
+    let startup = read(RUN, scm::SERVER)?;
+    if let Some(value) = &startup {
+        let command = decode(value)?;
+        let target = command
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix("\" --startup-ui"))
+            .context("启动入口不是可识别的 LanDesk 残留，已保留")?;
+        ensure!(
+            orphan_executable(Path::new(target), current),
+            "启动入口目标不属于 LanDesk，已保留"
+        );
+    }
+    let uninstall = if registry_exists(UNINSTALL)? {
+        let value = |name| -> Result<String> {
+            decode(&read(UNINSTALL, name)?.context("卸载入口字段缺失，已保留")?)
+        };
+        let target = PathBuf::from(value("DisplayIcon")?);
+        ensure!(
+            value("DisplayName")? == "LanDeskServer"
+                && value("Publisher")? == "LanDesk"
+                && orphan_executable(&target, current)
+                && target.parent() == Some(Path::new(&value("InstallLocation")?))
+                && value("UninstallString")? == format!("\"{}\" --uninstall", target.display()),
+            "同名卸载入口不是可识别的 LanDesk 残留，已保留"
+        );
+        Some(uninstall_snapshot(
+            target.parent().context("卸载路径缺失")?,
+        )?)
+    } else {
+        None
+    };
+    // Validate every entry before making any change, then roll back a failed
+    // cleanup. Never access or remove the old program/configuration directories.
+    let mut tx = landesk_core::application::maintenance::Transaction::new();
+    let result = (|| {
+        if let Some(rule) = firewall {
+            tx.record("旧防火墙规则", move || {
+                unsafe {
+                    firewall_rules()?.Add(&rule)?;
+                }
+                Ok(())
+            });
+            remove_firewall()?;
+        }
+        if let Some(value) = startup {
+            tx.record("旧启动入口", move || {
+                put(RUN, scm::SERVER, Some(&value))
+            });
+            put(RUN, scm::SERVER, None)?;
+        }
+        if let Some((bytes, security)) = shortcut_backup {
+            let path = shortcut.clone();
+            tx.record("旧快捷方式", move || {
+                std::fs::write(&path, bytes)?;
+                security.restore(&path)
+            });
+            std::fs::remove_file(&shortcut)?;
+        }
+        if let Some(snapshot) = uninstall {
+            tx.record("旧卸载入口", move || snapshot.restore());
+            delete_key(UNINSTALL)?;
+        }
+        Ok(())
+    })();
+    result.map_err(|error| tx.rollback(error))
 }
 pub(super) fn verify_catalog(path: &Path) -> Result<()> {
     let name = wide(&path.to_string_lossy());
@@ -830,6 +952,109 @@ pub(super) fn close_installed_processes(executable: &Path, launcher: u32) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "Requires Windows administrator and clean machine; only tests stopped service and orphan registrations"]
+    fn native_setup_orphan_entries_accept_missing_old_exe_and_preserve_foreign_entries()
+    -> Result<()> {
+        use super::super::setup_services as scm;
+        let _com = Com::new()?;
+        let fixture = tempfile::tempdir()?;
+        let old = fixture.path().join("old");
+        let current = fixture.path().join("new");
+        std::fs::create_dir(&old)?;
+        std::fs::create_dir(&current)?;
+        let old_exe = old.join("LanDeskServer.exe");
+        let current_exe = current.join("LanDeskServer.exe");
+        std::fs::copy(std::env::current_exe()?, &old_exe)?;
+        std::fs::copy(std::env::current_exe()?, &current_exe)?;
+        let shortcut = shortcut_path()?;
+        ensure!(
+            scm::open(scm::SERVER)?.is_none()
+                && scm::open(scm::TRANSPORT)?.is_none()
+                && firewall_rule()?.is_none()
+                && !shortcut.exists()
+                && read(RUN, scm::SERVER)?.is_none()
+                && !registry_exists(UNINSTALL)?,
+            "Real installation exists; test refused"
+        );
+        let result = (|| {
+            add_firewall(&old_exe, 2222)?;
+            create_shortcut(&shortcut, &old_exe)?;
+            register_uninstall(&old_exe)?;
+            put(
+                RUN,
+                scm::SERVER,
+                Some(&text(&format!("\"{}\" --startup-ui", old_exe.display()))),
+            )?;
+            std::fs::write(old.join("user-data.txt"), "keep")?;
+            drop(scm::create(&old_exe, scm::TRANSPORT, true, None)?);
+            cleanup_orphaned_entries(&current_exe)?;
+            ensure!(
+                firewall_rule()?.is_some() && shortcut.exists() && registry_exists(UNINSTALL)?,
+                "Touched registered installation"
+            );
+            scm::delete(scm::TRANSPORT)?;
+            let rule = firewall_rule()?.context("Missing test rule")?;
+            unsafe {
+                rule.SetGrouping(&BSTR::from("Unrelated product"))?;
+            }
+            ensure!(
+                cleanup_orphaned_entries(&current_exe).is_err(),
+                "Deleted foreign rule"
+            );
+            ensure!(
+                shortcut.exists()
+                    && registry_exists(UNINSTALL)?
+                    && read(RUN, scm::SERVER)?.is_some(),
+                "Partially deleted entries before validation"
+            );
+            unsafe {
+                rule.SetGrouping(&BSTR::from(FW_GROUP))?;
+            }
+            // A subkey makes RegDeleteKey fail after other entries were removed.
+            // Verify the real cleanup transaction restores those entries.
+            let child = format!(r"{UNINSTALL}\TestRollback");
+            put(&child, "Keep", Some(&text("untouched")))?;
+            let failed = cleanup_orphaned_entries(&current_exe);
+            let restored = firewall_rule()?.is_some()
+                && shortcut.exists()
+                && read(RUN, scm::SERVER)?.is_some()
+                && read(&child, "Keep")? == Some(text("untouched"));
+            delete_key(&child)?;
+            ensure!(
+                failed.is_err() && restored,
+                "Cleanup did not roll back after a registry failure"
+            );
+            std::fs::remove_file(&old_exe)?;
+            cleanup_orphaned_entries(&current_exe)?;
+            ensure!(
+                firewall_rule()?.is_none()
+                    && !shortcut.exists()
+                    && !registry_exists(UNINSTALL)?
+                    && read(RUN, scm::SERVER)?.is_none(),
+                "Orphans remain"
+            );
+            ensure!(
+                std::fs::read_to_string(old.join("user-data.txt"))? == "keep",
+                "Old user data changed"
+            );
+            cleanup_orphaned_entries(&current_exe)?;
+            add_firewall(&current_exe, 2223)?;
+            ensure!(
+                firewall(&current_exe)?.is_some(),
+                "New location cannot register firewall"
+            );
+            Ok(())
+        })();
+        scm::delete(scm::TRANSPORT)?;
+        remove_firewall()?;
+        put(RUN, scm::SERVER, None)?;
+        delete_key(UNINSTALL)?;
+        if shortcut.exists() {
+            std::fs::remove_file(shortcut)?;
+        }
+        result
+    }
     #[test]
     #[ignore = "Requires Windows administrator; creates and removes a unique test registry key"]
     fn native_setup_registry_restores_existing_values_and_removes_new_key() -> Result<()> {

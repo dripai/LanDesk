@@ -252,6 +252,7 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route("/ws", get(upgrade))
+        .route("/files-ws", get(upgrade_files))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             transport_auth,
@@ -287,6 +288,21 @@ async fn upgrade(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    upgrade_channel(state, headers, upgrade, false).await
+}
+async fn upgrade_files(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    upgrade_channel(state, headers, upgrade, true).await
+}
+async fn upgrade_channel(
+    state: AppState,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+    files: bool,
+) -> Response {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
@@ -306,7 +322,17 @@ async fn upgrade(
             tokio::pin!(closed);
             let shared = state.shared.clone();
             let (result, transport_done) = tokio::select! {
-                result = session(&mut socket, state) => (result, false),
+                result = async {
+                    if files {
+                        ensure!(state.native.supports_files(), "服务端未提供文件访问");
+                        let Some(Message::Text(hello)) = socket.recv().await else { bail!("请先建立文件会话") };
+                        ensure!(matches!(serde_json::from_str::<ClientMessage>(&hello)?, ClientMessage::Hello { display: None }), "文件会话握手无效");
+                        send_json(&mut socket, serde_json::json!({"type":"files_ready"})).await?;
+                        file_commands(&mut socket, state.files.connect()).await
+                    } else {
+                        session(&mut socket, state).await
+                    }
+                } => (result, false),
                 result = &mut closed => (result, true),
                 _ = wait_for_shutdown(&shared) => (Ok(()), false),
             };
@@ -339,6 +365,26 @@ async fn send_json(socket: &mut SessionSocket, value: impl serde::Serialize) -> 
         .send(Message::Text(serde_json::to_string(&value)?.into()))
         .await?;
     Ok(())
+}
+
+// A separate authenticated connection: file IO and backpressure never share
+// the desktop control/capture queues. It does not acquire the input lease.
+async fn file_commands(socket: &mut SessionSocket, mut files: FileChannel) -> Result<()> {
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                let request = match incoming {
+                    Some(Message::Text(text)) => FileRequest::Message(serde_json::from_str::<ClientMessage>(&text)?.try_into()?),
+                    Some(Message::Binary(data)) => FileRequest::Chunk(data.to_vec()),
+                    Some(Message::Ping(value)) => { socket.send(Message::Pong(value)).await?; continue; },
+                    Some(Message::Pong(_)) => continue,
+                    Some(Message::Close(_)) | None => return Ok(()),
+                };
+                if let Some(response) = files.submit(request) { send_json(socket, response).await?; }
+            },
+            response = files.response() => send_json(socket, response).await?,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -427,7 +473,7 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
     let updates = socket.outgoing.clone();
     let display = state.shared.display.clone();
     tokio::select! {
-        result = control_loop(socket, &state, state.files.connect(), &mut frames, sequence, input_status,
+        result = control_loop(socket, &state, &mut frames, sequence, input_status,
             |change| capture.configure(change)) => result?,
         result = async {
             loop {
@@ -448,7 +494,6 @@ async fn session(socket: &mut SessionSocket, state: AppState) -> Result<()> {
 async fn control_loop(
     socket: &mut SessionSocket,
     state: &AppState,
-    files: FileChannel,
     frames: &mut tokio::sync::watch::Receiver<Option<FrameEvent>>,
     sequence: u64,
     input_status: InputStatus,
@@ -456,7 +501,7 @@ async fn control_loop(
 ) -> Result<()> {
     let output = socket.frames.clone();
     tokio::select! {
-        result = control_commands(socket, state, files, input_status, configure) => result,
+        result = control_commands(socket, state, input_status, configure) => result,
         result = async {
             let mut last_sequence = sequence;
             loop {
@@ -477,7 +522,6 @@ async fn control_loop(
 async fn control_commands(
     socket: &mut SessionSocket,
     state: &AppState,
-    mut files: FileChannel,
     mut input_status: InputStatus,
     mut configure: impl FnMut(Change) -> BoxFuture<'static, Result<CaptureInfo>>,
 ) -> Result<()> {
@@ -549,11 +593,7 @@ async fn control_commands(
                                     send_json(socket,serde_json::json!({"type":"resolution_error","message":format!("{error:#}")})).await?;
                                 }
                             }
-                            message @ (ClientMessage::ListDirectory { .. } | ClientMessage::UploadStart { .. } | ClientMessage::UploadFinish { .. } | ClientMessage::UploadCancel { .. }) => {
-                                if let Some(response) = files.submit(FileRequest::Message(message.try_into()?)) {
-                                    send_json(socket,response).await?;
-                                }
-                            }
+                            ClientMessage::ListDirectory { .. } | ClientMessage::UploadStart { .. } | ClientMessage::UploadFinish { .. } | ClientMessage::UploadCancel { .. } => bail!("文件操作须通过独立文件连接"),
                             other => {
                                 let can_recover = actionable_input(&other);
                                 if let Some(status) = input_status.observe(state.native.input(other.try_into()?).await, can_recover) {
@@ -565,17 +605,12 @@ async fn control_commands(
                     Message::Close(_) => break,
                     Message::Ping(value) => { socket.send(Message::Pong(value)).await?; }
                     Message::Pong(_) => {}
-                    Message::Binary(data) => {
-                        if let Some(response) = files.submit(FileRequest::Chunk(data.to_vec())) {
-                            send_json(socket,response).await?;
-                        }
-                    }
+                    Message::Binary(_) => bail!("文件上传须通过独立文件连接"),
                 }
             }
-            response = files.response() => send_json(socket,response).await?,
             _ = tick.tick() => {
                 images.expire();
-                ensure!(!state.shared.shutdown.load(Ordering::Acquire),"Mac 已停止服务");
+                ensure!(!state.shared.shutdown.load(Ordering::Acquire),"服务端已停止服务");
             }
         }
     }
@@ -701,6 +736,156 @@ mod access_tests {
         fn open_session(self: Arc<Self>, _: Arc<AtomicBool>) -> Box<dyn FileSession> {
             panic!("files must not open")
         }
+    }
+
+    struct CountingFiles(Arc<AtomicUsize>);
+    impl FileBackend for CountingFiles {
+        fn open_session(self: Arc<Self>, _: Arc<AtomicBool>) -> Box<dyn FileSession> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::new(CountingFiles(self.0.clone()))
+        }
+    }
+    impl FileSession for CountingFiles {
+        fn message(
+            &mut self,
+            message: landesk_core::domain::FileCommand,
+        ) -> landesk_core::domain::FileResponse {
+            landesk_core::domain::FileResponse::Directory {
+                id: message.id(),
+                root: "user".into(),
+                path: "".into(),
+                entries: vec![],
+                next_cursor: None,
+            }
+        }
+        fn chunk(&mut self, _: &[u8]) -> landesk_core::domain::FileResponse {
+            panic!("unexpected chunk")
+        }
+    }
+    #[tokio::test]
+    async fn file_channel_checks_credentials_origin_and_handshake_without_touching_desktop() {
+        let opened = Arc::new(AtomicUsize::new(0));
+        let native = Arc::new(Gate {
+            permissions: AtomicUsize::new(0),
+            restored: AtomicUsize::new(0),
+        });
+        let shared = Arc::new(Shared::default());
+        shared.active.store(true, Ordering::Release);
+        let state = AppState {
+            native: native.clone(),
+            shared: shared.clone(),
+            transport_key: landesk_core::security::transport_key::TransportKey::new(
+                "test-key".into(),
+            )
+            .unwrap(),
+            capture: CaptureService::new(|| Box::new(NoCapture)).unwrap(),
+            files: FileService::new(CountingFiles(opened.clone())),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let request = |key: &str, origin: &str| {
+            let mut request = format!("ws://{addr}/files-ws")
+                .into_client_request()
+                .unwrap();
+            request
+                .headers_mut()
+                .insert("host", "landesk.internal".parse().unwrap());
+            request
+                .headers_mut()
+                .insert("origin", origin.parse().unwrap());
+            request
+                .headers_mut()
+                .insert(crate::adapters::ssh::AUTH_HEADER, key.parse().unwrap());
+            request
+        };
+        for (key, origin, status) in [
+            ("wrong", "http://landesk.internal", 401),
+            ("test-key", "http://foreign.invalid", 403),
+        ] {
+            let error = connect_async(request(key, origin)).await.unwrap_err();
+            let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+                panic!("{error}")
+            };
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(opened.load(Ordering::SeqCst), 0);
+        }
+        let (mut invalid, _) = connect_async(request("test-key", "http://landesk.internal"))
+            .await
+            .unwrap();
+        invalid
+            .send(WsMessage::Text(
+                r#"{"type":"list_directory","id":1,"path":""}"#.into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            invalid
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .contains("error")
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 0);
+        let (mut files, _) = connect_async(request("test-key", "http://landesk.internal"))
+            .await
+            .unwrap();
+        files
+            .send(WsMessage::Text(r#"{"type":"hello"}"#.into()))
+            .await
+            .unwrap();
+        assert!(
+            files
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .contains("files_ready")
+        );
+        files
+            .send(WsMessage::Text(
+                r#"{"type":"list_directory","id":1,"path":""}"#.into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            files
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .contains("directory")
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 1);
+        files
+            .send(WsMessage::Text(
+                r#"{"type":"key","key":"a","down":true}"#.into(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            files
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap()
+                .contains("error")
+        );
+        assert!(shared.active.load(Ordering::Acquire));
+        assert_eq!(native.permissions.load(Ordering::SeqCst), 0);
+        assert_eq!(native.restored.load(Ordering::SeqCst), 0);
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1044,18 +1229,19 @@ mod tests {
         let (files, started, release) = state.files.blocked_channel();
         let (frames, receiver) = tokio::sync::watch::channel(None);
         let (finished, done) = tokio::sync::oneshot::channel();
-        let context = Arc::new(std::sync::Mutex::new(Some((files, receiver, finished))));
+        let file_context = Arc::new(std::sync::Mutex::new(Some(files)));
+        let context = Arc::new(std::sync::Mutex::new(Some((receiver, finished))));
         let app = Router::new().route(
             "/ws",
             get(move |upgrade: WebSocketUpgrade| {
                 let state = state.clone();
-                let (files, mut receiver, finished) = context.lock().unwrap().take().unwrap();
+                let (mut receiver, finished) = context.lock().unwrap().take().unwrap();
                 async move {
                     upgrade.on_upgrade(move |socket| async move {
                         let (mut socket, closed) = monitor_connection(socket);
                         let guard = ControlSession::acquire(state.native.clone(), state.shared.clone()).unwrap();
                         let result = tokio::select! {
-                            result = control_loop(&mut socket, &state, files, &mut receiver, 0, InputStatus::default(), |_| {
+                            result = control_loop(&mut socket, &state, &mut receiver, 0, InputStatus::default(), |_| {
                                 Box::pin(async { Ok(CaptureInfo::default()) })
                             }) => result,
                             result = closed => result,
@@ -1063,6 +1249,18 @@ mod tests {
                         drop(guard);
                         let _ = finished.send(result);
                     })
+                }
+            }),
+        );
+        let app = app.route(
+            "/files-ws",
+            get(move |upgrade: WebSocketUpgrade| {
+                let files = file_context.lock().unwrap().take().unwrap();
+                async move {
+                    upgrade.on_upgrade(move |socket| async move {
+                let (mut socket, closed) = monitor_connection(socket);
+                tokio::select! { _ = file_commands(&mut socket, files) => {}, _ = closed => {} }
+            })
                 }
             }),
         );
@@ -1074,11 +1272,15 @@ mod tests {
         let (mut ws, _) = connect_async(request(addr, "http://landesk.internal"))
             .await
             .unwrap();
-        ws.send(WsMessage::Text(
-            r#"{"type":"list_directory","id":1,"path":""}"#.into(),
-        ))
-        .await
-        .unwrap();
+        let mut file_request = request(addr, "http://landesk.internal");
+        *file_request.uri_mut() = format!("ws://{addr}/files-ws").parse().unwrap();
+        let (mut file_ws, _) = connect_async(file_request).await.unwrap();
+        file_ws
+            .send(WsMessage::Text(
+                r#"{"type":"list_directory","id":1,"path":""}"#.into(),
+            ))
+            .await
+            .unwrap();
         started.await.unwrap();
         ws.send(WsMessage::Text(r#"{"type":"heartbeat"}"#.into()))
             .await
@@ -1115,7 +1317,7 @@ mod tests {
                     .unwrap();
             }
             EndConnection::NoHeartbeat => {
-                let message = tokio::time::timeout(Duration::from_secs(12), ws.next())
+                let message = tokio::time::timeout(Duration::from_secs(12), file_ws.next())
                     .await
                     .unwrap()
                     .unwrap()
@@ -1177,7 +1379,7 @@ mod tests {
                 let (mut socket, closed) = monitor_connection(socket);
                 let guard = ControlSession::acquire(state.native.clone(), state.shared.clone()).unwrap();
                 let result = tokio::select! {
-                    result = control_loop(&mut socket, &state, state.files.connect(), &mut receiver, 0, InputStatus::default(),
+                    result = control_loop(&mut socket, &state, &mut receiver, 0, InputStatus::default(),
                         |_| Box::pin(async { Ok(CaptureInfo::default()) })) => result,
                     result = closed => result,
                 };
@@ -1252,7 +1454,7 @@ mod tests {
                 let (mut socket, closed) = monitor_connection(socket);
                 let guard = ControlSession::acquire(state.native.clone(), state.shared.clone()).unwrap();
                 let result = tokio::select! {
-                    result = control_loop(&mut socket, &state, state.files.connect(), &mut receiver, 0, InputStatus::default(),
+                    result = control_loop(&mut socket, &state, &mut receiver, 0, InputStatus::default(),
                         move |_| { switched.fetch_add(1, Ordering::SeqCst); Box::pin(async { Ok(CaptureInfo::default()) }) }) => result,
                     result = closed => result,
                 };

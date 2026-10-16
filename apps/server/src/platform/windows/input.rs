@@ -11,8 +11,6 @@ use landesk_core::application::runtime::Shared;
 use landesk_core::domain::Capabilities;
 use landesk_core::domain::InputEvent;
 use landesk_core::ports::DesktopControl;
-use landesk_core::ports::FileBackend;
-use landesk_core::ports::FileSession;
 use landesk_core::protocol::MAX_TEXT_BYTES;
 use landesk_core::protocol::pointer_position;
 use std::collections::BTreeSet;
@@ -442,7 +440,7 @@ impl DesktopControl for WindowsControl {
         }
     }
     fn supports_files(&self) -> bool {
-        false
+        true
     }
     fn check_permissions(&self) -> Result<()> {
         service::require_system_console()
@@ -474,33 +472,6 @@ impl DesktopControl for WindowsControl {
     }
     fn secure_attention(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { service::request_sas() })
-    }
-}
-
-// Never expose LocalSystem's filesystem through the user's file panel.
-pub struct NoFiles;
-impl FileBackend for NoFiles {
-    fn open_session(self: Arc<Self>, _: Arc<AtomicBool>) -> Box<dyn FileSession> {
-        Box::new(NoFiles)
-    }
-}
-impl FileSession for NoFiles {
-    fn message(
-        &mut self,
-        message: landesk_core::domain::FileCommand,
-    ) -> landesk_core::domain::FileResponse {
-        landesk_core::domain::FileResponse::FileError {
-            id: message.id(),
-            message: "Windows 桌面服务不提供 SYSTEM 文件访问".into(),
-            upload_active: false,
-        }
-    }
-    fn chunk(&mut self, _: &[u8]) -> landesk_core::domain::FileResponse {
-        landesk_core::domain::FileResponse::FileError {
-            id: 0,
-            message: "Windows 桌面服务不提供文件上传".into(),
-            upload_active: false,
-        }
     }
 }
 

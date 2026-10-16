@@ -22,6 +22,8 @@ test('upload waits for the directory response before accepting a destination', a
     replaceChildren(...nodes) { this.children = nodes; }
     get childElementCount() { return this.children.length; }
     getBoundingClientRect() { return {width:280}; }
+    setPointerCapture() {}
+    focus() {}
     querySelectorAll() { return []; }
   }
   const nodes = new Map();
@@ -33,7 +35,8 @@ test('upload waits for the directory response before accepting a destination', a
   globalThis.document = {getElementById:node,createElement:()=>new Node(),createElementNS:()=>new Node()};
   globalThis.window = new EventTarget();
   const sent=[], notices=[];
-  const files = createFiles(panel, message=>sent.push(message), ()=>{}, message=>notices.push(message), {initialVisible:true});
+  let releases = 0;
+  const files = createFiles(panel, message=>sent.push(message), ()=>{}, message=>notices.push(message), {initialVisible:true,releaseInput:()=>releases++});
   try {
     files.connect();
     assert.equal(node('upload-files').disabled,true);
@@ -44,6 +47,10 @@ test('upload waits for the directory response before accepting a destination', a
     files.handle({type:'directory',id:sent[0].id,root:'/',path:'tmp/new-dir',entries:[],next_cursor:null});
     await Promise.resolve();
     assert.equal(node('upload-files').disabled,false);
+    const drag = new Event('pointerdown'); Object.assign(drag,{button:0,clientX:100,pointerId:1});
+    node('files-resizer').dispatchEvent(drag);
+    assert.equal(releases,1);
+    assert.ok(!sent.some(message=>message.type==='release_all'));
     node('file-picker').dispatchEvent(new Event('change'));
     assert.equal(sent[1].type,'upload_start');
     assert.equal(sent[1].path,'tmp/new-dir');

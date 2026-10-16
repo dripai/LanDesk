@@ -97,7 +97,7 @@ impl Worker {
         // even after disconnect. Reconnecting cannot accumulate blocked threads.
         let permit = slots
             .try_acquire_owned()
-            .context("文件访问仍在等待系统响应，请处理 Mac 上的授权弹窗后重试；远控可继续使用")?;
+            .context("文件访问仍在等待系统响应，请稍后重试；远控可继续使用")?;
         let (sender, receiver) = mpsc::sync_channel::<Job>(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
@@ -215,7 +215,7 @@ impl FileChannel {
                 self.worker = None;
                 self.upload_id = None;
                 let message = if error.is_err() {
-                    "文件操作超时，可能正在等待 Mac 文件访问授权；请处理系统弹窗后刷新目录。远控可继续使用，未完成上传将取消；若刚提交完成上传，请刷新确认结果"
+                    "文件操作超时，请检查被控端的文件权限或系统提示后刷新目录。远控可继续使用，未完成上传将取消；若刚提交完成上传，请刷新确认结果"
                 } else {
                     "文件工作线程已停止，请重试"
                 };

@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(windows)]
 fn main() -> anyhow::Result<()> {
     if std::env::current_exe()?.file_name().is_some_and(|name| {

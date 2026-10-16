@@ -88,9 +88,6 @@ pub fn install(launcher: u32) -> Result<()> {
     result
 }
 pub fn request_uninstall() -> Result<()> {
-    unsafe {
-        windows_sys::Win32::System::Console::FreeConsole();
-    }
     let result = ui::elevated(
         null_mut(),
         &std::env::current_exe()?,

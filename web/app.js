@@ -8,6 +8,7 @@ const $ = id => document.getElementById(id);
 const serverName = new URLSearchParams(location.hash.slice(1)).get('name');
 if (serverName) document.title = `${serverName} · LanDesk`;
 let socket = null, heartbeat = null, lastMove = 0, inputWarning = '';
+let fileSocket = null, fileAspect = 1.6;
 const frames = createFrames($('screen'), end);
 const send = value => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
 function notify(message) {
@@ -22,15 +23,49 @@ const imagePaste = createImagePaste(value => {
 }, notify);
 const keyboard = createKeyboard($('keyboard-input'), send, notify, imagePaste.paste, () => copyClipboard(true));
 const files = createFiles($('files-panel'), value => {
-  if (socket?.readyState !== WebSocket.OPEN) throw new Error('连接已断开');
-  send(value);
+  if (fileSocket?.readyState !== WebSocket.OPEN) throw new Error('文件连接已断开');
+  fileSocket.send(JSON.stringify(value));
 }, data => {
-  if (socket?.readyState !== WebSocket.OPEN) throw new Error('连接已断开');
-  socket.send(data);
-}, notify);
+  if (fileSocket?.readyState !== WebSocket.OPEN) throw new Error('文件连接已断开');
+  fileSocket.send(data);
+}, notify, {initialVisible:true, releaseInput:releaseAll});
+function closeFiles() {
+  if (fileSocket) {
+    const old = fileSocket; fileSocket = null;
+    old.onclose = null; old.onerror = null; old.onmessage = null; old.close();
+  }
+  files.reset();
+}
+function connectFiles() {
+  closeFiles();
+  const url = new URL('./files-ws', location.href);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; url.hash = ''; url.search = '';
+  const connection = new WebSocket(url); fileSocket = connection;
+  const failed = message => {
+    if (fileSocket !== connection) return;
+    closeFiles(); notify(`${message}；远控可继续使用，点击文件按钮重连`);
+  };
+  connection.onopen = () => {
+    if (fileSocket === connection) connection.send(JSON.stringify({type:'hello'}));
+  };
+  connection.onmessage = event => {
+    if (fileSocket !== connection) return;
+    try {
+      const message = JSON.parse(event.data);
+      if (message.type === 'files_ready') files.connect(fileAspect);
+      else if (message.type === 'error') failed(message.message);
+      else files.handle(message);
+    } catch { failed('文件响应无效'); }
+  };
+  connection.onerror = () => failed('文件连接失败');
+  connection.onclose = () => failed('文件连接已断开');
+}
 let clipboardRequest = null, clipboardSequence = 0;
 let nativeWidth = 0, nativeHeight = 0, resolutionWidth = null, resolutionTimer = null;
-$('files-button').addEventListener('click', () => files.toggle());
+$('files-button').addEventListener('click', () => {
+  if (!fileSocket && socket?.readyState === WebSocket.OPEN) connectFiles();
+  else files.toggle();
+});
 $('secure-attention').addEventListener('click', () => { releaseAll(); send({type:'secure_attention'}); });
 $('clipboard-paste').addEventListener('click', async () => {
   const connection = socket;
@@ -69,7 +104,7 @@ function end(message) {
   inputWarning = ''; clearTimeout(notify.timer);
   clearInterval(heartbeat); heartbeat=null;
   if(socket) { const old=socket; socket=null; old.onclose=null; old.onerror=null; old.close(); }
-  keyboard.clear(); files.reset(); imagePaste.reset();
+  keyboard.clear(); closeFiles(); imagePaste.reset();
   if (clipboardRequest) clearTimeout(clipboardRequest.timer);
   clipboardRequest = null; $('clipboard-copy').disabled = false;
   $('notice').hidden = true;
@@ -92,7 +127,7 @@ function updateDisplay(message) {
   select.value = message.display_id;
   $('resolution-width').max = nativeWidth;
   for (const option of $('resolution-mode').options) if (/^\d+$/.test(option.value)) option.disabled = Number(option.value) > nativeWidth;
-  files.resize(message.width / message.height);
+  fileAspect = message.width / message.height; files.resize(fileAspect);
 }
 $('display-select').addEventListener('change', () => {
   releaseAll(); send({type:'set_display', display_id:Number($('display-select').value)});
@@ -143,7 +178,6 @@ function connect() {
     }
     if (message.type === 'notice') { notify(message.message); return; }
     if(imagePaste.handle(message)) return;
-    if(files.handle(message)) return;
     if(message.type === 'clipboard_text' || message.type === 'clipboard_error') {
       if(clipboardRequest?.id !== message.id) return;
       const request = clipboardRequest;
@@ -180,7 +214,7 @@ function connect() {
 
       $('resolution-width').max = nativeWidth;
       for (const option of $('resolution-mode').options) if (/^\d+$/.test(option.value)) option.disabled = Number(option.value) > nativeWidth;
-      if (message.capabilities.files !== false) files.connect(message.width / message.height);
+      if (message.capabilities.files !== false) connectFiles();
     }
 
   };
@@ -204,7 +238,7 @@ $('screen').addEventListener('pointercancel',releaseAll);
 $('screen').addEventListener('contextmenu',e=>e.preventDefault());
 $('screen').addEventListener('wheel',e=>{ e.preventDefault(); send({type:'wheel',x:Math.max(-10,Math.min(10,Math.round(e.deltaX/40))),y:Math.max(-10,Math.min(10,Math.round(e.deltaY/40)))}); },{passive:false});
 window.addEventListener('blur',releaseAll);
-window.addEventListener('pagehide',()=>{ releaseAll(); send({type:'disconnect'}); socket?.close(); });
+window.addEventListener('pagehide',()=>{ releaseAll(); send({type:'disconnect'}); socket?.close(); closeFiles(); });
 $('text-button').addEventListener('click',()=>{ releaseAll(); $('text-dialog').showModal(); $('text').focus(); });
 $('text-cancel').addEventListener('click',()=>$('text-dialog').close());
 $('text-form').addEventListener('submit',e=>{ e.preventDefault(); keyboard.text($('text').value); $('text').value=''; $('text-dialog').close(); keyboard.focus(); });

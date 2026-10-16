@@ -527,6 +527,8 @@ pub(super) fn install(launcher: u32) -> Result<()> {
     let result = (|| {
         let _com = os::Com::new()?;
         let progress = dialog::Progress::new("正在安装 LanDeskServer")?;
+        progress.stage("检查已失去服务登记的 LanDesk 残留…")?;
+        os::cleanup_orphaned_entries(&paths.exe)?;
         remove_installation(&paths, false, launcher, |stage| {
             progress.stage(stage.text())
         })

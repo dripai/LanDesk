@@ -2,6 +2,7 @@
 mod bootstrap;
 mod capture;
 mod desktop;
+mod files;
 mod input;
 mod interactive;
 mod management;

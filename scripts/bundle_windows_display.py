@@ -19,8 +19,14 @@ def validate_executable(path):
     if len(binary) < 64 or binary[:2] != b"MZ":
         raise ValueError(f"Expected a Windows x64 executable: {path}")
     offset = struct.unpack_from("<I", binary, 60)[0]
-    if offset + 6 > len(binary) or binary[offset:offset + 4] != b"PE\0\0" or struct.unpack_from("<H", binary, offset + 4)[0] != 0x8664:
+    if offset + 24 > len(binary) or binary[offset:offset + 4] != b"PE\0\0" or struct.unpack_from("<H", binary, offset + 4)[0] != 0x8664:
         raise ValueError(f"Expected an AMD64 PE executable: {path}")
+    optional_size = struct.unpack_from("<H", binary, offset + 20)[0]
+    optional = offset + 24
+    if optional_size < 70 or optional + optional_size > len(binary) or struct.unpack_from("<H", binary, optional)[0] != 0x20b:
+        raise ValueError(f"Expected a complete PE32+ optional header: {path}")
+    if struct.unpack_from("<H", binary, optional + 68)[0] != 2:
+        raise ValueError(f"Server must use the Windows GUI subsystem to prevent console flashes: {path}")
 
 
 def main():

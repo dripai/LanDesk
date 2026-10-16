@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use tokio::time::Duration;
 use tokio::time::timeout;
 
-// Forward HTTP using its framing, then relay an accepted /ws upgrade unchanged.
+// Forward HTTP, then independently relay desktop or file WebSocket upgrades.
 // HTTP keep-alive sockets and failed upgrade requests never keep SSH alive.
 pub async fn forward<L, R>(local: L, remote: R, activity: watch::Sender<Activity>) -> Result<()>
 where
@@ -38,7 +38,7 @@ where
         let activity = activity.clone();
         async move {
             let is_viewer = request.method() == hyper::Method::GET
-                && request.uri().path() == "/ws"
+                && matches!(request.uri().path(), "/ws" | "/files-ws")
                 && request
                     .headers()
                     .get(hyper::header::UPGRADE)
@@ -49,7 +49,7 @@ where
                 sender.lock().await.send_request(request),
             )
             .await
-            .context("Mac 网页响应超时")??;
+            .context("服务端网页响应超时")??;
             if response.status() == StatusCode::SWITCHING_PROTOCOLS {
                 let local_upgrade = local_upgrade.context("不支持的协议升级")?;
                 let remote_upgrade = hyper::upgrade::on(&mut response);

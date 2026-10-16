@@ -424,9 +424,6 @@ impl Render for Panel {
     }
 }
 pub fn run(startup: bool) -> Result<()> {
-    unsafe {
-        windows_sys::Win32::System::Console::FreeConsole();
-    }
     crate::diagnostics::initialize(super::bootstrap::user_logs()?.join("ui.log"))?;
     let title = super::desktop::wide("LanDeskServer 设置");
     let existing = unsafe { FindWindowW(null(), title.as_ptr()) };
