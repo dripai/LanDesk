@@ -457,7 +457,7 @@ Windows 驱动使用上游 MttVDD 25.7.23 原始 DLL/INF/CAT，安装前核验 S
 
 将 `LanDeskServer.exe` 放入独立文件夹后双击，管理员授权后在原目录注册两个后台服务。服务路径直接指向当前 EXE，不复制到 Program Files，也不依赖启动时的工作目录；配置、密钥、日志都在旁边的 `data/server/`。程序目录和 EXE 设置管理员/SYSTEM 写入权限，保护 SYSTEM 服务执行文件；不递归修改已有无关子文件权限。不能直接放在磁盘根目录。驱动与模板内嵌，无需系统 OpenSSH、PowerShell 或维护脚本；Driver Store 仍由 Windows 管理。防火墙规则仅放行该 EXE 的 SSH 入站端口。驱动提示重启时需重启后验收。
 
-安装持有维护锁时，仅当 `LanDeskServer` 和 `LanDeskTransport` 两项 SCM 登记都不存在，才检查并清理旧目录留下的防火墙、开机启动、快捷方式和卸载入口。必须匹配 LanDesk 专有标识及目标格式；旧 EXE 已删除也可清理，但不访问或删除旧目录、配置和其他文件。先验证全部入口，再修改；清理失败执行补偿并报告回滚错误。服务登记仍存在时继续采用严格路径归属检查，不让另一个目录接管。
+安装持有维护锁时，仅当 `LanDeskServer` 和 `LanDeskTransport` 两项 SCM 登记都不存在，才检查并清理旧目录留下的防火墙、开机启动、快捷方式和卸载入口。必须匹配 LanDesk 专有标识及目标格式；旧 EXE 已删除也可清理，但不访问或删除旧目录、配置和其他文件。先验证全部入口，再修改；防火墙删除作为最后一步，前面的清理失败时保留原规则并补偿已修改的其他入口，报告回滚错误。服务登记仍存在时继续采用严格路径归属检查，不让另一个目录接管。
 
 注册只有原目录路径：校验服务归属，移除本目录的服务登记及系统入口，再注册当前 EXE。已有连接配置、密钥和托盘选项继续使用；只有没有配置和密钥的首次启动才生成身份。配置损坏、密钥丢失或仅剩密钥时明确报错，不重建身份。失败逆序回滚本次系统组件及权限变更，保留 EXE、配置和日志，并报告回滚失败；不承诺恢复已清理的旧服务。
 
@@ -521,7 +521,7 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanD
 
 普通测试不安装驱动、不创建虚拟设备。Windows 管理员原生维护测试由 CI 显式运行：`cargo test -p landesk --locked --lib native_setup_ -- --ignored --test-threads=1`。Mac 真实虚拟显示测试需要显式设置 `LANDESK_TEST_VIRTUAL_DISPLAY=1 LANDESK_TEST_VIRTUAL_CAPTURE=1`，且测试进程已有屏幕录制权限。
 
-按本次改动涉及的产品和平台打包；服务端改动不要求客户端同步升级。Windows 服务端独立包使用 `windows-display.yml`，客户端使用 `windows-client.yml`。共享 `Cargo.lock` 的变动会触发两者，因此明确只发布 Windows 服务端时，提交消息加入 `[skip ci]`，推送后显式执行 `gh workflow run windows-display.yml --ref <已推送分支>`，并核对运行的提交 SHA。工作流会执行服务端、共享库及 Client 探针验证，但仅上传 `LanDeskServer-windows-x64` 包。此流程是显式选择构建目标，不是自动分析依赖影响范围；共享代码变动仍需验证受影响的平台。依据：[跳过 push/PR 自动运行](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs)、[手动运行指定分支的工作流](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
+按本次改动涉及的产品和平台打包；不改变通信协议的服务端改动可独立发布，协议变化需同时更新受影响的客户端。Windows 服务端独立包使用 `windows-display.yml`，客户端使用 `windows-client.yml`。共享 `Cargo.lock` 的变动会触发两者，因此明确只发布 Windows 服务端时，提交消息加入 `[skip ci]`，推送后显式执行 `gh workflow run windows-display.yml --ref <已推送分支>`，并核对运行的提交 SHA。工作流会执行服务端、共享库及 Client 探针验证，但仅上传 `LanDeskServer-windows-x64` 包。此流程是显式选择构建目标，不是自动分析依赖影响范围；共享代码变动仍需验证受影响的平台。依据：[跳过 push/PR 自动运行](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs)、[手动运行指定分支的工作流](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)。
 
 验收必须覆盖：同机 Client/Server 共存、两条独立链路、旧端口已占用时 Client 可启动、跨目标隔离、网页凭证缺失/错误/失效、错误 Origin/Host、未知 subsystem/Shell/端口转发拒绝、入口失败后配置可编辑及重试、退出释放所有任务。UI 构建与协议测试不等于真实跨机桌面/键鼠验收。
 
@@ -529,7 +529,9 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanD
 
 **0.7.0（2026-10-16）**：修正 Windows Server GUI 子系统和打包校验；增加无 SCM 登记时的旧入口清理及补偿；补齐 Windows 用户目录浏览/上传，拆分桌面与文件 WebSocket，复用两端上传会话。Client 和 Server 统一为 0.7.0，Client 同步放行文件连接，必须配套更新。新增功能按次版本发布。
 
-本机已验证：核心 29 项及契约 3 项；Mac Server 库 46 项及文件工作线程 1 项；Client 库 14 项及终端集成 7 项；网页 30 项；PE 打包校验 3 项；真实 Client → SSH → Server 的独立文件连接握手；文件连接独立维持 SSH、最后关闭后回收。Mac arm64 与 Windows x64 gnullvm 的 Client/Server 全目标 Clippy、格式、架构、UTF-8 和 diff 检查通过。新增 Windows 文件取消/不覆盖/路径边界/重解析点/线程身份及旧登记回滚测试已通过交叉编译，尚未在 Windows 运行；本轮未完成 MSVC CI、真实 Windows 上传、UAC 黑窗及残留安装实机验收，也未替换本机应用。
+本机已验证：核心 29 项及契约 3 项；Mac Server 库 46 项及文件工作线程 1 项；Client 库 14 项及终端集成 7 项；网页 30 项；PE 打包校验 3 项；真实 Client → SSH → Server 的独立文件连接握手；文件连接独立维持 SSH、最后关闭后回收。Mac arm64 与 Windows x64 gnullvm 的 Client/Server 全目标 Clippy、格式、架构、UTF-8 和 diff 检查通过。Mac arm64 Client/Server release 构建、ad-hoc 签名、版本与 ZIP 校验通过，未替换本机应用。
+
+Windows MSVC 验证完成：[Client CI](https://github.com/dripai/LanDesk/actions/runs/38895420859) 的 13 项连接库测试、7 项终端集成测试、网页测试、全目标 Clippy 和 release 打包通过；[Server CI](https://github.com/dripai/LanDesk/actions/runs/38897150273) 的 29 项库测试、13 项原生维护测试、真实 Client → SSH → Server 独立文件通道集成、release 构建、DPI manifest、GUI 子系统与打包检查通过。首次 CI 暴露清理回滚测试失败，调整防火墙删除顺序后通过。新增文件取消、不覆盖、路径边界、重解析点、线程身份及旧登记回滚测试已在 Windows runner 运行。Windows Client 与 Mac 产物来自 `d5824f2`，Windows Server 来自 `cc380b8`；后者仅修改 Windows 服务端清理流程。四个产品包版本均为 0.7.0。真实 Windows 远程上传、UAC 黑窗及用户设备残留安装仍待实机验收；CI 通过不代表已通过这些场景。
 
 **Server 0.6.0 Windows 管理界面改版，本地验证（2026-10-16，Windows 包待 CI 构建）**：Windows 与 Mac 共用 GPUI 连接输入行和状态栏；Windows 改为保存后重启生效。服务端库测试 45 项通过、1 项现有集成探针测试忽略；新增真实 SSH/WebSocket 测试覆盖保存期间连接继续通信、重启前旧密码有效、重启断开旧连接、新端口/密码启用。Mac 全目标和 Windows x64 gnullvm 交叉全目标 Clippy 通过。尚未验证 Windows 实机 GPUI、托盘隐藏启动、UAC、SCM 重启、卸载及 VDDPATH 驱动加载；交叉检查不代表 Windows MSVC 打包或实机运行通过。
 
