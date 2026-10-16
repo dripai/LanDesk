@@ -608,6 +608,26 @@ fn firewall_rules() -> Result<INetFwRules> {
         policy.Rules().context("读取 Windows 防火墙规则集合")
     }
 }
+fn long_path(path: &Path) -> Result<PathBuf> {
+    ensure!(path.is_absolute(), "系统登记需要绝对程序路径");
+    plain_chain(path)?;
+    let mut buffer = vec![0u16; 32768];
+    let length = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetLongPathNameW(
+            wide(&path.to_string_lossy()).as_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+        )
+    } as usize;
+    ensure!(
+        length != 0,
+        "解析程序完整路径 {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
+    ensure!(length < buffer.len(), "程序路径超过 Windows 路径上限");
+    Ok(PathBuf::from(String::from_utf16(&buffer[..length])?))
+}
 pub(super) fn firewall(executable: &Path) -> Result<Option<INetFwRule>> {
     match unsafe { firewall_rules()?.Item(&BSTR::from(FW_NAME)) } {
         Ok(rule) => {
@@ -615,7 +635,7 @@ pub(super) fn firewall(executable: &Path) -> Result<Option<INetFwRule>> {
                 unsafe { rule.Grouping()? } == FW_GROUP
                     && unsafe { rule.ApplicationName()? }
                         .to_string()
-                        .eq_ignore_ascii_case(&executable.to_string_lossy()),
+                        .eq_ignore_ascii_case(&long_path(executable)?.to_string_lossy()),
                 "同名防火墙规则不属于 LanDesk"
             );
             Ok(Some(rule))
@@ -625,6 +645,9 @@ pub(super) fn firewall(executable: &Path) -> Result<Option<INetFwRule>> {
     }
 }
 pub(super) fn add_firewall(executable: &Path, port: u16) -> Result<()> {
+    // Resolve 8.3 aliases before passing the application path to Windows Firewall.
+    // Use the same representation when checking ownership of an existing rule.
+    let executable = long_path(executable)?;
     unsafe {
         let rule: INetFwRule = CoCreateInstance(&NetFwRule, None, CLSCTX_INPROC_SERVER)?;
         rule.SetName(&BSTR::from(FW_NAME))?;
@@ -671,8 +694,9 @@ pub(super) fn shortcut_owned(path: &Path, executable: &Path) -> Result<()> {
         let mut target = [0u16; 32768];
         link.GetPath(&mut target, null_mut(), SLGP_RAWPATH.0 as u32)?;
         ensure!(
-            super::setup_services::string(target.as_ptr())?
-                .eq_ignore_ascii_case(&executable.to_string_lossy()),
+            long_path(Path::new(&super::setup_services::string(target.as_ptr())?))?
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&long_path(executable)?.to_string_lossy()),
             "同名快捷方式不属于 LanDesk"
         );
     }
@@ -847,6 +871,7 @@ mod tests {
         create_directory(&path, PRIVATE)?;
         let exe = path.join("LanDeskServer.exe");
         let shortcut = path.join("test.lnk");
+        std::fs::copy(std::env::current_exe()?, &exe)?;
         let result = (|| {
             ensure!(
                 firewall(&exe)?.is_none(),
