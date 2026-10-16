@@ -587,7 +587,9 @@ pub(super) struct Com;
 impl Com {
     pub(super) fn new() -> Result<Self> {
         unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .context("初始化 Windows COM")?;
         }
         Ok(Self)
     }
@@ -601,8 +603,9 @@ impl Drop for Com {
 }
 fn firewall_rules() -> Result<INetFwRules> {
     unsafe {
-        let policy: INetFwPolicy2 = CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER)?;
-        Ok(policy.Rules()?)
+        let policy: INetFwPolicy2 = CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER)
+            .context("创建 Windows 防火墙策略接口")?;
+        policy.Rules().context("读取 Windows 防火墙规则集合")
     }
 }
 pub(super) fn firewall(executable: &Path) -> Result<Option<INetFwRule>> {
@@ -635,9 +638,12 @@ pub(super) fn add_firewall(executable: &Path, port: u16) -> Result<()> {
         rule.SetProfiles(NET_FW_PROFILE2_ALL.0)?;
         rule.SetAction(NET_FW_ACTION_ALLOW)?;
         rule.SetEnabled(VARIANT_TRUE)?;
-        firewall_rules()?
-            .Add(&rule)
-            .context("添加 LanDesk 防火墙规则")?;
+        firewall_rules()?.Add(&rule).with_context(|| {
+            format!(
+                "添加 LanDesk 防火墙规则: {} TCP {port}",
+                executable.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -649,7 +655,8 @@ pub(super) fn remove_firewall() -> Result<()> {
 }
 pub(super) fn shortcut_path() -> Result<PathBuf> {
     unsafe {
-        let path = SHGetKnownFolderPath(&FOLDERID_CommonPrograms, KNOWN_FOLDER_FLAG(0), None)?;
+        let path = SHGetKnownFolderPath(&FOLDERID_CommonPrograms, KNOWN_FOLDER_FLAG(0), None)
+            .context("读取公共开始菜单目录")?;
         let output = PathBuf::from(path.to_string()?);
         CoTaskMemFree(Some(path.0.cast()));
         Ok(output.join("LanDeskServer.lnk"))

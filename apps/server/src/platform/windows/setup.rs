@@ -857,7 +857,7 @@ pub(super) fn export() -> Result<()> {
     Ok(())
 }
 fn export_at(paths: &Paths) -> Result<PathBuf> {
-    os::owned(&paths.data, &["S-1-5-32-545"])?;
+    os::owned(&paths.data, os::APP_READERS)?;
     let mut entries = Vec::new();
     let mut errors = Vec::new();
     // Diagnostics remain available while maintenance owns the mutex. A snapshot
@@ -1061,7 +1061,10 @@ pub(super) fn managed_uninstall(
 mod tests {
     use super::*;
     fn test_payload() -> Result<Payload> {
-        let path = std::env::temp_dir().join(format!("LanDeskSetupTest-{}", unique()?));
+        // Exercise the same installation root as production and the firewall
+        // roundtrip test, without touching the real LanDesk application/data.
+        let path =
+            os::environment("ProgramFiles")?.join(format!(".LanDeskSetupTest-{}", unique()?));
         os::create_directory(&path, os::PRIVATE)?;
         fs::write(
             path.join("bootstrap-owner.txt"),
@@ -1122,6 +1125,12 @@ mod tests {
         ensure!(
             paths.logs.join("transport.previous.log").is_file(),
             "Rotation target missing"
+        );
+        let archive = export_at(&paths)?;
+        let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
+        ensure!(
+            zip.by_name("transport.log").is_ok(),
+            "Prepared logs could not be exported"
         );
         drop(lock);
         Ok(())
