@@ -806,15 +806,6 @@ pub(super) fn cleanup_orphaned_entries(current: &Path) -> Result<()> {
     // cleanup. Never access or remove the old program/configuration directories.
     let mut tx = landesk_core::application::maintenance::Transaction::new();
     let result = (|| {
-        if let Some(rule) = firewall {
-            tx.record("旧防火墙规则", move || {
-                unsafe {
-                    firewall_rules()?.Add(&rule)?;
-                }
-                Ok(())
-            });
-            remove_firewall()?;
-        }
         if let Some(value) = startup {
             tx.record("旧启动入口", move || {
                 put(RUN, scm::SERVER, Some(&value))
@@ -832,6 +823,12 @@ pub(super) fn cleanup_orphaned_entries(current: &Path) -> Result<()> {
         if let Some(snapshot) = uninstall {
             tx.record("旧卸载入口", move || snapshot.restore());
             delete_key(UNINSTALL)?;
+        }
+        // Remove the firewall rule only after every other fallible operation.
+        // An INetFwRule retrieved from the collection is a live COM object, not
+        // a detached snapshot that can reliably be added back after removal.
+        if firewall.is_some() {
+            remove_firewall()?;
         }
         Ok(())
     })();
@@ -1016,14 +1013,16 @@ mod tests {
             let child = format!(r"{UNINSTALL}\TestRollback");
             put(&child, "Keep", Some(&text("untouched")))?;
             let failed = cleanup_orphaned_entries(&current_exe);
-            let restored = firewall_rule()?.is_some()
-                && shortcut.exists()
-                && read(RUN, scm::SERVER)?.is_some()
-                && read(&child, "Keep")? == Some(text("untouched"));
+            let restored = (
+                firewall_rule()?.is_some(),
+                shortcut.exists(),
+                read(RUN, scm::SERVER)?.is_some(),
+                read(&child, "Keep")? == Some(text("untouched")),
+            );
             delete_key(&child)?;
             ensure!(
-                failed.is_err() && restored,
-                "Cleanup did not roll back after a registry failure"
+                failed.is_err() && restored == (true, true, true, true),
+                "Cleanup rollback failed: result={failed:?}; firewall/shortcut/startup/child={restored:?}"
             );
             std::fs::remove_file(&old_exe)?;
             cleanup_orphaned_entries(&current_exe)?;
