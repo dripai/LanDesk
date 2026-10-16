@@ -31,6 +31,7 @@ pub(super) const OWNER: &str = "LanDeskServer console service v1";
 pub(super) const PRIVATE: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 pub(super) const APP: &str =
     "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)(A;OICI;0x1200a9;;;BU)";
+pub(super) const APP_READERS: &[&str] = &["S-1-5-19", "S-1-5-32-545"];
 pub(super) const TRANSPORT_ACL: &str =
     "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;LS)";
 pub(super) const LOGS: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
@@ -626,14 +627,17 @@ pub(super) fn add_firewall(executable: &Path, port: u16) -> Result<()> {
         rule.SetName(&BSTR::from(FW_NAME))?;
         rule.SetDescription(&BSTR::from("LanDesk encrypted desktop"))?;
         rule.SetGrouping(&BSTR::from(FW_GROUP))?;
-        rule.SetApplicationName(&BSTR::from(executable.to_string_lossy().as_ref()))?;
+        rule.SetApplicationName(&BSTR::from(executable.to_string_lossy().as_ref()))
+            .with_context(|| format!("设置防火墙程序路径: {}", executable.display()))?;
         rule.SetProtocol(NET_FW_IP_PROTOCOL_TCP.0)?;
         rule.SetLocalPorts(&BSTR::from(port.to_string()))?;
         rule.SetDirection(NET_FW_RULE_DIR_IN)?;
         rule.SetProfiles(NET_FW_PROFILE2_ALL.0)?;
         rule.SetAction(NET_FW_ACTION_ALLOW)?;
         rule.SetEnabled(VARIANT_TRUE)?;
-        firewall_rules()?.Add(&rule)?;
+        firewall_rules()?
+            .Add(&rule)
+            .context("添加 LanDesk 防火墙规则")?;
     }
     Ok(())
 }
@@ -671,10 +675,12 @@ pub(super) fn create_shortcut(path: &Path, executable: &Path) -> Result<()> {
     plain_chain(path)?;
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
-        link.SetPath(PCWSTR(wide(&executable.to_string_lossy()).as_ptr()))?;
+        link.SetPath(PCWSTR(wide(&executable.to_string_lossy()).as_ptr()))
+            .with_context(|| format!("设置快捷方式目标: {}", executable.display()))?;
         link.SetArguments(PCWSTR(wide("--settings").as_ptr()))?;
         let file: IPersistFile = link.cast()?;
-        file.Save(PCWSTR(wide(&path.to_string_lossy()).as_ptr()), true)?;
+        file.Save(PCWSTR(wide(&path.to_string_lossy()).as_ptr()), true)
+            .with_context(|| format!("保存快捷方式: {}", path.display()))?;
     }
     Ok(())
 }

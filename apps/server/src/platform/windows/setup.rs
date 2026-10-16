@@ -184,13 +184,13 @@ impl Paths {
         }
         let root = self.app.join("data");
         if self.data.parent() == Some(root.as_path()) {
-            os::ensure_directory(&root, os::APP, &["S-1-5-32-545"])?;
+            os::ensure_directory(&root, os::APP, os::APP_READERS)?;
             os::protect(&root, os::APP)?;
         }
-        os::ensure_directory(&self.data, os::APP, &["S-1-5-32-545"])?;
+        os::ensure_directory(&self.data, os::APP, os::APP_READERS)?;
         os::protect(&self.data, os::APP)?;
         let runtime = self.data.join("runtime");
-        os::ensure_directory(&runtime, os::APP, &["S-1-5-32-545"])?;
+        os::ensure_directory(&runtime, os::APP, os::APP_READERS)?;
         os::ensure_directory(&runtime.join("setup"), os::PRIVATE, &[])?;
         os::ensure_request_directory(&runtime.join("ui"))?;
         os::ensure_directory(&self.logs, os::LOGS, &["S-1-5-32-545"])?;
@@ -1192,8 +1192,9 @@ mod tests {
                     false,
                     Some(scm::TRANSPORT),
                 )?);
-                os::add_firewall(&paths.exe, 2222)?;
-                os::create_shortcut(&shortcut, &paths.exe)?;
+                os::add_firewall(&paths.exe, 2222).context("Fresh-install fixture firewall")?;
+                os::create_shortcut(&shortcut, &paths.exe)
+                    .context("Fresh-install fixture shortcut")?;
                 os::put(
                     os::RUN,
                     scm::SERVER,
