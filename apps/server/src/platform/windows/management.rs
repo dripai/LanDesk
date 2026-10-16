@@ -333,7 +333,7 @@ pub fn start(paths: &setup::Paths) -> Result<()> {
     }
     scm::start(scm::SERVER)
 }
-fn set_startup(paths: &setup::Paths, preferences: Preferences) -> Result<()> {
+pub(super) fn set_startup(paths: &setup::Paths, preferences: Preferences) -> Result<()> {
     let service = scm::open_access(scm::SERVER, SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG)?
         .context("桌面服务未安装")?;
     let previous = scm::configuration(&service)?.start;

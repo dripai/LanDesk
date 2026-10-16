@@ -185,7 +185,7 @@ impl Panel {
     fn uninstall(&mut self, window: &Window, cx: &mut Context<Self>) {
         // A single confirmation. System UAC is handled by the privilege adapter.
         let confirmed = tray::hwnd(window).map(|hwnd| unsafe { MessageBoxW(hwnd,
-            super::desktop::wide("卸载 LanDeskServer？当前远程连接将断开，配置和日志保留。将移除 LanDesk 自建的虚拟显示设备。").as_ptr(),
+            super::desktop::wide("卸载 LanDeskServer？当前远程连接将断开，程序、配置和日志保留。将移除 LanDesk 自建的虚拟显示设备。").as_ptr(),
             super::desktop::wide("卸载确认").as_ptr(), MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK });
         match confirmed {
             Ok(true) => self.begin(
@@ -427,7 +427,6 @@ pub fn run(startup: bool) -> Result<()> {
     unsafe {
         windows_sys::Win32::System::Console::FreeConsole();
     }
-    super::bootstrap::install_if_needed()?;
     crate::diagnostics::initialize(super::bootstrap::user_logs()?.join("ui.log"))?;
     let title = super::desktop::wide("LanDeskServer 设置");
     let existing = unsafe { FindWindowW(null(), title.as_ptr()) };

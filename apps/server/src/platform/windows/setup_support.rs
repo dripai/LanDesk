@@ -562,8 +562,8 @@ pub(super) fn uninstall_snapshot(destination: &Path) -> Result<RegistrySnapshot>
         ],
     )
 }
-pub(super) fn register_uninstall(destination: &Path) -> Result<()> {
-    let executable = destination.join("LanDeskServer.exe");
+pub(super) fn register_uninstall(executable: &Path) -> Result<()> {
+    let destination = executable.parent().context("程序目录缺失")?;
     for (name, value) in [
         ("DisplayName", "LanDeskServer".into()),
         ("DisplayVersion", env!("CARGO_PKG_VERSION").into()),
@@ -727,14 +727,11 @@ pub(super) fn verify_catalog(path: &Path) -> Result<()> {
     Ok(())
 }
 pub(super) fn close_installed_processes(executable: &Path, launcher: u32) -> Result<()> {
-    // The management UI can run from the downloaded copy rather than Program
-    // Files. Match its bytes to the owned installation before closing it; a
-    // matching filename alone must never authorize terminating a process.
-    let installed_bytes = match std::fs::read(executable) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context("读取已安装程序以识别旧界面"),
-    };
+    // Only processes from this exact registered image belong to this operation.
+    let name = executable
+        .file_name()
+        .context("服务程序名称缺失")?
+        .to_string_lossy();
     let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     ensure!(
         raw != INVALID_HANDLE_VALUE,
@@ -751,7 +748,7 @@ pub(super) fn close_installed_processes(executable: &Path, launcher: u32) -> Res
         if entry.th32ProcessID != std::process::id()
             && entry.th32ProcessID != launcher
             && unsafe { super::setup_services::string(entry.szExeFile.as_ptr())? }
-                .eq_ignore_ascii_case("LanDeskServer.exe")
+                .eq_ignore_ascii_case(&name)
         {
             let raw = unsafe {
                 OpenProcess(
@@ -781,14 +778,7 @@ pub(super) fn close_installed_processes(executable: &Path, launcher: u32) -> Res
                 )?;
                 let process_path = String::from_utf16(&path[..length as usize])?;
                 let same_path = process_path.eq_ignore_ascii_case(&executable.to_string_lossy());
-                let same_copy = if !same_path && let Some(bytes) = &installed_bytes {
-                    std::fs::read(&process_path)
-                        .with_context(|| format!("检查旧界面程序: {process_path}"))?
-                        == *bytes
-                } else {
-                    false
-                };
-                if same_path || same_copy {
+                if same_path {
                     crate::diagnostics::log(&format!(
                         "关闭旧 LanDesk 进程 pid={} path={process_path}",
                         entry.th32ProcessID

@@ -32,7 +32,7 @@ use windows_sys::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 use windows_sys::Win32::System::Services::*;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
-use windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
+use windows_sys::Win32::UI::HiDpi::{AreDpiAwarenessContextsEqual, GetThreadDpiAwarenessContext};
 
 const NAME: &str = "LanDeskServer";
 const TRANSPORT_NAME: &str = "LanDeskTransport";
@@ -538,6 +538,20 @@ fn serve_transport() -> Result<()> {
     runtime.shutdown_timeout(Duration::from_secs(3));
     result
 }
+fn verify_worker_dpi() -> Result<()> {
+    // GPUI 0.3.8 embeds PerMonitorV2 in the executable manifest. Setting the
+    // process default again returns ERROR_ACCESS_DENIED even for the same mode.
+    ensure!(
+        unsafe {
+            AreDpiAwarenessContextsEqual(
+                GetThreadDpiAwarenessContext(),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            )
+        } != 0,
+        "程序清单未启用 PerMonitorV2 DPI 感知，桌面工作进程无法启动"
+    );
+    Ok(())
+}
 fn worker(stop_name: &str) -> Result<()> {
     require_system_console()?;
     log(&format!(
@@ -559,10 +573,7 @@ fn worker(stop_name: &str) -> Result<()> {
         unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, wide(stop_name).as_ptr()) },
         "打开服务停止事件",
     )?;
-    checked(
-        unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) },
-        "设置 DPI 感知",
-    )?;
+    verify_worker_dpi()?;
     let key = read_transport()?.backend_key;
     let shared = Arc::new(Shared::default());
     let native = Arc::new(WindowsControl::new(shared.clone())?);
@@ -591,6 +602,17 @@ fn worker(stop_name: &str) -> Result<()> {
 }
 pub fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--check-dpi"] {
+        // Read-only packaged-image smoke test: no logs, services or data files.
+        return verify_worker_dpi();
+    }
+    if (args.is_empty()
+        || matches!(args.as_slice(), [mode] if mode == "--settings" || mode == "--startup-ui"))
+        && let Err(error) = super::bootstrap::install_if_needed()
+    {
+        super::privilege::error_box(null_mut(), format!("无法启动：{error:#}"));
+        return Err(error);
+    }
     let service_mode = args
         .first()
         .is_some_and(|arg| matches!(arg.as_str(), "--service" | "--transport-service"));

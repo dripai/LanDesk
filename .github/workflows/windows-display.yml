@@ -47,6 +47,10 @@ jobs:
           cargo +stable test -p landesk --locked --lib actual_client_crosses_subsystem_memory_backend_and_browser_authentication -- --ignored
       - name: Build Windows x64
         run: cargo +stable build --locked --release --bin LanDeskDisplay --bin LanDeskServer
+      - name: Check packaged server DPI manifest without installing
+        run: |
+          $probe = Start-Process -FilePath (Resolve-Path target/release/LanDeskServer.exe).Path -ArgumentList '--check-dpi' -Wait -PassThru
+          if ($probe.ExitCode -ne 0) { throw 'Packaged server does not have PerMonitorV2 DPI awareness' }
       - name: Read-only status smoke test
         run: |
           $state = & target/release/LanDeskDisplay.exe --status | ConvertFrom-Json

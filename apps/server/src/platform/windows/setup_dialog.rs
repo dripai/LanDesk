@@ -1,6 +1,7 @@
 //! Native Win32 setup windows, sharing no shell or .NET runtime.
 use super::desktop::checked;
 use super::desktop::wide;
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
 use std::cell::Cell;
@@ -167,7 +168,7 @@ pub(super) fn uninstall_choice() -> Result<Option<bool>> {
     control(
         window.0,
         "STATIC",
-        "移除后台服务、开机入口、防火墙规则和程序。\r\n当前远控会断开。密码配置、日志和其他已有文件会保留。",
+        "移除后台服务、开机入口和防火墙规则。\r\n当前远控会断开。程序、密码配置、日志和其他文件保留。",
         0,
         (20, 18, 450, 65),
         0,
@@ -195,12 +196,91 @@ pub(super) fn uninstall_choice() -> Result<Option<bool>> {
         .then(|| unsafe { SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as isize }))
 }
 pub(super) struct Progress {
+    updates: Option<std::sync::mpsc::Sender<String>>,
+    thread: Option<std::thread::JoinHandle<Result<()>>>,
+}
+impl Progress {
+    pub(super) fn new(title: &str) -> Result<Self> {
+        let (updates, receiver) = std::sync::mpsc::channel::<String>();
+        let (ready, initialized) = std::sync::mpsc::sync_channel(1);
+        let title = title.to_owned();
+        let thread = std::thread::Builder::new()
+            .name("setup-window".into())
+            .spawn(move || -> Result<()> {
+                // HWND and its state are created, dispatched and destroyed on
+                // this thread, independent of blocking driver/SCM operations.
+                let view = match ProgressWindow::new(&title) {
+                    Ok(view) => view,
+                    Err(error) => {
+                        let _ = ready.send(Err(error));
+                        return Ok(());
+                    }
+                };
+                if ready.send(Ok(())).is_err() {
+                    return Ok(());
+                }
+                loop {
+                    match receiver.try_recv() {
+                        Ok(text) => view.stage(&text)?,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                    unsafe {
+                        let mut message = MSG::default();
+                        while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                            ensure!(message.message != WM_QUIT, "安装窗口提前退出");
+                            TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                        ensure!(
+                            MsgWaitForMultipleObjectsEx(
+                                0,
+                                null(),
+                                50,
+                                QS_ALLINPUT,
+                                MWMO_INPUTAVAILABLE
+                            ) != WAIT_FAILED,
+                            "等待安装窗口消息失败: {}",
+                            std::io::Error::last_os_error()
+                        );
+                    }
+                }
+            })?;
+        let progress = Self {
+            updates: Some(updates),
+            thread: Some(thread),
+        };
+        initialized.recv().context("安装窗口线程启动失败")??;
+        Ok(progress)
+    }
+    pub(super) fn stage(&self, text: &str) -> Result<()> {
+        crate::diagnostics::log(text);
+        self.updates
+            .as_ref()
+            .context("安装窗口已关闭")?
+            .send(text.to_owned())
+            .context("安装窗口线程已退出")
+    }
+}
+impl Drop for Progress {
+    fn drop(&mut self) {
+        self.updates.take();
+        if let Some(thread) = self.thread.take() {
+            match thread.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => crate::diagnostics::log(&format!("安装窗口失败: {error:#}")),
+                Err(_) => crate::diagnostics::log("安装窗口线程异常退出"),
+            }
+        }
+    }
+}
+struct ProgressWindow {
     window: Window,
     label: HWND,
     _state: Box<State>,
 }
-impl Progress {
-    pub(super) fn new(title: &str) -> Result<Self> {
+impl ProgressWindow {
+    fn new(title: &str) -> Result<Self> {
         let state = Box::new(State {
             done: Cell::new(false),
             accepted: Cell::new(false),
@@ -222,19 +302,13 @@ impl Progress {
             _state: state,
         })
     }
-    pub(super) fn stage(&self, text: &str) -> Result<()> {
-        crate::diagnostics::log(text);
+    fn stage(&self, text: &str) -> Result<()> {
         unsafe {
             checked(
                 SetWindowTextW(self.label, wide(text).as_ptr()),
                 "更新安装进度",
             )?;
             UpdateWindow(self.window.0);
-            let mut message = MSG::default();
-            while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
         }
         Ok(())
     }
@@ -253,6 +327,40 @@ pub(super) fn complete(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "Requires native Windows window message dispatch"]
+    fn native_setup_progress_responds_while_installer_waits() -> Result<()> {
+        let title = format!("LanDesk progress test {}", std::process::id());
+        let progress = Progress::new(&title)?;
+        let hwnd = unsafe { FindWindowW(wide(CLASS).as_ptr(), wide(&title).as_ptr()) };
+        ensure!(!hwnd.is_null(), "Progress window missing");
+        let thread = unsafe { GetWindowThreadProcessId(hwnd, null_mut()) };
+        ensure!(
+            thread != unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() },
+            "Installer still owns the UI message loop"
+        );
+        progress.stage("Waiting for desktop worker")?;
+        // The installer thread blocks here. The window must respond without
+        // any call to stage() pumping messages on this thread.
+        ensure!(
+            unsafe {
+                SendMessageTimeoutW(
+                    hwnd,
+                    WM_NULL,
+                    0,
+                    0,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                    1000,
+                    null_mut(),
+                )
+            } != 0,
+            "Progress window stopped responding during installer wait"
+        );
+        drop(progress);
+        ensure!(unsafe { IsWindow(hwnd) } == 0, "Progress window leaked");
+        Ok(())
+    }
 
     #[test]
     #[ignore = "child probe launched by native_setup_helper_first_dialog_is_visible"]

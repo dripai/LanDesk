@@ -229,7 +229,7 @@ Windows 管理请求及临时密钥位于 `data/server/runtime/ui/request-*/`，
     server/logs/                   # Windows 服务和界面日志
     server/preferences.json       # Windows 托盘偏好
     server/runtime/ui/            # 按用户隔离的临时加密管理请求
-    server/runtime/setup/         # 安装包展开、卸载助手
+    server/runtime/setup/         # 内置驱动临时展开，操作结束清理
     server/display/               # LanDesk 新建驱动的配置
     server/diagnostics/            # 仅命令行诊断导出
     client/settings.json
@@ -440,14 +440,16 @@ Windows 驱动使用上游 MttVDD 25.7.23 原始 DLL/INF/CAT，安装前核验 S
 
 ## Windows 安装、维护与诊断
 
-双击 `LanDeskServer.exe`，管理员授权后完成安装；驱动与模板内嵌，无需系统 OpenSSH、PowerShell 或维护脚本。防火墙规则仅放行指定服务端程序的 SSH 入站端口。驱动提示重启时需重启后验收。
+将 `LanDeskServer.exe` 放入独立文件夹后双击，管理员授权后在原目录注册两个后台服务。服务路径直接指向当前 EXE，不复制到 Program Files，也不依赖启动时的工作目录；配置、密钥、日志都在旁边的 `data/server/`。程序目录和 EXE 设置管理员/SYSTEM 写入权限，保护 SYSTEM 服务执行文件；不递归修改已有无关子文件权限。不能直接放在磁盘根目录。驱动与模板内嵌，无需系统 OpenSSH、PowerShell 或维护脚本；Driver Store 仍由 Windows 管理。防火墙规则仅放行该 EXE 的 SSH 入站端口。驱动提示重启时需重启后验收。
 
-安装器只有全新安装路径：校验归属，清理被替换的服务/程序/连接配置，再创建服务与入口。更新会生成新密码和 SSH 身份；正常运行及重启保留它们。无关文件、共享驱动和已有显示配置必须保留，同名但归属不明的程序拒绝覆盖。安装失败逆序回滚本次创建对象并记录回滚失败；不承诺恢复已经清理的旧服务。
+注册只有原目录路径：校验服务归属，移除本目录的服务登记及系统入口，再注册当前 EXE。已有连接配置、密钥和托盘选项继续使用；只有没有配置和密钥的首次启动才生成身份。配置损坏、密钥丢失或仅剩密钥时明确报错，不重建身份。失败逆序回滚本次系统组件及权限变更，保留 EXE、配置和日志，并报告回滚失败；不承诺恢复已清理的旧服务。
+
+移动目录前先从主窗口“卸载”，等待后台服务与自建显示设备移除、窗口退出，再整体移动 EXE 和 `data` 并重新启动注册。运行期间不支持移动文件；服务路径不会跟随资源管理器更新。若从另一份 EXE 启动而同名服务仍登记在原目录，直接提示原路径，不接管或改动原服务。复制到不保留目录 ACL 的位置后，现有权限校验可能拒绝启动；不自动放宽权限。
 
 - 托盘菜单提供“开机启动”“最小化托盘”，勾选后立即保存，失败恢复原选项及系统设置。两项均启用时，登录启动直接创建隐藏窗口，不先显示再隐藏；手动启动或托盘打开设置会显示窗口。
 - 取消开机启动只改变后续启动方式，不断开当前连接；关闭设置窗口是否隐藏到托盘由“最小化托盘”决定，退出托盘不停止后台。
 - 窗口右下角“重启”“卸载”，上方两行只显示服务状态；启停阶段和查询失败分别显示“启动中/停止中”和“未知”，不把错误当停止。
-- 卸载在主窗口确认一次，停止服务、移除系统入口和 LanDesk 自建虚拟设备，保留配置、日志、第三方设备及共享 Driver Store 包。辅助进程将过程写到状态栏；最后通知窗口退出以释放 EXE，再删除程序文件。窗口退出后的最终结果写入 `uninstall.log`；运行中的卸载助手登记下次 Windows 重启清理。
+- 卸载在主窗口确认一次，停止服务、移除系统入口和 LanDesk 自建虚拟设备，保留 EXE、配置、日志、第三方设备及共享 Driver Store 包。卸载进程仍执行原 EXE，将进度写到状态栏并通知窗口退出；最终结果写入 `uninstall.log`。不复制卸载助手，也不安排重启后删除程序。
 - 界面移除复制密码、旧密码操作按钮、导出日志、修复并启动和单独保存启动设置。日志自动写入程序旁 `data/server/logs/`；启动路径检查必要目录和日志文件，不重建缺失的身份和密钥。命令行 `--export-logs` 仍可导出不含凭据的诊断包。
 
 只读检查：
@@ -459,7 +461,9 @@ LanDeskServer.exe --status
 
 后台日志：`install.log`、`uninstall.log`、`server.log`、`transport.log`、`worker.log`；带 UTC 时间、PID、版本，约 2 MB 轮换。界面日志为同目录 `ui.log`。诊断只收集明确列出的日志、服务、设备与会话元数据，不收集密码、配置、私钥、画面、输入、剪贴板或窗口标题。首帧日志只记录是否纯色，不记录像素。
 
-服务先注册 SCM 再初始化日志；初始化失败通过 SCM 报错。主窗口卸载确认不占维护锁；维护辅助进程在后台线程等待，GPUI 继续处理窗口消息。
+服务先连接 SCM 再初始化日志；初始化失败通过 SCM 报错。首次 UI 启动先请求原目录注册，由提权安装进程创建日志目录及 ACL，普通 UI 不预先创建无归属的数据目录。所有模式使用同一日志目录，错误弹窗直接显示该路径。主窗口卸载确认不占维护锁；维护辅助进程在后台线程等待，GPUI 继续处理窗口消息。原生安装进度窗口拥有独立 UI 线程，驱动安装、SCM 等待及桌面健康检查不会阻塞消息分发；窗口与状态在同一 UI 线程创建及销毁。依据：[Windows 消息循环](https://learn.microsoft.com/en-us/windows/win32/winmsg/using-messages-and-message-queues)。
+
+GPUI 0.3.8 的 Windows manifest 已声明 `PerMonitorV2`。桌面工作进程只验证 DPI 上下文，不再次调用 `SetProcessDpiAwarenessContext`；Windows 会拒绝重复设置，即使目标模式一致，错误码也是 `ERROR_ACCESS_DENIED`。发布流程用实际 release EXE 的 `--check-dpi` 检查 manifest 生效，不安装服务或创建数据。依据：[SetProcessDpiAwarenessContext](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setprocessdpiawarenesscontext)、[DPI 上下文比较](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-aredpiawarenesscontextsequal)。
 
 维护辅助进程以 `SW_SHOWNORMAL` 启动，并通过 `SEE_MASK_NO_CONSOLE` 避免新建控制台。不能使用 `SW_HIDE` 隐藏控制台：Windows 会将启动显示参数应用到第一次 `ShowWindow`，导致密码窗口隐藏、主窗口一直等待用户完成不可见的对话框。原生回归测试通过实际提权启动路径，在新进程中检查首次窗口可见及可关闭；不改密码或安装状态。依据：[ShowWindow 启动参数规则](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)、[ShellExecuteEx 参数](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)。
 

@@ -14,20 +14,12 @@ pub fn machine_logs() -> Result<PathBuf> {
     Ok(landesk_storage::application_data("server")?.join("logs"))
 }
 pub fn user_logs() -> Result<PathBuf> {
-    match installed_executable()? {
-        Some(executable) => {
-            Ok(landesk_storage::data_directory(&executable, "server")?.join("logs"))
-        }
-        None => machine_logs(), // Bootstrap logs belong to the not-yet-installed executable.
-    }
+    machine_logs()
 }
 pub fn log_locations() -> String {
     format!(
-        "运行/安装日志：{}\n界面日志：{}",
+        "日志目录：{}",
         machine_logs()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|e| e.to_string()),
-        user_logs()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|e| e.to_string())
     )
@@ -40,18 +32,12 @@ pub fn initialize_logging(args: &[String]) -> Result<()> {
         "--worker" => "worker.log",
         _ => "ui.log",
     };
-    let directory = if matches!(
-        mode,
-        "--manage" | "--managed-uninstall" | "--run-uninstall" | "--prepare-uninstall"
-    ) {
-        super::setup::Paths::new()?.data.join("logs")
-    } else if filename == "ui.log" {
-        let directory = user_logs()?;
-        std::fs::create_dir_all(&directory)?;
-        directory
-    } else {
-        machine_logs()?
-    };
+    if mode == "--install-integrated" {
+        // Only the elevated installer provisions directories and ACLs. The UI
+        // must not first create unowned directories in the same location.
+        super::setup::Paths::new()?.prepare_logs()?;
+    }
+    let directory = machine_logs()?;
     let path = directory.join(filename);
     crate::diagnostics::initialize(path.clone())
         .with_context(|| format!("无法打开日志 {}", path.display()))?;
@@ -132,17 +118,21 @@ pub fn export() -> Result<()> {
 }
 pub fn install_if_needed() -> Result<bool> {
     let executable = std::env::current_exe()?;
-    if let Some(installed) = installed_executable()?
-        && super::setup_support::read(super::setup_support::UNINSTALL, "DisplayVersion")?
+    if let Some(installed) = installed_executable()? {
+        ensure!(
+            installed.is_file()
+                && std::fs::canonicalize(&installed)? == std::fs::canonicalize(&executable)?,
+            "后台服务仍登记在 {}。请先从原目录卸载后台服务，再移动整个程序目录；未修改现有服务",
+            installed.display()
+        );
+        if super::setup_support::read(super::setup_support::UNINSTALL, "DisplayVersion")?
             .map(|value| super::setup_support::decode(&value))
             .transpose()?
             .as_deref()
             == Some(env!("CARGO_PKG_VERSION"))
-        && installed.is_file()
-        && (std::fs::canonicalize(&installed)? == std::fs::canonicalize(&executable)?
-            || std::fs::read(&installed)? == std::fs::read(&executable)?)
-    {
-        return Ok(false);
+        {
+            return Ok(false);
+        }
     }
     ui::elevated(
         null_mut(),
@@ -151,8 +141,8 @@ pub fn install_if_needed() -> Result<bool> {
         true,
     )?;
     ensure!(
-        installed_executable()?.is_some(),
-        "安装进程结束，但后台服务尚未注册"
+        installed_executable()? == Some(executable),
+        "安装进程结束，但后台服务尚未注册到当前程序"
     );
     Ok(true)
 }
