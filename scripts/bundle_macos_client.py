@@ -32,11 +32,15 @@ def main():
     executable = bundle / "Contents" / "MacOS" / "LanDeskClient"
     executable.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary, executable)
+    resources = bundle / "Contents" / "Resources"
+    resources.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(root / "assets/icons/LanDesk.icns", resources / "LanDesk.icns")
     info = {
         "CFBundleName": "LanDeskClient",
         "CFBundleDisplayName": "LanDeskClient",
         "CFBundleIdentifier": "local.aiwork.LanDeskClient",
         "CFBundleExecutable": "LanDeskClient",
+        "CFBundleIconFile": "LanDesk.icns",
         "CFBundleVersion": version,
         "CFBundleShortVersionString": version,
         "CFBundlePackageType": "APPL",
@@ -46,6 +50,8 @@ def main():
         plistlib.dump(info, file)
     subprocess.run(["codesign", "--force", "--sign", "-", "--identifier", info["CFBundleIdentifier"], str(bundle)], check=True)
     subprocess.run(["codesign", "--verify", "--strict", str(bundle)], check=True)
+    # Reused bundles need a new modification date for Launch Services icon refresh.
+    bundle.touch()
     print(bundle)
 
 

@@ -1,7 +1,7 @@
 [package]
 name = "landesk"
 default-run = "landesk"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 rust-version = "1.92"
 description = "LanDesk remote desktop with SSH transport and browser control"
@@ -58,6 +58,9 @@ screencapturekit = { version = "=11.0.0", features = ["macos_14_2"] }
 [dev-dependencies]
 landesk-core = { path = "../../crates/core", features = ["test-support"] }
 tokio-tungstenite = "=0.29.0"
+
+[build-dependencies]
+embed-resource = "=3.0.12"
 
 [[test]]
 name = "native_run_loop"

@@ -525,7 +525,11 @@ cargo build --manifest-path apps/client/Cargo.toml --locked --release --bin LanD
 
 验收必须覆盖：同机 Client/Server 共存、两条独立链路、旧端口已占用时 Client 可启动、跨目标隔离、网页凭证缺失/错误/失效、错误 Origin/Host、未知 subsystem/Shell/端口转发拒绝、入口失败后配置可编辑及重试、退出释放所有任务。UI 构建与协议测试不等于真实跨机桌面/键鼠验收。
 
+Client/Server 应用图标共用 `assets/icons`：Windows 构建将多尺寸 ICO 嵌入资源 ID 1，GPUI 和原生安装窗口使用该图标；Mac 打包复制 ICNS 并设置 `CFBundleIconFile`。托盘读取同源 32×32 RGBA；图标生成、尺寸和平台依据见 [图标说明](../assets/icons/README.md)。Windows CI 的路径过滤包含图标目录，图标变更会触发两个产品构建。
+
 ## 版本依据与验证记录
+
+**0.7.1（2026-10-17）**：修复 Windows Client/Server 的窗口、任务栏及程序图标，补齐 Mac 应用程序与 Dock 图标；两端共用蓝底白色 L 图标资源，托盘像素保持不变。无通信协议或数据格式变化，按补丁版本发布。当前开发分支合并至 main 后，四个产品包均从同一提交构建；构建结果及验证边界记录在对应 GitHub Release 中。
 
 **0.7.0（2026-10-16）**：修正 Windows Server GUI 子系统和打包校验；增加无 SCM 登记时的旧入口清理及补偿；补齐 Windows 用户目录浏览/上传，拆分桌面与文件 WebSocket，复用两端上传会话。Client 和 Server 统一为 0.7.0，Client 同步放行文件连接，必须配套更新。新增功能按次版本发布。
 

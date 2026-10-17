@@ -4497,12 +4497,13 @@ dependencies = [
 
 [[package]]
 name = "landesk"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "axum",
  "base64",
  "core-foundation 0.10.1",
+ "embed-resource",
  "enigo",
  "futures-util",
  "getrandom 0.3.4",
@@ -4536,9 +4537,10 @@ dependencies = [
 
 [[package]]
 name = "landesk-client"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "futures-util",
  "getrandom 0.3.4",
  "gpui-kit",

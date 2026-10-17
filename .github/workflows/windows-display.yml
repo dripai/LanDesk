@@ -3,9 +3,9 @@ name: Windows server
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "scripts/test_bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
+    paths: ["assets/icons/**", "apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "scripts/test_bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
   pull_request:
-    paths: ["apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "scripts/test_bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
+    paths: ["assets/icons/**", "apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "scripts/test_bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
   workflow_dispatch:
 
 permissions:

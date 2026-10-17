@@ -36,18 +36,7 @@ impl Tray {
         let disconnect = MenuItem::new("断开全部连接", true, None);
         let quit = MenuItem::new("退出", true, None);
         menu.append_items(&[&show, &disconnect, &quit])?;
-        let mut pixels = Vec::with_capacity(32 * 32 * 4);
-        for y in 0..32 {
-            for x in 0..32 {
-                let letter = (8..12).contains(&x) && (7..25).contains(&y)
-                    || (8..25).contains(&x) && (21..25).contains(&y);
-                pixels.extend_from_slice(if letter {
-                    &[255, 255, 255, 255]
-                } else {
-                    &[38, 114, 237, 255]
-                });
-            }
-        }
+        let pixels = include_bytes!("../../../../assets/icons/tray.rgba").to_vec();
         let icon = Icon::from_rgba(pixels, 32, 32)?;
         let icon = TrayIconBuilder::new()
             .with_tooltip("LanDeskClient")

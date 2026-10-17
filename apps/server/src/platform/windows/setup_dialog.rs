@@ -48,6 +48,8 @@ fn window(title: &str, height: i32, state: &State) -> Result<HWND> {
         let wc = WNDCLASSW {
             lpfnWndProc: Some(procedure),
             hInstance: instance,
+            // MAKEINTRESOURCEW(1): an integer resource ID, not a pointer to text.
+            hIcon: LoadIconW(instance, std::ptr::without_provenance(1)),
             lpszClassName: class.as_ptr(),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             hbrBackground: (windows_sys::Win32::Graphics::Gdi::COLOR_WINDOW + 1) as _,

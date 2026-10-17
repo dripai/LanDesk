@@ -3,9 +3,9 @@ name: Windows client
 on:
   push:
     branches: [main, "codex/**"]
-    paths: ["apps/client/**", "crates/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "web/**", ".github/workflows/windows-client.yml"]
+    paths: ["assets/icons/**", "apps/client/**", "crates/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "web/**", ".github/workflows/windows-client.yml"]
   pull_request:
-    paths: ["apps/client/**", "crates/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "web/**", ".github/workflows/windows-client.yml"]
+    paths: ["assets/icons/**", "apps/client/**", "crates/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "web/**", ".github/workflows/windows-client.yml"]
   workflow_dispatch:
 
 permissions:

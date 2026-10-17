@@ -1,0 +1,2 @@
+// GPUI 0.3.8 loads the application icon from resource ID 1.
+1 ICON "LanDesk.ico"
