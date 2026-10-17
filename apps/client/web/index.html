@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="session-token" content="__SESSION_TOKEN__">
+  <title>LanDesk · SSH 终端</title>
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <link rel="stylesheet" href="shared.css">
+  <link rel="stylesheet" href="terminal.css">
+  <script src="vendor/xterm.js" defer></script>
+  <script src="vendor/addon-fit.js" defer></script>
+  <script type="module" src="terminal.js"></script>
+</head>
+<body>
+  <section id="session">
+    <div id="toolbar" role="toolbar" aria-label="远程控制工具条">
+      <button id="toolbar-handle" type="button" aria-label="拖动工具条" title="拖动工具条，也可用方向键移动">⠿</button>
+      <span id="connection-dot" aria-hidden="true"></span>
+      <span id="status" class="visually-hidden" role="status">正在连接</span>
+      <div id="toolbar-controls">
+        <button id="clipboard-copy" type="button" aria-label="复制所选终端文字" title="复制所选终端文字（Ctrl+Shift+C）"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 4H4v12M12 12v5M10 15l2 2 2-2"/></svg></button>
+        <button id="clipboard-paste" type="button" aria-label="粘贴到终端" title="粘贴到终端（Ctrl+Shift+V）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H5v17h14V4h-3M9 12l3-3 3 3M12 9v7"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg></button>
+        <button id="files-button" type="button" aria-label="文件面板" title="文件面板" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3zM3 6V4h7l2 2h9v3"/></svg></button>
+        <button id="fullscreen" type="button" aria-label="全屏" title="全屏"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5"/></svg></button>
+        <button id="reconnect" type="button" aria-label="重新连接" title="重新连接" disabled>↻</button>
+        <button id="disconnect" type="button" aria-label="断开" title="断开连接"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v10M6 5a9 9 0 1 0 12 0"/></svg></button>
+      </div>
+      <button id="toolbar-toggle" type="button" aria-label="收起工具条" title="收起工具条" aria-expanded="true" aria-controls="toolbar-controls"><span aria-hidden="true">−</span></button>
+    </div>
+    <main id="terminal-pane"><div id="terminal" aria-label="远程 SSH 终端"></div></main>
+    <div id="files-resizer" role="separator" aria-label="调整文件面板宽度" aria-orientation="vertical" tabindex="0" hidden></div>
+    <aside id="files-panel" aria-label="远程文件" hidden>
+      <header class="files-header"><div id="file-path" title="当前目录"></div><div class="files-actions"><button id="file-up" type="button" title="上级目录" aria-label="上级目录">↑</button><button id="file-refresh" type="button" title="刷新目录" aria-label="刷新目录">↻</button></div></header>
+      <section class="directory-section"><h2>目录 <span id="directory-count"></span></h2><div id="directories"></div></section>
+      <section id="file-drop"><div class="files-heading"><h2>文件 <span id="file-count"></span></h2><button id="upload-files" type="button">上传</button><input id="file-picker" type="file" multiple hidden></div><div id="file-items"></div><div class="drop-hint">拖入文件，上传到当前目录</div><progress id="upload-progress" max="100" value="0" aria-label="上传进度" hidden></progress><div id="upload-status" role="status"></div></section>
+      <button id="file-more" type="button" hidden>加载更多</button>
+    </aside>
+    <div id="notice" role="status" hidden></div>
+  </section>
+</body>
+</html>

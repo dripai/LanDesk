@@ -14,11 +14,12 @@ function icon(kind) {
   svg.append(shape); return svg;
 }
 
-export function createFiles(panel, send, sendBinary, notify) {
+export function createFiles(panel, send, sendBinary, notify, options = {}) {
   const $ = id => panel.querySelector(`#${id}`);
   const pending = new Map();
-  let sequence = 0, latestList = 0, path = '', connected = false, uploading = false, generation = 0, choice = null;
+  let sequence = 0, latestList = 0, path = '', connected = false, uploading = false, generation = 0, choice = options.initialVisible ?? null;
   let imageAspect = 1.6, chosenWidth = null, drag = null, nextCursor = null, directoryCount = 0, fileCount = 0;
+  let listing = false;
   const resizer = document.getElementById('files-resizer');
   function wait(id, expected, action) {
     return new Promise((resolve, reject) => {
@@ -40,7 +41,7 @@ export function createFiles(panel, send, sendBinary, notify) {
     return true;
   }
   function reset() {
-    connected = false; generation++; latestList++; uploading = false; path = ''; choice = null;
+    connected = false; generation++; latestList++; uploading = false; listing = false; path = ''; choice = options.initialVisible ?? null;
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error('连接已断开')); }
     pending.clear(); nextCursor = null; $('file-more').hidden = true; $('directories').replaceChildren(); $('file-items').replaceChildren(); $('upload-status').textContent = '';
     $('upload-files').disabled = false; $('file-picker').value = ''; panel.hidden = true; resizer.hidden = true;
@@ -55,20 +56,21 @@ export function createFiles(panel, send, sendBinary, notify) {
   async function list(next = path, append = false) {
     if (!connected) return;
     const id = ++sequence; latestList = id;
+    listing = true; $('upload-files').disabled = true;
     $('file-refresh').disabled = true; $('file-more').disabled = true;
     try {
       const result = await wait(id, 'directory', () => send({type:'list_directory',id,path:next,cursor:append ? nextCursor : ''}));
       if (id !== latestList) return;
       path = result.path;
       $('file-path').replaceChildren();
-      $('file-path').title = result.root + (path ? '/' + path : '');
+      $('file-path').title = result.root + (path ? (result.root.endsWith('/') ? '' : '/') + path : '');
       const segments = path ? path.split('/') : [];
-      [result.root.split('/').pop(), ...segments].forEach((name, index) => {
+      [result.root.split('/').pop() || '/', ...segments].forEach((name, index) => {
         const crumb = document.createElement('button'); crumb.type = 'button'; crumb.textContent = name;
         crumb.title = index ? segments.slice(0, index).join('/') : result.root;
         crumb.disabled = index === segments.length;
         crumb.addEventListener('click', () => list(segments.slice(0, index).join('/')));
-        if (index) { const slash = document.createElement('span'); slash.textContent = '/'; $('file-path').append(slash); }
+        if (index && !(index === 1 && result.root === '/')) { const slash = document.createElement('span'); slash.textContent = '/'; $('file-path').append(slash); }
         $('file-path').append(crumb);
       });
       $('file-up').disabled = !path;
@@ -96,10 +98,11 @@ export function createFiles(panel, send, sendBinary, notify) {
         if (!$(id).childElementCount) { const empty = document.createElement('div'); empty.className = 'files-empty'; empty.textContent = message; $(id).append(empty); }
       }
     } catch (error) { if (connected && id === latestList) notify(error.message); }
-    finally { if (id === latestList) { $('file-refresh').disabled = false; $('file-more').disabled = false; } }
+    finally { if (id === latestList) { listing = false; $('upload-files').disabled = uploading; $('file-refresh').disabled = false; $('file-more').disabled = false; } }
   }
   async function upload(files) {
     if (!connected || !files.length) return;
+    if (listing) { notify('目录正在加载，请稍后上传'); return; }
     if (uploading) { notify('请等待当前上传完成'); return; }
     uploading = true; $('upload-files').disabled = true;
     const destination = path, version = generation;
@@ -158,7 +161,7 @@ export function createFiles(panel, send, sendBinary, notify) {
   }
   resizer.addEventListener('pointerdown', event => {
     if (event.button !== 0) return;
-    event.preventDefault(); send({type:'release_all'});
+    event.preventDefault(); options.releaseInput?.();
     drag = {x:event.clientX, width:panel.getBoundingClientRect().width};
     resizer.setPointerCapture(event.pointerId); resizer.classList.add('dragging'); resizer.focus();
   });

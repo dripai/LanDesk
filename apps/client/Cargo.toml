@@ -1,0 +1,56 @@
+[package]
+name = "landesk-client"
+version = "0.7.1"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+description = "LanDesk desktop SSH connection client"
+
+[[bin]]
+name = "LanDeskClient"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui-kit", "dep:raw-window-handle", "dep:tray-icon"]
+
+[dependencies]
+landesk-core = { path = "../../crates/core" }
+landesk-storage = { path = "../../crates/storage" }
+anyhow = "1"
+url = "=2.5.8"
+http-body-util = "=0.1.5"
+hyper = { version = "=1.12.0", features = ["http1", "client", "server"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+russh = "=0.64.1"
+russh-sftp = "=3.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+zeroize = "1"
+futures-util = "0.3"
+getrandom = "0.3"
+tokio-tungstenite = "=0.29.0"
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+gpui-kit = { version = "=0.7.1", optional = true }
+raw-window-handle = { version = "=0.6.2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", features = ["NSAlert", "NSView", "NSWindow"] }
+objc2-foundation = "=0.3.2"
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "=0.21.2", optional = true }
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+
+
+[dev-dependencies]
+rand = "0.10"
+tokio = { version = "1", features = ["test-util"] }
+
+[build-dependencies]
+embed-resource = "=3.0.12"

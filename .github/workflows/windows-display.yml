@@ -1,0 +1,71 @@
+name: Windows server
+
+on:
+  push:
+    branches: [main, "codex/**"]
+    paths: ["assets/icons/**", "apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "scripts/test_bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
+  pull_request:
+    paths: ["assets/icons/**", "apps/server/**", "crates/**", "apps/client/**", "web/**", "Cargo.toml", "Cargo.lock", "scripts/check_architecture.py", "vendor/virtual-display/**", "scripts/bundle_windows_display.py", "scripts/test_bundle_windows_display.py", "docs/architecture.md", ".github/workflows/windows-display.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      AWS_LC_SYS_PREBUILT_NASM: "1"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # GPUI makes the test binary large; keep native API tests unoptimized and
+      # leave the release package's optimization settings unchanged.
+      CARGO_PROFILE_TEST_OPT_LEVEL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Architecture boundaries
+        run: python scripts/check_architecture.py
+      - name: Package and browser regression tests
+        run: |
+          python -m unittest discover -s scripts -p test_bundle_windows_display.py
+          if ($LASTEXITCODE -ne 0) { throw 'Package regression tests failed' }
+          node --test web/*.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Browser regression tests failed' }
+      - name: Format
+        run: cargo +stable fmt --all --check
+      - name: Check Windows component
+        run: cargo +stable clippy -p landesk --locked --lib --bin LanDeskDisplay --bin LanDeskServer -- -D warnings
+      - name: Shared core and storage tests
+        run: cargo +stable test -p landesk-core -p landesk-storage --locked
+      - name: Windows library tests
+        run: cargo +stable test -p landesk --locked --lib
+      - name: Native SCM and setup API tests (administrator runner, no driver installation)
+        run: cargo +stable test -p landesk --locked --lib native_setup_ -- --ignored --test-threads=1
+      - name: Client to server subsystem integration
+        run: |
+          cargo +stable build --manifest-path apps/client/Cargo.toml --locked --no-default-features --example desktop_probe
+          if ($LASTEXITCODE -ne 0) { throw 'Client probe build failed' }
+          $env:LANDESK_CLIENT_PROBE = (Resolve-Path target/debug/examples/desktop_probe.exe).Path
+          cargo +stable test -p landesk --locked --lib actual_client_crosses_subsystem_memory_backend_and_browser_authentication -- --ignored
+      - name: Build Windows x64
+        run: cargo +stable build --locked --release --bin LanDeskDisplay --bin LanDeskServer
+      - name: Check packaged server DPI manifest without installing
+        run: |
+          $probe = Start-Process -FilePath (Resolve-Path target/release/LanDeskServer.exe).Path -ArgumentList '--check-dpi' -Wait -PassThru
+          if ($probe.ExitCode -ne 0) { throw 'Packaged server does not have PerMonitorV2 DPI awareness' }
+      - name: Read-only status smoke test
+        run: |
+          $state = & target/release/LanDeskDisplay.exe --status | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $state.installed) { throw 'Unexpected display device status on clean runner' }
+      - name: Package
+        run: python scripts/bundle_windows_display.py --server-exe target/release/LanDeskServer.exe --output target/LanDeskServer-windows-x64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: LanDeskServer-windows-x64
+          path: target/LanDeskServer-windows-x64/
+          if-no-files-found: error
+          retention-days: 30

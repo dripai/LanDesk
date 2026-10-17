@@ -4,15 +4,18 @@ import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 import {createKeyboard} from './keyboard.js';
 
-const source = (await readFile(new URL('./app.js', import.meta.url), 'utf8')).replace(/^import .*;\n/gm, '');
-function fixture(writeText = async () => {}) {
-  const nodes = new Map(), sockets = [], images = [], timers = new Set();
+const source = await readFile(new URL('./app.js', import.meta.url), 'utf8');
+const toolbarSource = (await readFile(new URL('./toolbar.js', import.meta.url), 'utf8')).replace('export function', 'function');
+function fixture(writeText = async () => {}, script = source) {
+  const nodes = new Map(), sockets = [], images = [], timers = new Set(), drawn = [], layoutWidths = [];
+  let frameResets = 0, fileHandlers = null;
+  const fileMessages = [];
   const node = id => {
     if (!nodes.has(id)) {
       const element = new EventTarget();
       Object.assign(element, {value:'',style:{},hidden:false,options:[],
         focus() { this.dispatchEvent(new Event('focus')); }, close() {},
-        replaceChildren() {}, append() {}, getBoundingClientRect:()=>({width:100,height:100}),
+        replaceChildren() {}, append() {}, getBoundingClientRect:()=>({left:0,top:0,width:100,height:100}),
       });
       nodes.set(id,element);
     }
@@ -21,24 +24,30 @@ function fixture(writeText = async () => {}) {
   class Socket {
     static OPEN = 1;
     readyState = 1; sent = [];
-    constructor() { sockets.push(this); }
-    send(value) { this.sent.push(JSON.parse(value)); }
+    constructor(url) { this.url = String(url); sockets.push(this); }
+    send(value) { this.sent.push(typeof value === 'string' ? JSON.parse(value) : value); }
     close() { this.readyState = 3; }
     receive(value) { this.onmessage({data:JSON.stringify(value)}); }
   }
+  node('session').hidden = true;
   const context = vm.createContext({
-    URL, URLSearchParams, Blob, TextEncoder, WebSocket:Socket,
+    URL, URLSearchParams, Blob, TextEncoder, WebSocket:Socket, performance:{now:()=>100},
     location:{href:'http://127.0.0.1:17890/s/test/',hash:''},
     document:{getElementById:node,createElement:()=>({})},
     window:new EventTarget(), navigator:{clipboard:{writeText}},
     ResizeObserver:class { observe() {} }, createKeyboard,
-    createFrames:()=>({draw() {},reset() {}}),
-    createFiles:()=>({handle:()=>false,resize() {},connect() {},reset() {}}),
+    createFrames:()=>({draw(frame) { drawn.push(frame); },reset() { frameResets++; }}),
+    createFiles:(_panel, send, binary, _notify, options)=>{
+      fileHandlers = {send, binary, options};
+      return {handle:message=>fileMessages.push(message),resize() { layoutWidths.push(node('session').hidden ? 0 : 1200); },
+        connect() { node('files-panel').hidden = false; },reset() { node('files-panel').hidden = true; },toggle() { node('files-panel').hidden = !node('files-panel').hidden; }};
+    },
     createImagePaste:()=>({paste:image=>images.push(image),handle:()=>false,reset() {}}),
     setTimeout:fn=>{ timers.add(fn); return fn; },clearTimeout:fn=>timers.delete(fn),
     setInterval:()=>0,clearInterval() {},
   });
-  vm.runInContext(source,context);
+  vm.runInContext(toolbarSource,context);
+  vm.runInContext(script.replace(/^import .*;\r?\n/gm, ''),context);
   function event(id,type,fields={}) {
     const event = new Event(type,{cancelable:true});
     Object.assign(event,{getModifierState:()=>false,...fields});
@@ -46,8 +55,91 @@ function fixture(writeText = async () => {}) {
     return event;
   }
   const copy = () => event('keyboard-input','keydown',{key:'c',code:'KeyC',ctrlKey:true});
-  return {node,sockets,images,event,copy};
+  return {node,sockets,images,event,copy,timers,drawn,layoutWidths,fileHandlers,fileMessages,get frameResets() { return frameResets; }};
 }
+
+test('Windows files use an independent connection and failure preserves video and input', () => {
+  const f = fixture(), desktop = f.sockets[0];
+  desktop.receive({type:'ready',width:1920,height:1080,native_width:1920,native_height:1080,
+    requested_width:null,display_id:1,displays:[],capabilities:{os:'windows',virtual_display:true,files:true}});
+  assert.equal(f.node('files-button').hidden,false);
+  assert.equal(f.sockets.length,2);
+  const files = f.sockets[1];
+  assert.match(files.url,/\/s\/test\/files-ws$/);
+  files.onopen(); assert.deepEqual(files.sent[0],{type:'hello'});
+  files.receive({type:'files_ready'}); assert.equal(f.node('files-panel').hidden,false);
+  f.event('files-button','click'); f.event('files-button','click');
+  assert.equal(f.sockets.length,2); assert.equal(files.readyState,1);
+  f.fileHandlers.send({type:'list_directory',id:1,path:'',cursor:''});
+  const chunk = new Uint8Array([1,2,3]); f.fileHandlers.binary(chunk);
+  assert.equal(files.sent.at(-1),chunk);
+  assert.ok(!desktop.sent.some(value=>value.type==='list_directory'));
+  const releases = desktop.sent.filter(value=>value.type==='release_all').length;
+  f.fileHandlers.options.releaseInput();
+  assert.equal(desktop.sent.filter(value=>value.type==='release_all').length,releases+1);
+  assert.ok(!files.sent.some(value=>value.type==='release_all'));
+  files.onerror();
+  assert.equal(desktop.readyState,1); assert.equal(f.node('session').hidden,false);
+  const frame = new Blob(['jpeg']); desktop.onmessage({data:frame});
+  assert.deepEqual(f.drawn,[frame]); assert.equal(f.frameResets,0);
+  f.event('files-button','click');
+  assert.equal(f.sockets.length,3);
+  const reconnected = f.sockets[2]; reconnected.receive({type:'files_ready'});
+  assert.equal(f.node('files-panel').hidden,false);
+  f.event('disconnect','click');
+  assert.equal(desktop.readyState,3); assert.equal(reconnected.readyState,3);
+});
+
+test('desktop fixture loads source checked out with Windows CRLF line endings', () => {
+  const f = fixture(undefined, source.replace(/\r?\n/g, '\r\n'));
+  assert.equal(f.sockets.length,1);
+  f.sockets[0].onopen();
+  assert.deepEqual(f.sockets[0].sent[0],{type:'hello'});
+});
+
+test('Windows initial connection and reconnect measure visible desktop before centering toolbar', () => {
+  const f = fixture();
+  const ready = {type:'ready',width:1920,height:1080,native_width:1920,native_height:1080,
+    requested_width:null,display_id:1,displays:[],capabilities:{os:'windows',virtual_display:true,files:false}};
+  assert.equal(f.node('session').hidden,true);
+  f.sockets[0].receive(ready);
+  assert.deepEqual(f.layoutWidths,[1200]);
+  f.event('disconnect','click'); f.event('connect-form','submit');
+  f.sockets[1].receive(ready);
+  assert.deepEqual(f.layoutWidths,[1200,1200]);
+});
+
+test('failed input keeps video and commands connected; warning persists until recovery', () => {
+  const f = fixture(), socket = f.sockets[0];
+  socket.receive({type:'ready',width:1920,height:1080,native_width:1920,native_height:1080,
+    requested_width:null,display_id:1,displays:[],capabilities:{os:'windows',virtual_display:true,files:false}});
+  socket.receive({type:'input_state',available:false,message:'键鼠暂不可用：拒绝访问'});
+  assert.equal(socket.readyState,1);
+  assert.equal(f.node('session').hidden,false);
+  assert.equal(f.node('login').hidden,true);
+  assert.equal(f.node('notice').textContent,'键鼠暂不可用：拒绝访问');
+  assert.match(f.node('status').textContent,/键鼠暂不可用/);
+  const releases = () => socket.sent.filter(message => message.type === 'release_all').length;
+  assert.equal(releases(),1);
+  socket.receive({type:'input_state',available:false,message:'键鼠暂不可用：成功 0/3，拒绝访问'});
+  assert.equal(releases(),1);
+  const frame = new Blob(['jpeg']); socket.onmessage({data:frame});
+  assert.deepEqual(f.drawn,[frame]); assert.equal(f.frameResets,0);
+  f.event('screen','pointermove',{clientX:50,clientY:50});
+  assert.deepEqual(socket.sent.at(-1),{type:'pointer',x:0.5,y:0.5});
+  socket.receive({type:'notice',message:'临时提示'});
+  for (const timer of [...f.timers]) timer();
+  assert.equal(f.node('notice').textContent,'键鼠暂不可用：成功 0/3，拒绝访问');
+  assert.equal(f.node('notice').hidden,false);
+  socket.receive({type:'input_state',available:true});
+  assert.equal(f.node('status').textContent,'已连接');
+  for (const timer of [...f.timers]) timer();
+  assert.equal(f.node('notice').hidden,true);
+  socket.receive({type:'input_state',available:false,message:'再次拒绝访问'});
+  assert.equal(releases(),2);
+  socket.receive({type:'error',message:'画面采集停止'});
+  assert.equal(socket.readyState,3); assert.equal(f.node('session').hidden,true);
+});
 
 test('remote Ctrl+C writes returned text locally; Ctrl+V sends text or image to Mac', async () => {
   const written = [], f = fixture(async text=>written.push(text)), socket=f.sockets[0];
@@ -91,4 +183,51 @@ test('denied local clipboard permission reports the error without disconnecting'
   assert.match(f.node('notice').textContent,/permission denied/);
   assert.equal(f.node('clipboard-copy').disabled,false);
   assert.equal(socket.readyState,1);
+});
+
+test('headless reconnect can request a virtual display before receiving any frame', () => {
+  const f=fixture();
+  f.sockets[0].onopen();
+  assert.deepEqual(f.sockets[0].sent[0],{type:'hello'});
+  f.sockets[0].receive({type:'error',message:'没有可采集的显示器'});
+  f.node('connect-display').value='virtual';
+  f.node('connect-virtual-width').value='1920';
+  f.node('connect-virtual-height').value='1080';
+  f.event('connect-display','change');
+  assert.equal(f.node('connect-virtual-size').hidden,false);
+  f.event('connect-form','submit');
+  f.sockets[1].onopen();
+  assert.deepEqual(f.sockets[1].sent[0],{type:'hello',display:{kind:'virtual',width:1920,height:1080}});
+});
+
+test('Windows connects without a second credential; controls respect capabilities', () => {
+  const f = fixture();
+  const socket = f.sockets[0];
+  socket.onopen();
+  assert.deepEqual(socket.sent[0], {type:'hello'});
+  socket.receive({type:'ready', width:1920, height:1080, native_width:1920, native_height:1080,
+    requested_width:null, display_id:1, displays:[], capabilities:{os:'windows', virtual_display:true, files:false}});
+  assert.equal(f.node('secure-attention').hidden, false);
+  assert.equal(f.node('files-button').hidden, true);
+  f.event('secure-attention', 'click');
+  assert.deepEqual(socket.sent.at(-1), {type:'secure_attention'});
+  f.event('disconnect', 'click');
+  f.event('connect-form', 'submit');
+  f.sockets[1].receive({type:'ready', width:1920, height:1080, native_width:1920, native_height:1080,
+    requested_width:null, display_id:1, displays:[], capabilities:{os:'macos', virtual_display:true, files:true}});
+  assert.equal(f.node('secure-attention').hidden, true);
+  assert.equal(f.node('files-button').hidden, false);
+});
+
+test('virtual display failures preserve the current remote session', () => {
+  const f=fixture(), socket=f.sockets[0];
+  f.node('virtual-width').value='2560'; f.node('virtual-height').value='1440';
+  f.event('virtual-apply','click');
+  assert.deepEqual(socket.sent.at(-1),{type:'set_display_source',display:{kind:'virtual',width:2560,height:1440}});
+  socket.receive({type:'resolution_error',message:'系统拒绝创建'});
+  assert.equal(socket.readyState,1);
+  assert.equal(f.node('notice').textContent,'系统拒绝创建');
+  const count=socket.sent.length;
+  f.node('virtual-width').value='0'; f.event('virtual-apply','click');
+  assert.equal(socket.sent.length,count);
 });

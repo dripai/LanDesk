@@ -1,0 +1,20 @@
+//! Windows console desktop service and persistent display component.
+mod bootstrap;
+mod capture;
+mod desktop;
+mod files;
+mod input;
+mod interactive;
+mod management;
+mod password_pipe;
+mod pipe;
+mod privilege;
+mod service;
+mod setup;
+mod setup_dialog;
+mod setup_services;
+mod setup_support;
+mod tray;
+mod ui;
+pub mod virtual_display;
+pub use service::run;

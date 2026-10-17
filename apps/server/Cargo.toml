@@ -1,0 +1,71 @@
+[package]
+name = "landesk"
+default-run = "landesk"
+version = "0.7.1"
+edition = "2024"
+rust-version = "1.92"
+description = "LanDesk remote desktop with SSH transport and browser control"
+license = "MIT"
+
+[dependencies]
+landesk-core = { path = "../../crates/core" }
+landesk-storage = { path = "../../crates/storage" }
+anyhow = "1"
+axum = { version = "=0.8.9", features = ["ws"] }
+futures-util = "0.3"
+getrandom = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "=0.22.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+russh = "=0.64.1"
+zeroize = "1"
+tempfile = "=3.27.0"
+hyper = { version = "=1.12.0", features = ["http1", "client", "server"] }
+hyper-util = { version = "=0.1.21", features = ["tokio", "service"] }
+http-body-util = "=0.1.5"
+sha2 = "=0.10.9"
+quick-xml = "=0.38.4"
+zip = { version = "=2.4.2", default-features = false }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+gpui-kit = "=0.7.1"
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "=0.6.2"
+tray-icon = "=0.21.2"
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_System_Com", "Win32_NetworkManagement_WindowsFirewall", "Win32_UI_Shell", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Graphics_Gdi", "Win32_Devices_Display", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_System_Services", "Win32_System_RemoteDesktop", "Win32_System_JobObjects", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_WinTrust", "Win32_Security_Authentication_Identity", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_Controls", "Win32_System_LibraryLoader", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
+
+[[bin]]
+name = "LanDeskServer"
+path = "src/windows_server_main.rs"
+
+[[bin]]
+name = "LanDeskDisplay"
+path = "src/windows_main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "=0.10.1"
+libc = "=0.2.190"
+enigo = { version = "=0.6.1", default-features = false }
+objc2 = "=0.6.5"
+objc2-app-kit = "=0.3.2"
+objc2-foundation = "=0.3.2"
+screencapturekit = { version = "=11.0.0", features = ["macos_14_2"] }
+
+[dev-dependencies]
+landesk-core = { path = "../../crates/core", features = ["test-support"] }
+tokio-tungstenite = "=0.29.0"
+
+[build-dependencies]
+embed-resource = "=3.0.12"
+
+[[test]]
+name = "native_run_loop"
+harness = false
+
+[[test]]
+name = "virtual_display"
+harness = false
